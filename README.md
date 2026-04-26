@@ -27,6 +27,23 @@ For serial-only BNO085 debugging, use the separate environment:
 
 The debug firmware does not start the `XIAO-CAM` access point or web server. It connects only as a Wi-Fi station using `include/secrets.h`, then accepts serial commands. The most useful IMU command is `direct`, which resets the BNO085, drains the SHTP advertisement packet, enables rotation-vector and accelerometer reports, then streams decoded packets. Other commands include `help`, `pins`, `scan`, `raw`, `dump`, `prod`, `getfeat`, `init`, `softreset`, and `reset`.
 
+For the Zenoh streaming prototype, copy `include/local_zenoh.example.h` to `include/local_zenoh.h`, set the laptop IP in `ZENOH_CONNECT`, then upload:
+
+```sh
+~/.platformio/penv/bin/pio run -e zenoh_stream -t upload --upload-port /dev/cu.usbmodem2101
+zenohd --listen tcp/0.0.0.0:7447
+.venv/bin/python scripts/zenoh_companion.py --duration 60
+```
+
+The Zenoh build runs Wi-Fi station mode only and publishes:
+
+- `flatdisk/xiao/camera/jpeg`: binary `FDV1` header plus JPEG payload, targeted at 10 Hz.
+- `flatdisk/xiao/imu`: binary `FDI1` IMU sample, targeted at 60 Hz.
+- `flatdisk/xiao/status`: JSON counters and device state.
+- `flatdisk/xiao/time_sync`: binary `FDSR` replies to `flatdisk/xiao/cmd/time_sync`.
+
+If the serial monitor shows `AUTH_EXPIRE`, `AUTH_FAIL`, or `HANDSHAKE_TIMEOUT`, the ESP32 is failing before Zenoh. Check the `include/secrets.h` Wi-Fi credentials, bring the board closer to the AP, or use a stronger 2.4 GHz network before evaluating stream rates.
+
 ## Use
 
 By default the firmware starts a Wi-Fi access point:

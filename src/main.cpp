@@ -3,11 +3,20 @@
 #include <WiFi.h>
 #include <Wire.h>
 #include <SparkFun_BNO08x_Arduino_Library.h>
+#include "esp_timer.h"
 #include "esp_camera.h"
 #include "camera_pins.h"
 
 #if __has_include("secrets.h")
 #include "secrets.h"
+#endif
+
+#if __has_include("local_zenoh.h")
+#include "local_zenoh.h"
+#endif
+
+#if defined(ZENOH_STREAM_MODE)
+#include <zenoh-pico.h>
 #endif
 
 #ifndef WIFI_SSID
@@ -16,6 +25,18 @@
 
 #ifndef WIFI_PASSWORD
 #define WIFI_PASSWORD ""
+#endif
+
+#ifndef ZENOH_MODE
+#define ZENOH_MODE "peer"
+#endif
+
+#ifndef ZENOH_CONNECT
+#define ZENOH_CONNECT ""
+#endif
+
+#ifndef ROBOT_NAMESPACE
+#define ROBOT_NAMESPACE "flatdisk/xiao"
 #endif
 
 namespace {
@@ -58,6 +79,13 @@ constexpr uint8_t kShtpWireChunkSize = 32;
 constexpr uint16_t kShtpMaxPacketBytes = 1024;
 constexpr uint32_t kShtpDirectReportIntervalUs = 50000;
 constexpr uint32_t kShtpDumpDurationMs = 3000;
+constexpr uint32_t kZenohVideoPeriodMs = 100;
+constexpr uint32_t kZenohImuPeriodUs = 16667;
+constexpr uint32_t kZenohStatusPeriodMs = 1000;
+constexpr size_t kZenohVideoHeaderBytes = 32;
+constexpr size_t kZenohImuPayloadBytes = 76;
+constexpr size_t kZenohSyncRequestBytes = 16;
+constexpr size_t kZenohSyncReplyBytes = 32;
 
 WebServer server(80);
 BNO08x imu;
@@ -89,6 +117,33 @@ uint16_t lastCameraFrameWidth = 0;
 uint16_t lastCameraFrameHeight = 0;
 String lastCameraError = "not initialized";
 String imuLastError = "not initialized";
+
+#if defined(ZENOH_STREAM_MODE)
+constexpr char kZenohVideoKey[] = ROBOT_NAMESPACE "/camera/jpeg";
+constexpr char kZenohImuKey[] = ROBOT_NAMESPACE "/imu";
+constexpr char kZenohStatusKey[] = ROBOT_NAMESPACE "/status";
+constexpr char kZenohTimeSyncCmdKey[] = ROBOT_NAMESPACE "/cmd/time_sync";
+constexpr char kZenohTimeSyncReplyKey[] = ROBOT_NAMESPACE "/time_sync";
+
+z_owned_session_t zenohSession;
+z_owned_publisher_t zenohVideoPub;
+z_owned_publisher_t zenohImuPub;
+z_owned_publisher_t zenohStatusPub;
+z_owned_publisher_t zenohTimeSyncPub;
+z_owned_subscriber_t zenohTimeSyncSub;
+SemaphoreHandle_t zenohPublishMutex = nullptr;
+bool zenohReady = false;
+uint32_t zenohVideoSeq = 0;
+uint32_t zenohImuSeq = 0;
+uint32_t zenohStatusSeq = 0;
+uint32_t zenohVideoPublished = 0;
+uint32_t zenohImuPublished = 0;
+uint32_t zenohVideoPublishErrors = 0;
+uint32_t zenohImuPublishErrors = 0;
+uint32_t zenohSyncReplies = 0;
+uint32_t zenohLastStatusMs = 0;
+uint32_t zenohLastSerialStatsMs = 0;
+#endif
 
 struct ImuState {
   float qi = 0.0f;
@@ -2517,11 +2572,515 @@ void debugSerialLoop() {
 
   debugPrintImuEvent();
 }
+
+#if defined(ZENOH_STREAM_MODE)
+void writeLe16(uint8_t *dst, uint16_t value) {
+  dst[0] = value & 0xff;
+  dst[1] = (value >> 8) & 0xff;
+}
+
+void writeLe32(uint8_t *dst, uint32_t value) {
+  dst[0] = value & 0xff;
+  dst[1] = (value >> 8) & 0xff;
+  dst[2] = (value >> 16) & 0xff;
+  dst[3] = (value >> 24) & 0xff;
+}
+
+void writeLe64(uint8_t *dst, uint64_t value) {
+  for (uint8_t i = 0; i < 8; ++i) {
+    dst[i] = (value >> (8 * i)) & 0xff;
+  }
+}
+
+uint32_t readLe32(const uint8_t *src) {
+  return static_cast<uint32_t>(src[0]) |
+         (static_cast<uint32_t>(src[1]) << 8) |
+         (static_cast<uint32_t>(src[2]) << 16) |
+         (static_cast<uint32_t>(src[3]) << 24);
+}
+
+uint64_t readLe64(const uint8_t *src) {
+  uint64_t value = 0;
+  for (uint8_t i = 0; i < 8; ++i) {
+    value |= static_cast<uint64_t>(src[i]) << (8 * i);
+  }
+  return value;
+}
+
+void writeLeFloat(uint8_t *dst, float value) {
+  static_assert(sizeof(float) == 4, "float must be 32-bit");
+  uint32_t bits = 0;
+  memcpy(&bits, &value, sizeof(bits));
+  writeLe32(dst, bits);
+}
+
+bool publishZenohBytes(z_owned_publisher_t *publisher, const uint8_t *data, size_t len) {
+  if (!zenohReady || zenohPublishMutex == nullptr) {
+    return false;
+  }
+
+  z_owned_bytes_t payload;
+  if (z_bytes_copy_from_buf(&payload, data, len) < 0) {
+    return false;
+  }
+
+  if (xSemaphoreTake(zenohPublishMutex, pdMS_TO_TICKS(250)) != pdTRUE) {
+    z_bytes_drop(z_bytes_move(&payload));
+    return false;
+  }
+
+  const bool ok = z_publisher_put(z_publisher_loan(publisher), z_bytes_move(&payload), NULL) >= 0;
+  xSemaphoreGive(zenohPublishMutex);
+  return ok;
+}
+
+bool declareZenohPublisher(const char *key, z_owned_publisher_t *publisher, z_priority_t priority) {
+  z_view_keyexpr_t keyexpr;
+  z_view_keyexpr_from_str_unchecked(&keyexpr, key);
+
+  z_publisher_options_t options;
+  z_publisher_options_default(&options);
+  options.congestion_control = Z_CONGESTION_CONTROL_DROP;
+  options.priority = priority;
+  options.is_express = true;
+
+  Serial.print("Declaring Zenoh publisher: ");
+  Serial.println(key);
+  return z_declare_publisher(z_session_loan(&zenohSession),
+                             publisher,
+                             z_view_keyexpr_loan(&keyexpr),
+                             &options) >= 0;
+}
+
+void publishZenohStatus() {
+  char payload[512];
+  const uint32_t nowMs = millis();
+  const int written = snprintf(payload,
+                               sizeof(payload),
+                               "{\"seq\":%lu,\"esp_ms\":%lu,\"wifi_ip\":\"%s\","
+                               "\"rssi\":%d,\"camera_ready\":%s,\"imu_ready\":%s,"
+                               "\"video_published\":%lu,\"imu_published\":%lu,"
+                               "\"video_errors\":%lu,\"imu_errors\":%lu,"
+                               "\"sync_replies\":%lu}",
+                               static_cast<unsigned long>(zenohStatusSeq++),
+                               static_cast<unsigned long>(nowMs),
+                               WiFi.localIP().toString().c_str(),
+                               WiFi.RSSI(),
+                               cameraReady ? "true" : "false",
+                               imuReady ? "true" : "false",
+                               static_cast<unsigned long>(zenohVideoPublished),
+                               static_cast<unsigned long>(zenohImuPublished),
+                               static_cast<unsigned long>(zenohVideoPublishErrors),
+                               static_cast<unsigned long>(zenohImuPublishErrors),
+                               static_cast<unsigned long>(zenohSyncReplies));
+  if (written <= 0) {
+    return;
+  }
+
+  publishZenohBytes(&zenohStatusPub,
+                    reinterpret_cast<const uint8_t *>(payload),
+                    min(static_cast<size_t>(written), sizeof(payload) - 1));
+}
+
+void publishZenohImuSample(uint64_t timestampUs) {
+  uint8_t payload[kZenohImuPayloadBytes] = {};
+  memcpy(payload, "FDI1", 4);
+  payload[4] = 1;
+  payload[5] = imuState.quatAccuracy;
+  payload[6] = imuState.accelAccuracy;
+  payload[7] = imuReportsEnabled ? 1 : 0;
+  writeLe32(payload + 8, zenohImuSeq++);
+  writeLe64(payload + 12, timestampUs);
+  writeLeFloat(payload + 20, imuState.qi);
+  writeLeFloat(payload + 24, imuState.qj);
+  writeLeFloat(payload + 28, imuState.qk);
+  writeLeFloat(payload + 32, imuState.qr);
+  writeLeFloat(payload + 36, imuState.quatRadAccuracy);
+  writeLeFloat(payload + 40, imuState.accelX);
+  writeLeFloat(payload + 44, imuState.accelY);
+  writeLeFloat(payload + 48, imuState.accelZ);
+  writeLeFloat(payload + 52, imuState.gyroX);
+  writeLeFloat(payload + 56, imuState.gyroY);
+  writeLeFloat(payload + 60, imuState.gyroZ);
+  writeLeFloat(payload + 64, imuState.linearAccelX);
+  writeLeFloat(payload + 68, imuState.linearAccelY);
+  writeLeFloat(payload + 72, imuState.linearAccelZ);
+
+  if (publishZenohBytes(&zenohImuPub, payload, sizeof(payload))) {
+    ++zenohImuPublished;
+  } else {
+    ++zenohImuPublishErrors;
+  }
+}
+
+void publishZenohCameraFrame() {
+  if (!cameraReady) {
+    ++zenohVideoPublishErrors;
+    return;
+  }
+
+  const uint64_t timestampUs = static_cast<uint64_t>(esp_timer_get_time());
+  camera_fb_t *fb = esp_camera_fb_get();
+  if (fb == nullptr) {
+    updateCameraFrameFail("Zenoh camera capture failed");
+    ++zenohVideoPublishErrors;
+    return;
+  }
+
+  updateCameraFrameOk(fb);
+  const size_t totalLen = kZenohVideoHeaderBytes + fb->len;
+  uint8_t *payload = static_cast<uint8_t *>(malloc(totalLen));
+  if (payload == nullptr) {
+    esp_camera_fb_return(fb);
+    ++zenohVideoPublishErrors;
+    return;
+  }
+
+  memset(payload, 0, kZenohVideoHeaderBytes);
+  memcpy(payload, "FDV1", 4);
+  payload[4] = 1;
+  payload[5] = static_cast<uint8_t>(fb->format);
+  writeLe16(payload + 6, fb->width);
+  writeLe16(payload + 8, fb->height);
+  writeLe16(payload + 10, kZenohVideoHeaderBytes);
+  writeLe32(payload + 12, zenohVideoSeq++);
+  writeLe64(payload + 16, timestampUs);
+  writeLe32(payload + 24, fb->len);
+  memcpy(payload + kZenohVideoHeaderBytes, fb->buf, fb->len);
+
+  const bool ok = publishZenohBytes(&zenohVideoPub, payload, totalLen);
+  free(payload);
+  esp_camera_fb_return(fb);
+
+  if (ok) {
+    ++zenohVideoPublished;
+  } else {
+    ++zenohVideoPublishErrors;
+  }
+}
+
+void zenohTimeSyncHandler(z_loaned_sample_t *sample, void *arg) {
+  (void)arg;
+  const uint64_t espRxUs = static_cast<uint64_t>(esp_timer_get_time());
+  uint8_t request[kZenohSyncRequestBytes] = {};
+  z_bytes_reader_t reader = z_bytes_get_reader(z_sample_payload(sample));
+  if (z_bytes_reader_read(&reader, request, sizeof(request)) != sizeof(request)) {
+    return;
+  }
+  if (memcmp(request, "FDSQ", 4) != 0) {
+    return;
+  }
+
+  uint8_t reply[kZenohSyncReplyBytes] = {};
+  memcpy(reply, "FDSR", 4);
+  memcpy(reply + 4, request + 4, 4);
+  memcpy(reply + 8, request + 8, 8);
+  writeLe64(reply + 16, espRxUs);
+  writeLe64(reply + 24, static_cast<uint64_t>(esp_timer_get_time()));
+
+  if (publishZenohBytes(&zenohTimeSyncPub, reply, sizeof(reply))) {
+    ++zenohSyncReplies;
+  }
+}
+
+const char *wifiStatusName(wl_status_t status) {
+  switch (status) {
+    case WL_IDLE_STATUS:
+      return "IDLE";
+    case WL_NO_SSID_AVAIL:
+      return "NO_SSID_AVAIL";
+    case WL_SCAN_COMPLETED:
+      return "SCAN_COMPLETED";
+    case WL_CONNECTED:
+      return "CONNECTED";
+    case WL_CONNECT_FAILED:
+      return "CONNECT_FAILED";
+    case WL_CONNECTION_LOST:
+      return "CONNECTION_LOST";
+    case WL_DISCONNECTED:
+      return "DISCONNECTED";
+    default:
+      return "UNKNOWN";
+  }
+}
+
+const char *wifiAuthModeName(wifi_auth_mode_t authMode) {
+  switch (authMode) {
+    case WIFI_AUTH_OPEN:
+      return "open";
+    case WIFI_AUTH_WEP:
+      return "wep";
+    case WIFI_AUTH_WPA_PSK:
+      return "wpa";
+    case WIFI_AUTH_WPA2_PSK:
+      return "wpa2";
+    case WIFI_AUTH_WPA_WPA2_PSK:
+      return "wpa/wpa2";
+    case WIFI_AUTH_WPA2_ENTERPRISE:
+      return "wpa2-enterprise";
+    case WIFI_AUTH_WPA3_PSK:
+      return "wpa3";
+    case WIFI_AUTH_WPA2_WPA3_PSK:
+      return "wpa2/wpa3";
+    default:
+      return "unknown";
+  }
+}
+
+struct WifiTargetScanResult {
+  bool found = false;
+  int matches = 0;
+  int rssi = -1000;
+  int channel = 0;
+  wifi_auth_mode_t auth = WIFI_AUTH_OPEN;
+  uint8_t bssid[6] = {};
+};
+
+WifiTargetScanResult logConfiguredWifiNetworkScan() {
+  WifiTargetScanResult target;
+  Serial.println("Scanning for configured STA Wi-Fi SSID...");
+  const int count = WiFi.scanNetworks(false, true);
+  if (count < 0) {
+    Serial.printf("Wi-Fi scan failed: %d\n", count);
+    WiFi.scanDelete();
+    return target;
+  }
+
+  for (int i = 0; i < count; ++i) {
+    if (WiFi.SSID(i) != WIFI_SSID) {
+      continue;
+    }
+    ++target.matches;
+    if (!target.found || WiFi.RSSI(i) > target.rssi) {
+      target.found = true;
+      target.rssi = WiFi.RSSI(i);
+      target.channel = WiFi.channel(i);
+      target.auth = static_cast<wifi_auth_mode_t>(WiFi.encryptionType(i));
+      const uint8_t *bssid = WiFi.BSSID(i);
+      if (bssid != nullptr) {
+        memcpy(target.bssid, bssid, sizeof(target.bssid));
+      }
+    }
+  }
+
+  if (!target.found) {
+    Serial.printf("Configured SSID not found in scan (%d networks visible).\n", count);
+  } else {
+    Serial.printf("Configured SSID found: matches=%d best_rssi=%d dBm channel=%d auth=%s\n",
+                  target.matches,
+                  target.rssi,
+                  target.channel,
+                  wifiAuthModeName(target.auth));
+  }
+
+  WiFi.scanDelete();
+  return target;
+}
+
+bool connectZenohWifi() {
+  if (strlen(WIFI_SSID) == 0) {
+    Serial.println("No WIFI_SSID configured; Zenoh stream mode requires station Wi-Fi.");
+    return false;
+  }
+
+  WiFi.persistent(false);
+  WiFi.disconnect(true, true);
+  delay(100);
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.setAutoReconnect(true);
+  static uint32_t attempt = 0;
+  WifiTargetScanResult target;
+
+  while (WiFi.status() != WL_CONNECTED) {
+    ++attempt;
+    if (attempt == 1 || attempt % 3 == 0 || !target.found) {
+      target = logConfiguredWifiNetworkScan();
+    }
+
+    Serial.printf("Connecting STA Wi-Fi to %s", WIFI_SSID);
+    if (target.found) {
+      WiFi.begin(WIFI_SSID, WIFI_PASSWORD, target.channel, target.bssid, true);
+    } else {
+      WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    }
+    const uint32_t startMs = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - startMs < kWifiConnectTimeoutMs) {
+      Serial.print(".");
+      delay(500);
+    }
+    Serial.println();
+
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.print("STA IP: ");
+      Serial.println(WiFi.localIP());
+      return true;
+    }
+
+    Serial.printf("STA Wi-Fi timed out; status=%s (%d); retrying.\n",
+                  wifiStatusName(WiFi.status()),
+                  static_cast<int>(WiFi.status()));
+    WiFi.disconnect(false);
+    delay(1000);
+  }
+
+  return true;
+}
+
+bool startZenohSession() {
+  z_owned_config_t config;
+  z_config_default(&config);
+  zp_config_insert(z_config_loan_mut(&config), Z_CONFIG_MODE_KEY, ZENOH_MODE);
+  if (strlen(ZENOH_CONNECT) > 0) {
+    zp_config_insert(z_config_loan_mut(&config), Z_CONFIG_CONNECT_KEY, ZENOH_CONNECT);
+  }
+
+  Serial.print("Opening Zenoh session mode=");
+  Serial.print(ZENOH_MODE);
+  Serial.print(" connect=");
+  Serial.println(strlen(ZENOH_CONNECT) > 0 ? ZENOH_CONNECT : "(scout/default)");
+
+  if (z_open(&zenohSession, z_config_move(&config), NULL) < 0) {
+    Serial.println("Unable to open Zenoh session.");
+    return false;
+  }
+
+  if (!declareZenohPublisher(kZenohVideoKey, &zenohVideoPub, Z_PRIORITY_DATA_HIGH) ||
+      !declareZenohPublisher(kZenohImuKey, &zenohImuPub, Z_PRIORITY_REAL_TIME) ||
+      !declareZenohPublisher(kZenohStatusKey, &zenohStatusPub, Z_PRIORITY_INTERACTIVE_LOW) ||
+      !declareZenohPublisher(kZenohTimeSyncReplyKey, &zenohTimeSyncPub, Z_PRIORITY_INTERACTIVE_HIGH)) {
+    Serial.println("Unable to declare one or more Zenoh publishers.");
+    return false;
+  }
+
+  z_owned_closure_sample_t callback;
+  z_closure_sample(&callback, zenohTimeSyncHandler, NULL, NULL);
+  z_view_keyexpr_t syncKey;
+  z_view_keyexpr_from_str_unchecked(&syncKey, kZenohTimeSyncCmdKey);
+  if (z_declare_subscriber(z_session_loan(&zenohSession),
+                           &zenohTimeSyncSub,
+                           z_view_keyexpr_loan(&syncKey),
+                           z_closure_sample_move(&callback),
+                           NULL) < 0) {
+    Serial.println("Unable to declare Zenoh time-sync subscriber.");
+    return false;
+  }
+
+  zenohReady = true;
+  Serial.println("Zenoh stream session ready.");
+  return true;
+}
+
+void zenohImuTask(void *arg) {
+  (void)arg;
+  uint64_t nextPublishUs = static_cast<uint64_t>(esp_timer_get_time());
+
+  for (;;) {
+    updateImu();
+    const uint64_t nowUs = static_cast<uint64_t>(esp_timer_get_time());
+    if (imuReady && nowUs >= nextPublishUs) {
+      publishZenohImuSample(nowUs);
+      nextPublishUs += kZenohImuPeriodUs;
+      if (nowUs > nextPublishUs + kZenohImuPeriodUs) {
+        nextPublishUs = nowUs + kZenohImuPeriodUs;
+      }
+    }
+    vTaskDelay(pdMS_TO_TICKS(1));
+  }
+}
+
+void zenohCameraTask(void *arg) {
+  (void)arg;
+  TickType_t lastWake = xTaskGetTickCount();
+  const TickType_t periodTicks = pdMS_TO_TICKS(kZenohVideoPeriodMs);
+
+  for (;;) {
+    publishZenohCameraFrame();
+    vTaskDelayUntil(&lastWake, periodTicks);
+  }
+}
+
+void zenohStreamSetup() {
+  Serial.begin(115200);
+  delay(1000);
+  Serial.println();
+  Serial.println("Booting XIAO ESP32S3 Zenoh stream firmware");
+  Serial.printf("Robot namespace: %s\n", ROBOT_NAMESPACE);
+  Serial.printf("Targets: video %lu Hz, IMU %lu Hz\n",
+                static_cast<unsigned long>(1000 / kZenohVideoPeriodMs),
+                static_cast<unsigned long>(1000000 / kZenohImuPeriodUs));
+
+  initMotorOutputs();
+  cameraReady = initCamera();
+  if (!cameraReady) {
+    Serial.println("Camera setup failed; Zenoh status will report camera_ready=false.");
+  }
+
+  imuAutoInitAttempted = true;
+  imuReady = initImu();
+  if (!imuReady) {
+    Serial.println("IMU setup failed; Zenoh status will report imu_ready=false.");
+  }
+
+  connectZenohWifi();
+  zenohPublishMutex = xSemaphoreCreateMutex();
+  while (!startZenohSession()) {
+    delay(1000);
+  }
+
+  const BaseType_t imuTaskOk = xTaskCreatePinnedToCore(zenohImuTask, "zenoh_imu", 8192, nullptr, 3, nullptr, 1);
+  const BaseType_t cameraTaskOk = xTaskCreatePinnedToCore(zenohCameraTask, "zenoh_cam", 8192, nullptr, 2, nullptr, 0);
+  Serial.printf("Zenoh tasks: imu=%s camera=%s\n",
+                imuTaskOk == pdPASS ? "ok" : "failed",
+                cameraTaskOk == pdPASS ? "ok" : "failed");
+}
+
+void zenohStreamLoop() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("STA Wi-Fi disconnected; restarting station connection.");
+    WiFi.disconnect(false);
+    connectZenohWifi();
+  }
+
+  if (millis() - zenohLastStatusMs >= kZenohStatusPeriodMs) {
+    zenohLastStatusMs = millis();
+    publishZenohStatus();
+  }
+
+  if (millis() - zenohLastSerialStatsMs >= kZenohStatusPeriodMs) {
+    static uint32_t lastVideoPublished = 0;
+    static uint32_t lastImuPublished = 0;
+    const uint32_t videoDelta = zenohVideoPublished - lastVideoPublished;
+    const uint32_t imuDelta = zenohImuPublished - lastImuPublished;
+    lastVideoPublished = zenohVideoPublished;
+    lastImuPublished = zenohImuPublished;
+    zenohLastSerialStatsMs = millis();
+    Serial.printf("zenoh stats ip=%s rssi=%d video=%lu(+%lu) imu=%lu(+%lu) "
+                  "verr=%lu ierr=%lu frames=%lu/%lu last_jpeg=%lu heap=%lu\n",
+                  WiFi.localIP().toString().c_str(),
+                  WiFi.RSSI(),
+                  static_cast<unsigned long>(zenohVideoPublished),
+                  static_cast<unsigned long>(videoDelta),
+                  static_cast<unsigned long>(zenohImuPublished),
+                  static_cast<unsigned long>(imuDelta),
+                  static_cast<unsigned long>(zenohVideoPublishErrors),
+                  static_cast<unsigned long>(zenohImuPublishErrors),
+                  static_cast<unsigned long>(cameraFrameOkCount),
+                  static_cast<unsigned long>(cameraFrameFailCount),
+                  static_cast<unsigned long>(lastCameraFrameBytes),
+                  static_cast<unsigned long>(ESP.getFreeHeap()));
+  }
+
+  delay(10);
+}
+#endif
 }  // namespace
 
 void setup() {
 #if defined(IMU_SERIAL_DEBUG_MODE)
   debugSerialSetup();
+#elif defined(ZENOH_STREAM_MODE)
+  zenohStreamSetup();
 #else
   Serial.begin(115200);
   delay(1000);
@@ -2545,6 +3104,8 @@ void setup() {
 void loop() {
 #if defined(IMU_SERIAL_DEBUG_MODE)
   debugSerialLoop();
+#elif defined(ZENOH_STREAM_MODE)
+  zenohStreamLoop();
 #else
   server.handleClient();
   updateWifi();
