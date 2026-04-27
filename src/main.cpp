@@ -96,6 +96,8 @@ uint8_t shtpInputNormalChannel = kShtpDefaultInputNormalChannel;
 uint8_t shtpInputWakeChannel = kShtpDefaultInputWakeChannel;
 int motor1Percent = 0;
 int motor2Percent = 0;
+uint16_t motor1PulseUs = kEscNeutralPulseUs;
+uint16_t motor2PulseUs = kEscNeutralPulseUs;
 uint32_t lastMotorCommandMs = 0;
 uint32_t lastWifiConnectAttemptMs = 0;
 bool imuReady = false;
@@ -124,6 +126,9 @@ constexpr char kZenohImuKey[] = ROBOT_NAMESPACE "/imu";
 constexpr char kZenohStatusKey[] = ROBOT_NAMESPACE "/status";
 constexpr char kZenohTimeSyncCmdKey[] = ROBOT_NAMESPACE "/cmd/time_sync";
 constexpr char kZenohTimeSyncReplyKey[] = ROBOT_NAMESPACE "/time_sync";
+constexpr char kZenohMotorPercentCmdKey[] = ROBOT_NAMESPACE "/cmd/motors/percent";
+constexpr char kZenohMotorPwmCmdKey[] = ROBOT_NAMESPACE "/cmd/motors/us";
+constexpr char kZenohMotorStopCmdKey[] = ROBOT_NAMESPACE "/cmd/motors/stop";
 
 z_owned_session_t zenohSession;
 z_owned_publisher_t zenohVideoPub;
@@ -131,6 +136,9 @@ z_owned_publisher_t zenohImuPub;
 z_owned_publisher_t zenohStatusPub;
 z_owned_publisher_t zenohTimeSyncPub;
 z_owned_subscriber_t zenohTimeSyncSub;
+z_owned_subscriber_t zenohMotorPercentSub;
+z_owned_subscriber_t zenohMotorPwmSub;
+z_owned_subscriber_t zenohMotorStopSub;
 SemaphoreHandle_t zenohPublishMutex = nullptr;
 bool zenohReady = false;
 uint32_t zenohVideoSeq = 0;
@@ -141,6 +149,8 @@ uint32_t zenohImuPublished = 0;
 uint32_t zenohVideoPublishErrors = 0;
 uint32_t zenohImuPublishErrors = 0;
 uint32_t zenohSyncReplies = 0;
+uint32_t zenohMotorCommands = 0;
+uint32_t zenohMotorCommandErrors = 0;
 uint32_t zenohLastStatusMs = 0;
 uint32_t zenohLastSerialStatsMs = 0;
 #endif
@@ -361,15 +371,35 @@ uint16_t motorPercentToPulseUs(int percent) {
   return kEscNeutralPulseUs + ((kEscNeutralPulseUs - kEscMinPulseUs) * percent) / 100;
 }
 
+int pulseUsToMotorPercent(uint16_t pulseUs) {
+  pulseUs = constrain(pulseUs, kEscMinPulseUs, kEscMaxPulseUs);
+  if (pulseUs >= kEscNeutralPulseUs) {
+    return ((pulseUs - kEscNeutralPulseUs) * 100) / (kEscMaxPulseUs - kEscNeutralPulseUs);
+  }
+  return -static_cast<int>(((kEscNeutralPulseUs - pulseUs) * 100) / (kEscNeutralPulseUs - kEscMinPulseUs));
+}
+
 void writeEscPulse(uint8_t channel, uint16_t pulseUs) {
   ledcWrite(channel, pulseUsToDuty(pulseUs));
+}
+
+void setMotorPulsesUs(uint16_t motor1Us, uint16_t motor2Us) {
+  motor1PulseUs = constrain(motor1Us, kEscMinPulseUs, kEscMaxPulseUs);
+  motor2PulseUs = constrain(motor2Us, kEscMinPulseUs, kEscMaxPulseUs);
+  motor1Percent = pulseUsToMotorPercent(motor1PulseUs);
+  motor2Percent = pulseUsToMotorPercent(motor2PulseUs);
+  writeEscPulse(kMotor1PwmChannel, motor1PulseUs);
+  writeEscPulse(kMotor2PwmChannel, motor2PulseUs);
+  lastMotorCommandMs = millis();
 }
 
 void setMotors(int motor1, int motor2) {
   motor1Percent = constrain(motor1, -100, 100);
   motor2Percent = constrain(motor2, -100, 100);
-  writeEscPulse(kMotor1PwmChannel, motorPercentToPulseUs(motor1Percent));
-  writeEscPulse(kMotor2PwmChannel, motorPercentToPulseUs(motor2Percent));
+  motor1PulseUs = motorPercentToPulseUs(motor1Percent);
+  motor2PulseUs = motorPercentToPulseUs(motor2Percent);
+  writeEscPulse(kMotor1PwmChannel, motor1PulseUs);
+  writeEscPulse(kMotor2PwmChannel, motor2PulseUs);
   lastMotorCommandMs = millis();
 }
 
@@ -390,7 +420,7 @@ void initMotorOutputs() {
 }
 
 void updateMotorFailsafe() {
-  if ((motor1Percent != 0 || motor2Percent != 0) &&
+  if ((motor1PulseUs != kEscNeutralPulseUs || motor2PulseUs != kEscNeutralPulseUs) &&
       millis() - lastMotorCommandMs > kEscCommandTimeoutMs) {
     stopMotors();
     Serial.println("Motor command timed out; outputs returned to neutral.");
@@ -661,8 +691,8 @@ void handleMotors() {
   setMotors(motor1, motor2);
 
   const String response = String("{\"m1\":") + motor1Percent + ",\"m2\":" + motor2Percent +
-                          ",\"m1_us\":" + motorPercentToPulseUs(motor1Percent) +
-                          ",\"m2_us\":" + motorPercentToPulseUs(motor2Percent) + "}";
+                          ",\"m1_us\":" + motor1PulseUs +
+                          ",\"m2_us\":" + motor2PulseUs + "}";
   server.send(200, "application/json", response);
 }
 
@@ -2652,6 +2682,23 @@ bool declareZenohPublisher(const char *key, z_owned_publisher_t *publisher, z_pr
                              &options) >= 0;
 }
 
+bool declareZenohSubscriber(const char *key,
+                            z_owned_subscriber_t *subscriber,
+                            z_closure_sample_callback_t handler) {
+  z_owned_closure_sample_t callback;
+  z_closure_sample(&callback, handler, NULL, NULL);
+  z_view_keyexpr_t keyexpr;
+  z_view_keyexpr_from_str_unchecked(&keyexpr, key);
+
+  Serial.print("Declaring Zenoh subscriber: ");
+  Serial.println(key);
+  return z_declare_subscriber(z_session_loan(&zenohSession),
+                              subscriber,
+                              z_view_keyexpr_loan(&keyexpr),
+                              z_closure_sample_move(&callback),
+                              NULL) >= 0;
+}
+
 void publishZenohStatus() {
   char payload[512];
   const uint32_t nowMs = millis();
@@ -2659,20 +2706,29 @@ void publishZenohStatus() {
                                sizeof(payload),
                                "{\"seq\":%lu,\"esp_ms\":%lu,\"wifi_ip\":\"%s\","
                                "\"rssi\":%d,\"camera_ready\":%s,\"imu_ready\":%s,"
+                               "\"motor1_percent\":%d,\"motor2_percent\":%d,"
+                               "\"motor1_us\":%u,\"motor2_us\":%u,"
                                "\"video_published\":%lu,\"imu_published\":%lu,"
                                "\"video_errors\":%lu,\"imu_errors\":%lu,"
-                               "\"sync_replies\":%lu}",
+                               "\"sync_replies\":%lu,\"motor_commands\":%lu,"
+                               "\"motor_command_errors\":%lu}",
                                static_cast<unsigned long>(zenohStatusSeq++),
                                static_cast<unsigned long>(nowMs),
                                WiFi.localIP().toString().c_str(),
                                WiFi.RSSI(),
                                cameraReady ? "true" : "false",
                                imuReady ? "true" : "false",
+                               motor1Percent,
+                               motor2Percent,
+                               motor1PulseUs,
+                               motor2PulseUs,
                                static_cast<unsigned long>(zenohVideoPublished),
                                static_cast<unsigned long>(zenohImuPublished),
                                static_cast<unsigned long>(zenohVideoPublishErrors),
                                static_cast<unsigned long>(zenohImuPublishErrors),
-                               static_cast<unsigned long>(zenohSyncReplies));
+                               static_cast<unsigned long>(zenohSyncReplies),
+                               static_cast<unsigned long>(zenohMotorCommands),
+                               static_cast<unsigned long>(zenohMotorCommandErrors));
   if (written <= 0) {
     return;
   }
@@ -2781,6 +2837,113 @@ void zenohTimeSyncHandler(z_loaned_sample_t *sample, void *arg) {
   if (publishZenohBytes(&zenohTimeSyncPub, reply, sizeof(reply))) {
     ++zenohSyncReplies;
   }
+}
+
+size_t readZenohSamplePayload(z_loaned_sample_t *sample, uint8_t *buffer, size_t capacity) {
+  if (capacity == 0) {
+    return 0;
+  }
+  z_bytes_reader_t reader = z_bytes_get_reader(z_sample_payload(sample));
+  return z_bytes_reader_read(&reader, buffer, capacity);
+}
+
+const char *skipSpace(const char *text) {
+  while (*text == ' ' || *text == '\t' || *text == '\r' || *text == '\n') {
+    ++text;
+  }
+  return text;
+}
+
+bool parseJsonIntField(const char *payload, const char *key, int *value) {
+  const char *field = strstr(payload, key);
+  if (field == nullptr) {
+    return false;
+  }
+  const char *colon = strchr(field, ':');
+  if (colon == nullptr) {
+    return false;
+  }
+  char *end = nullptr;
+  const long parsed = strtol(colon + 1, &end, 10);
+  if (end == colon + 1) {
+    return false;
+  }
+  *value = static_cast<int>(parsed);
+  return true;
+}
+
+bool parseNextInt(const char **cursor, int *value) {
+  const char *p = *cursor;
+  while (*p != '\0' && *p != '-' && *p != '+' && (*p < '0' || *p > '9')) {
+    ++p;
+  }
+  if (*p == '\0') {
+    return false;
+  }
+
+  char *end = nullptr;
+  const long parsed = strtol(p, &end, 10);
+  if (end == p) {
+    return false;
+  }
+  *value = static_cast<int>(parsed);
+  *cursor = end;
+  return true;
+}
+
+bool parseMotorCommandPayload(z_loaned_sample_t *sample,
+                              const char *key1,
+                              const char *key2,
+                              int *value1,
+                              int *value2) {
+  uint8_t raw[96] = {};
+  const size_t len = readZenohSamplePayload(sample, raw, sizeof(raw) - 1);
+  char *payload = reinterpret_cast<char *>(raw);
+  payload[len] = '\0';
+
+  const char *trimmed = skipSpace(payload);
+  if (*trimmed == '{') {
+    return parseJsonIntField(trimmed, key1, value1) &&
+           parseJsonIntField(trimmed, key2, value2);
+  }
+
+  const char *cursor = trimmed;
+  return parseNextInt(&cursor, value1) && parseNextInt(&cursor, value2);
+}
+
+void zenohMotorPercentHandler(z_loaned_sample_t *sample, void *arg) {
+  (void)arg;
+  int motor1 = 0;
+  int motor2 = 0;
+  if (!parseMotorCommandPayload(sample, "\"m1\"", "\"m2\"", &motor1, &motor2)) {
+    ++zenohMotorCommandErrors;
+    Serial.println("Invalid Zenoh motor percent command.");
+    return;
+  }
+
+  setMotors(motor1, motor2);
+  ++zenohMotorCommands;
+}
+
+void zenohMotorPwmHandler(z_loaned_sample_t *sample, void *arg) {
+  (void)arg;
+  int motor1Us = kEscNeutralPulseUs;
+  int motor2Us = kEscNeutralPulseUs;
+  if (!parseMotorCommandPayload(sample, "\"m1_us\"", "\"m2_us\"", &motor1Us, &motor2Us)) {
+    ++zenohMotorCommandErrors;
+    Serial.println("Invalid Zenoh motor pulse-width command.");
+    return;
+  }
+
+  setMotorPulsesUs(static_cast<uint16_t>(motor1Us), static_cast<uint16_t>(motor2Us));
+  ++zenohMotorCommands;
+}
+
+void zenohMotorStopHandler(z_loaned_sample_t *sample, void *arg) {
+  (void)sample;
+  (void)arg;
+  stopMotors();
+  ++zenohMotorCommands;
 }
 
 const char *wifiStatusName(wl_status_t status) {
@@ -2953,16 +3116,11 @@ bool startZenohSession() {
     return false;
   }
 
-  z_owned_closure_sample_t callback;
-  z_closure_sample(&callback, zenohTimeSyncHandler, NULL, NULL);
-  z_view_keyexpr_t syncKey;
-  z_view_keyexpr_from_str_unchecked(&syncKey, kZenohTimeSyncCmdKey);
-  if (z_declare_subscriber(z_session_loan(&zenohSession),
-                           &zenohTimeSyncSub,
-                           z_view_keyexpr_loan(&syncKey),
-                           z_closure_sample_move(&callback),
-                           NULL) < 0) {
-    Serial.println("Unable to declare Zenoh time-sync subscriber.");
+  if (!declareZenohSubscriber(kZenohTimeSyncCmdKey, &zenohTimeSyncSub, zenohTimeSyncHandler) ||
+      !declareZenohSubscriber(kZenohMotorPercentCmdKey, &zenohMotorPercentSub, zenohMotorPercentHandler) ||
+      !declareZenohSubscriber(kZenohMotorPwmCmdKey, &zenohMotorPwmSub, zenohMotorPwmHandler) ||
+      !declareZenohSubscriber(kZenohMotorStopCmdKey, &zenohMotorStopSub, zenohMotorStopHandler)) {
+    Serial.println("Unable to declare one or more Zenoh subscribers.");
     return false;
   }
 
@@ -3056,6 +3214,7 @@ void zenohStreamLoop() {
     lastImuPublished = zenohImuPublished;
     zenohLastSerialStatsMs = millis();
     Serial.printf("zenoh stats ip=%s rssi=%d video=%lu(+%lu) imu=%lu(+%lu) "
+                  "motors=%d/%d %u/%u cmd=%lu cmderr=%lu "
                   "verr=%lu ierr=%lu frames=%lu/%lu last_jpeg=%lu heap=%lu\n",
                   WiFi.localIP().toString().c_str(),
                   WiFi.RSSI(),
@@ -3063,6 +3222,12 @@ void zenohStreamLoop() {
                   static_cast<unsigned long>(videoDelta),
                   static_cast<unsigned long>(zenohImuPublished),
                   static_cast<unsigned long>(imuDelta),
+                  motor1Percent,
+                  motor2Percent,
+                  motor1PulseUs,
+                  motor2PulseUs,
+                  static_cast<unsigned long>(zenohMotorCommands),
+                  static_cast<unsigned long>(zenohMotorCommandErrors),
                   static_cast<unsigned long>(zenohVideoPublishErrors),
                   static_cast<unsigned long>(zenohImuPublishErrors),
                   static_cast<unsigned long>(cameraFrameOkCount),

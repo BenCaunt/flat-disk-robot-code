@@ -35,12 +35,37 @@ zenohd --listen tcp/0.0.0.0:7447
 .venv/bin/python scripts/zenoh_companion.py --duration 60
 ```
 
+To visualize the stream in Rerun:
+
+```sh
+.venv/bin/python scripts/zenoh_companion.py --rerun
+```
+
+To record without opening the viewer:
+
+```sh
+.venv/bin/python scripts/zenoh_companion.py --duration 60 --rerun-save captures/session.rrd
+```
+
 The Zenoh build runs Wi-Fi station mode only and publishes:
 
 - `flatdisk/xiao/camera/jpeg`: binary `FDV1` header plus JPEG payload, targeted at 10 Hz.
 - `flatdisk/xiao/imu`: binary `FDI1` IMU sample, targeted at 60 Hz.
 - `flatdisk/xiao/status`: JSON counters and device state.
 - `flatdisk/xiao/time_sync`: binary `FDSR` replies to `flatdisk/xiao/cmd/time_sync`.
+
+It also subscribes to motor command topics:
+
+- `flatdisk/xiao/cmd/motors/percent`: JSON `{"m1":0,"m2":0}` or text `0,0`, values constrained to `-100..100`.
+- `flatdisk/xiao/cmd/motors/us`: JSON `{"m1_us":1500,"m2_us":1500}` or text `1500,1500`, values constrained to `1000..2000`.
+- `flatdisk/xiao/cmd/motors/stop`: any payload returns both outputs to neutral.
+
+The motor failsafe still returns both outputs to neutral if commands stop for 1 second. The companion can keep commands alive while streaming, for example:
+
+```sh
+.venv/bin/python scripts/zenoh_companion.py --motor-us 1500 1500
+.venv/bin/python scripts/zenoh_companion.py --motor-percent 0 0
+```
 
 If the serial monitor shows `AUTH_EXPIRE`, `AUTH_FAIL`, or `HANDSHAKE_TIMEOUT`, the ESP32 is failing before Zenoh. Check the `include/secrets.h` Wi-Fi credentials, bring the board closer to the AP, or use a stronger 2.4 GHz network before evaluating stream rates.
 
