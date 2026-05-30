@@ -1,0 +1,5 @@
+torch
+numpy
+pillow
+pandas
+rerun-sdk==0.31.3

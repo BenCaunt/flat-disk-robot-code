@@ -4,14 +4,19 @@
 from __future__ import annotations
 
 import argparse
+from io import BytesIO
 import json
 import signal
 import struct
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
+from PIL import Image
 import zenoh
+
+from flatdisk_rerun_blueprint import APPLICATION_ID, build_flatdisk_blueprint
 
 
 VIDEO_STRUCT = struct.Struct("<4sBBHHHIQI")
@@ -68,6 +73,7 @@ class RateStats:
 class RerunLogger:
     def __init__(self, args: argparse.Namespace) -> None:
         self.enabled = bool(args.rerun or args.rerun_save or args.rerun_grpc)
+        self.save_path = args.rerun_save
         self.rr: Any | None = None
         if not self.enabled:
             return
@@ -75,12 +81,41 @@ class RerunLogger:
         import rerun as rr
 
         self.rr = rr
-        spawn = not args.rerun_no_spawn and args.rerun_save is None and args.rerun_grpc is None
-        rr.init("flatdisk_xiao_zenoh", spawn=spawn)
-        if args.rerun_save is not None:
-            rr.save(args.rerun_save)
+        blueprint = build_flatdisk_blueprint()
+        spawn = (
+            not args.rerun_no_spawn
+            and args.rerun
+            and args.rerun_save is None
+            and args.rerun_grpc is None
+        )
+        rr.init(APPLICATION_ID, spawn=spawn, default_blueprint=blueprint)
+        if self.save_path is not None:
+            rr.save(self.save_path, default_blueprint=blueprint)
         elif args.rerun_grpc is not None:
-            rr.connect_grpc(args.rerun_grpc)
+            rr.connect_grpc(args.rerun_grpc, default_blueprint=blueprint)
+        rr.send_blueprint(blueprint, make_active=True, make_default=True)
+
+    def close(self) -> None:
+        if self.rr is not None:
+            self.rr.disconnect()
+
+    @staticmethod
+    def _to_scalar(value: Any) -> float | int | None:
+        if isinstance(value, bool):
+            return 1.0 if value else 0.0
+        if isinstance(value, (int, float)):
+            return value
+        if isinstance(value, str):
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                return None
+            if parsed.is_integer():
+                int_value = int(parsed)
+                if -2**53 <= int_value <= 2**53:
+                    return int_value
+            return parsed
+        return None
 
     def set_sample_time(self, stream: str, seq: int, esp_us: int, offset_ns: float | None) -> None:
         if self.rr is None:
@@ -96,7 +131,7 @@ class RerunLogger:
             return
         rr = self.rr
         self.set_sample_time("video", seq, esp_us, offset_ns)
-        rr.log("camera/image", rr.EncodedImage(contents=jpeg, media_type="image/jpeg"))
+        rr.log("camera/image", rr.EncodedImage(contents=self._rotate_camera_frame(jpeg), media_type="image/jpeg"))
         rr.log("camera/jpeg_bytes", rr.Scalars(len(jpeg)))
         if latency_ms is not None:
             rr.log("timing/video_latency_ms", rr.Scalars(latency_ms))
@@ -133,16 +168,67 @@ class RerunLogger:
         if latency_ms is not None:
             rr.log("timing/imu_latency_ms", rr.Scalars(latency_ms))
 
+    def _rotate_camera_frame(self, jpeg: bytes) -> bytes:
+        try:
+            image = Image.open(BytesIO(jpeg)).convert("RGB")
+            rotated = image.rotate(180)
+            output = BytesIO()
+            rotated.save(output, format="JPEG")
+            return output.getvalue()
+        except Exception:
+            return jpeg
+
+    def log_motor_commands(self, status: dict[str, Any]) -> None:
+        if self.rr is None:
+            return
+        rr = self.rr
+        for key, path in (
+            ("motor1_percent", "telemetry/motor1_percent"),
+            ("motor2_percent", "telemetry/motor2_percent"),
+            ("motor1_us", "telemetry/motor1_us"),
+            ("motor2_us", "telemetry/motor2_us"),
+            ("motor_commands", "commands/count"),
+            ("motor_command_errors", "commands/errors"),
+        ):
+            value = status.get(key)
+            value_scalar = self._to_scalar(value)
+            if value_scalar is None:
+                continue
+            paths = (path,) if isinstance(path, str) else path
+            for target in paths:
+                rr.log(f"{target}", rr.Scalars(value_scalar))
+
+    def log_motor_percent_command(self, motor1: int | float, motor2: int | float) -> None:
+        if self.rr is None:
+            return
+        rr = self.rr
+        rr.set_time("host_monotonic", duration=time.monotonic())
+        rr.log("commands/motor1_percent", rr.Scalars(motor1))
+        rr.log("commands/motor2_percent", rr.Scalars(motor2))
+
+    def log_motor_us_command(self, motor1_us: int | float, motor2_us: int | float) -> None:
+        if self.rr is None:
+            return
+        rr = self.rr
+        rr.set_time("host_monotonic", duration=time.monotonic())
+        rr.log("commands/motor1_us", rr.Scalars(motor1_us))
+        rr.log("commands/motor2_us", rr.Scalars(motor2_us))
+
     def log_status(self, status: dict[str, Any]) -> None:
         if self.rr is None:
             return
         rr = self.rr
         rr.set_time("host_monotonic", duration=time.monotonic())
         for key, value in status.items():
-            if isinstance(value, bool):
-                rr.log(f"status/{key}", rr.Scalars(1.0 if value else 0.0))
-            elif isinstance(value, (int, float)):
-                rr.log(f"status/{key}", rr.Scalars(value))
+            if (
+                key in {"encoder_published", "encoder_errors"}
+                or key.startswith("motor1_encoder_")
+                or key.startswith("motor2_encoder_")
+            ):
+                continue
+            value_scalar = self._to_scalar(value)
+            if value_scalar is not None:
+                rr.log(f"status/{key}", rr.Scalars(value_scalar))
         rr.log("status/json", rr.TextLog(json.dumps(status, sort_keys=True)))
 
 
@@ -161,6 +247,35 @@ def estimate_latency_ms(esp_us: int, recv_ns: int, offset_ns: float | None) -> f
         return None
     sample_pc_ns = esp_us * 1000 + offset_ns
     return (recv_ns - sample_pc_ns) / 1_000_000.0
+
+
+def parse_json_or_csv_pair(payload: bytes, key1: str, key2: str) -> tuple[float, float] | None:
+    text = payload.decode("utf-8", errors="replace").strip()
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        parts = [part.strip() for part in text.split(",")]
+        if len(parts) != 2:
+            return None
+        try:
+            return float(parts[0]), float(parts[1])
+        except ValueError:
+            return None
+    if not isinstance(parsed, dict):
+        return None
+    try:
+        return float(parsed[key1]), float(parsed[key2])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def make_logging_path(logging_namespace: str) -> Path:
+    namespace_path = Path("captures") / Path(logging_namespace.strip("/"))
+    namespace_path.mkdir(parents=True, exist_ok=True)
+    run_id = f"{time.strftime('%Y%m%d_%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    return namespace_path / f"{run_id}.rrd"
 
 
 def publish_motor_command(session: zenoh.Session, namespace: str, args: argparse.Namespace) -> None:
@@ -191,6 +306,8 @@ def main() -> int:
     parser.add_argument("--sync-rate", type=float, default=1.0)
     parser.add_argument("--save-latest", type=Path, default=Path("captures/latest.jpg"))
     parser.add_argument("--save-all", action="store_true")
+    parser.add_argument("--logging-namespace", default=None,
+                        help="Automatically save rerun recording under captures/<namespace>/<unique-id>.rrd.")
     parser.add_argument("--rerun", action="store_true", help="Log camera/IMU/status data to Rerun.")
     parser.add_argument("--rerun-save", type=Path, default=None, help="Write a Rerun .rrd recording instead of spawning.")
     parser.add_argument("--rerun-grpc", default=None, help="Connect to an existing Rerun gRPC endpoint.")
@@ -201,11 +318,15 @@ def main() -> int:
     motor_group.add_argument("--motor-us", nargs=2, type=int, metavar=("M1_US", "M2_US"),
                              help="Continuously publish raw PWM pulse widths in microseconds.")
     motor_group.add_argument("--motor-stop", action="store_true", help="Publish one neutral/stop command.")
-    parser.add_argument("--motor-rate", type=float, default=10.0, help="Motor command publish rate in Hz.")
+    parser.add_argument("--motor-rate", type=float, default=25.0, help="Motor command publish rate in Hz.")
     parser.add_argument("--no-motor-stop-on-exit", dest="motor_stop_on_exit", action="store_false",
                         help="Do not send a stop command when exiting after motor streaming.")
     parser.set_defaults(motor_stop_on_exit=True)
     args = parser.parse_args()
+
+    if args.logging_namespace and args.rerun_save is None:
+        args.rerun_save = make_logging_path(args.logging_namespace)
+        print(f"Rerun logging path: {args.rerun_save}")
 
     stop = False
 
@@ -220,148 +341,182 @@ def main() -> int:
     if args.rerun_save is not None:
         args.rerun_save.parent.mkdir(parents=True, exist_ok=True)
     rerun_log = RerunLogger(args)
-
-    session = zenoh.open(build_config(args.mode, args.listen, args.connect))
-    video_sub = session.declare_subscriber(f"{args.namespace}/camera/jpeg")
-    imu_sub = session.declare_subscriber(f"{args.namespace}/imu")
-    sync_sub = session.declare_subscriber(f"{args.namespace}/time_sync")
-    status_sub = session.declare_subscriber(f"{args.namespace}/status")
-
-    endpoint = args.connect if args.connect else args.listen
-    print(f"Zenoh companion mode={args.mode} endpoint={endpoint}, namespace={args.namespace}")
-    print("Waiting for ESP32 samples...")
-
-    stats = RateStats()
-    offset_ns: float | None = None
-    last_rtt_ms: float | None = None
-    sync_seq = 0
-    next_sync_ns = 0
-    start_ns = time.monotonic_ns()
-    next_report_ns = start_ns + 1_000_000_000
-    sync_period_ns = int(1_000_000_000 / max(args.sync_rate, 0.1))
-    next_motor_ns = 0
-    motor_period_ns = int(1_000_000_000 / max(args.motor_rate, 0.1))
-    if args.motor_stop:
-        publish_motor_command(session, args.namespace, args)
-
-    while not stop:
-        now_ns = time.monotonic_ns()
-        if args.duration > 0 and (now_ns - start_ns) / 1_000_000_000.0 >= args.duration:
-            break
-
-        if now_ns >= next_sync_ns:
-            payload = SYNC_REQ_STRUCT.pack(b"FDSQ", sync_seq, now_ns)
-            session.put(f"{args.namespace}/cmd/time_sync", payload)
-            sync_seq = (sync_seq + 1) & 0xFFFFFFFF
-            next_sync_ns = now_ns + sync_period_ns
-
-        if motor_command_active(args) and now_ns >= next_motor_ns:
-            publish_motor_command(session, args.namespace, args)
-            next_motor_ns = now_ns + motor_period_ns
-
-        while True:
-            sample = video_sub.try_recv()
-            if sample is None:
-                break
-            recv_ns = time.monotonic_ns()
-            data = sample.payload.to_bytes()
-            if len(data) < VIDEO_STRUCT.size:
-                continue
-            magic, version, fmt, width, height, header_len, seq, esp_us, jpeg_len = VIDEO_STRUCT.unpack_from(data)
-            if magic != b"FDV1" or version != 1 or header_len > len(data):
-                continue
-            jpeg = data[header_len:header_len + jpeg_len]
-            if len(jpeg) != jpeg_len:
-                continue
-            args.save_latest.write_bytes(jpeg)
-            if args.save_all:
-                args.save_latest.parent.joinpath(f"frame_{seq:08d}.jpg").write_bytes(jpeg)
-            latency_ms = estimate_latency_ms(esp_us, recv_ns, offset_ns)
-            stats.note_video(seq, len(jpeg), latency_ms)
-            rerun_log.log_video(seq=seq, esp_us=esp_us, jpeg=jpeg, latency_ms=latency_ms, offset_ns=offset_ns)
-
-        while True:
-            sample = imu_sub.try_recv()
-            if sample is None:
-                break
-            recv_ns = time.monotonic_ns()
-            data = sample.payload.to_bytes()
-            if len(data) < IMU_STRUCT.size:
-                continue
-            unpacked = IMU_STRUCT.unpack_from(data)
-            magic = unpacked[0]
-            version = unpacked[1]
-            seq = unpacked[5]
-            esp_us = unpacked[6]
-            if magic != b"FDI1" or version != 1:
-                continue
-            latency_ms = estimate_latency_ms(esp_us, recv_ns, offset_ns)
-            stats.note_imu(seq, latency_ms)
-            rerun_log.log_imu(seq=seq, esp_us=esp_us, values=unpacked, latency_ms=latency_ms, offset_ns=offset_ns)
-
-        while True:
-            sample = sync_sub.try_recv()
-            if sample is None:
-                break
-            recv_ns = time.monotonic_ns()
-            data = sample.payload.to_bytes()
-            if len(data) < SYNC_REPLY_STRUCT.size:
-                continue
-            magic, _seq, pc_send_ns, _esp_rx_us, esp_tx_us = SYNC_REPLY_STRUCT.unpack_from(data)
-            if magic != b"FDSR":
-                continue
-            midpoint_ns = (pc_send_ns + recv_ns) / 2.0
-            measured_offset_ns = midpoint_ns - esp_tx_us * 1000.0
-            offset_ns = measured_offset_ns if offset_ns is None else 0.9 * offset_ns + 0.1 * measured_offset_ns
-            last_rtt_ms = (recv_ns - pc_send_ns) / 1_000_000.0
-
-        while True:
-            sample = status_sub.try_recv()
-            if sample is None:
-                break
-            try:
-                status = json.loads(sample.payload.to_bytes().decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                continue
-            rerun_log.log_status(status)
-            if status.get("video_errors") or status.get("imu_errors") or status.get("motor_command_errors"):
-                print(f"device status: {status}")
-
-        now_ns = time.monotonic_ns()
-        if now_ns >= next_report_ns:
-            elapsed = max((now_ns - stats.window_start_ns) / 1_000_000_000.0, 1e-6)
-            video_hz = stats.video_count / elapsed
-            imu_hz = stats.imu_count / elapsed
-            mbps = (stats.video_bytes * 8.0) / elapsed / 1_000_000.0
-            video_lat = (stats.video_latency_sum_ms / stats.video_latency_count
-                         if stats.video_latency_count else None)
-            imu_lat = (stats.imu_latency_sum_ms / stats.imu_latency_count
-                       if stats.imu_latency_count else None)
-            offset_ms = offset_ns / 1_000_000.0 if offset_ns is not None else None
-            print(
-                "rate "
-                f"video={video_hz:5.1f}Hz imu={imu_hz:5.1f}Hz "
-                f"video_bw={mbps:5.2f}Mbps "
-                f"drops(v/i)={stats.video_drops}/{stats.imu_drops} "
-                f"lat_ms(v/i)={video_lat if video_lat is not None else float('nan'):6.2f}/"
-                f"{imu_lat if imu_lat is not None else float('nan'):6.2f} "
-                f"sync_offset_ms={offset_ms if offset_ms is not None else float('nan'):9.2f} "
-                f"rtt_ms={last_rtt_ms if last_rtt_ms is not None else float('nan'):6.2f}"
-            )
-            stats.reset_window()
-            next_report_ns = now_ns + 1_000_000_000
-
-        time.sleep(0.001)
+    session: zenoh.Session | None = None
+    video_sub: Any | None = None
+    imu_sub: Any | None = None
+    sync_sub: Any | None = None
+    status_sub: Any | None = None
+    motor_percent_sub: Any | None = None
+    motor_us_sub: Any | None = None
 
     try:
-        if motor_command_active(args) and args.motor_stop_on_exit:
-            session.put(f"{args.namespace}/cmd/motors/stop", b"stop")
+        session = zenoh.open(build_config(args.mode, args.listen, args.connect))
+        video_sub = session.declare_subscriber(f"{args.namespace}/camera/jpeg")
+        imu_sub = session.declare_subscriber(f"{args.namespace}/imu")
+        sync_sub = session.declare_subscriber(f"{args.namespace}/time_sync")
+        status_sub = session.declare_subscriber(f"{args.namespace}/status")
+        motor_percent_sub = session.declare_subscriber(f"{args.namespace}/cmd/motors/percent")
+        motor_us_sub = session.declare_subscriber(f"{args.namespace}/cmd/motors/us")
+
+        endpoint = args.connect if args.connect else args.listen
+        print(f"Zenoh companion mode={args.mode} endpoint={endpoint}, namespace={args.namespace}")
+        print("Waiting for ESP32 samples...")
+
+        stats = RateStats()
+        offset_ns: float | None = None
+        last_rtt_ms: float | None = None
+        sync_seq = 0
+        next_sync_ns = 0
+        start_ns = time.monotonic_ns()
+        next_report_ns = start_ns + 1_000_000_000
+        sync_period_ns = int(1_000_000_000 / max(args.sync_rate, 0.1))
+        next_motor_ns = 0
+        motor_period_ns = int(1_000_000_000 / max(args.motor_rate, 0.1))
+        if args.motor_stop:
+            publish_motor_command(session, args.namespace, args)
+
+        while not stop:
+            now_ns = time.monotonic_ns()
+            if args.duration > 0 and (now_ns - start_ns) / 1_000_000_000.0 >= args.duration:
+                break
+
+            if now_ns >= next_sync_ns:
+                payload = SYNC_REQ_STRUCT.pack(b"FDSQ", sync_seq, now_ns)
+                session.put(f"{args.namespace}/cmd/time_sync", payload)
+                sync_seq = (sync_seq + 1) & 0xFFFFFFFF
+                next_sync_ns = now_ns + sync_period_ns
+
+            if motor_command_active(args) and now_ns >= next_motor_ns:
+                publish_motor_command(session, args.namespace, args)
+                next_motor_ns = now_ns + motor_period_ns
+
+            while True:
+                sample = video_sub.try_recv()
+                if sample is None:
+                    break
+                recv_ns = time.monotonic_ns()
+                data = sample.payload.to_bytes()
+                if len(data) < VIDEO_STRUCT.size:
+                    continue
+                magic, version, fmt, width, height, header_len, seq, esp_us, jpeg_len = VIDEO_STRUCT.unpack_from(data)
+                if magic != b"FDV1" or version != 1 or header_len > len(data):
+                    continue
+                jpeg = data[header_len:header_len + jpeg_len]
+                if len(jpeg) != jpeg_len:
+                    continue
+                args.save_latest.write_bytes(jpeg)
+                if args.save_all:
+                    args.save_latest.parent.joinpath(f"frame_{seq:08d}.jpg").write_bytes(jpeg)
+                latency_ms = estimate_latency_ms(esp_us, recv_ns, offset_ns)
+                stats.note_video(seq, len(jpeg), latency_ms)
+                rerun_log.log_video(seq=seq, esp_us=esp_us, jpeg=jpeg, latency_ms=latency_ms, offset_ns=offset_ns)
+
+            while True:
+                sample = imu_sub.try_recv()
+                if sample is None:
+                    break
+                recv_ns = time.monotonic_ns()
+                data = sample.payload.to_bytes()
+                if len(data) < IMU_STRUCT.size:
+                    continue
+                unpacked = IMU_STRUCT.unpack_from(data)
+                magic = unpacked[0]
+                version = unpacked[1]
+                seq = unpacked[5]
+                esp_us = unpacked[6]
+                if magic != b"FDI1" or version != 1:
+                    continue
+                latency_ms = estimate_latency_ms(esp_us, recv_ns, offset_ns)
+                stats.note_imu(seq, latency_ms)
+                rerun_log.log_imu(seq=seq, esp_us=esp_us, values=unpacked, latency_ms=latency_ms, offset_ns=offset_ns)
+
+            while True:
+                sample = sync_sub.try_recv()
+                if sample is None:
+                    break
+                recv_ns = time.monotonic_ns()
+                data = sample.payload.to_bytes()
+                if len(data) < SYNC_REPLY_STRUCT.size:
+                    continue
+                magic, _seq, pc_send_ns, _esp_rx_us, esp_tx_us = SYNC_REPLY_STRUCT.unpack_from(data)
+                if magic != b"FDSR":
+                    continue
+                midpoint_ns = (pc_send_ns + recv_ns) / 2.0
+                measured_offset_ns = midpoint_ns - esp_tx_us * 1000.0
+                offset_ns = measured_offset_ns if offset_ns is None else 0.9 * offset_ns + 0.1 * measured_offset_ns
+                last_rtt_ms = (recv_ns - pc_send_ns) / 1_000_000.0
+
+            while True:
+                sample = status_sub.try_recv()
+                if sample is None:
+                    break
+                try:
+                    status = json.loads(sample.payload.to_bytes().decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    continue
+                rerun_log.log_status(status)
+                rerun_log.log_motor_commands(status)
+                if (status.get("video_errors") or status.get("imu_errors") or
+                        status.get("motor_command_errors")):
+                    print(f"device status: {status}")
+
+            while True:
+                sample = motor_percent_sub.try_recv()
+                if sample is None:
+                    break
+                command = parse_json_or_csv_pair(sample.payload.to_bytes(), "m1", "m2")
+                if command is not None:
+                    rerun_log.log_motor_percent_command(command[0], command[1])
+
+            while True:
+                sample = motor_us_sub.try_recv()
+                if sample is None:
+                    break
+                command = parse_json_or_csv_pair(sample.payload.to_bytes(), "m1_us", "m2_us")
+                if command is not None:
+                    rerun_log.log_motor_us_command(command[0], command[1])
+
+            now_ns = time.monotonic_ns()
+            if now_ns >= next_report_ns:
+                elapsed = max((now_ns - stats.window_start_ns) / 1_000_000_000.0, 1e-6)
+                video_hz = stats.video_count / elapsed
+                imu_hz = stats.imu_count / elapsed
+                mbps = (stats.video_bytes * 8.0) / elapsed / 1_000_000.0
+                video_lat = (stats.video_latency_sum_ms / stats.video_latency_count
+                             if stats.video_latency_count else None)
+                imu_lat = (stats.imu_latency_sum_ms / stats.imu_latency_count
+                           if stats.imu_latency_count else None)
+                offset_ms = offset_ns / 1_000_000.0 if offset_ns is not None else None
+                print(
+                    "rate "
+                    f"video={video_hz:5.1f}Hz imu={imu_hz:5.1f}Hz "
+                    f"video_bw={mbps:5.2f}Mbps "
+                    f"drops(v/i)={stats.video_drops}/{stats.imu_drops} "
+                    f"lat_ms(v/i)={video_lat if video_lat is not None else float('nan'):6.2f}/"
+                    f"{imu_lat if imu_lat is not None else float('nan'):6.2f} "
+                    f"sync_offset_ms={offset_ms if offset_ms is not None else float('nan'):9.2f} "
+                    f"rtt_ms={last_rtt_ms if last_rtt_ms is not None else float('nan'):6.2f}"
+                )
+                stats.reset_window()
+                next_report_ns = now_ns + 1_000_000_000
+
+            time.sleep(0.001)
+
     finally:
-        video_sub.undeclare()
-        imu_sub.undeclare()
-        sync_sub.undeclare()
-        status_sub.undeclare()
-        session.close()
+        if session is not None:
+            if motor_command_active(args) and args.motor_stop_on_exit:
+                session.put(f"{args.namespace}/cmd/motors/stop", b"stop")
+            for sub in (video_sub, imu_sub, sync_sub, status_sub, motor_percent_sub, motor_us_sub):
+                if sub is not None:
+                    try:
+                        sub.undeclare()
+                    except Exception:
+                        pass
+            try:
+                session.close()
+            except Exception:
+                pass
+        rerun_log.close()
     return 0
 
 

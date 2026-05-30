@@ -1,6 +1,7 @@
 .pio/
 .venv/
 captures/
+runs/
 __pycache__/
 .vscode/
 .vscode/.browse.c_cpp.db*
@@ -9,3 +10,55 @@ __pycache__/
 .vscode/ipch/
 include/secrets.h
 include/local_zenoh.h
+
+# Build/runtime artifacts
+build/
+out/
+# Machine-learning models and checkpoints
+models/
+checkpoints/
+checkpoints-*/
+outputs/
+artifacts/
+trained_models/
+weights/
+*.pt
+*.pth
+*.onnx
+*.pb
+*.tflite
+*.h5
+*.keras
+*.pkl
+*.npy
+*.npz
+*.ckpt
+*.safetensors
+*.torchscript
+*.mlmodel
+*.bin
+*.weights
+
+# Data and logs
+data/
+datasets/
+logs/
+wandb/
+.mlruns/
+*.csv
+*.jsonl
+
+# Cache and temporary files
+*.log
+*.tmp
+*.temp
+*.cache
+.DS_Store
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.pyre/
+.cache/
+.ipynb_checkpoints/

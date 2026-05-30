@@ -48,6 +48,10 @@ constexpr uint8_t kMotor1Pin = D1;
 constexpr uint8_t kMotor2Pin = D2;
 constexpr uint8_t kMotor1PwmChannel = 4;
 constexpr uint8_t kMotor2PwmChannel = 5;
+constexpr uint8_t kMotor1EncoderPin = A3;
+constexpr uint8_t kMotor2EncoderPin = A10;
+constexpr int8_t kMotor1EncoderDirection = 1;
+constexpr int8_t kMotor2EncoderDirection = 1;
 constexpr uint32_t kEscPwmFrequencyHz = 50;
 constexpr uint8_t kEscPwmResolutionBits = 14;
 constexpr uint32_t kEscPwmPeriodUs = 1000000UL / kEscPwmFrequencyHz;
@@ -55,6 +59,12 @@ constexpr uint16_t kEscMinPulseUs = 1000;
 constexpr uint16_t kEscNeutralPulseUs = 1500;
 constexpr uint16_t kEscMaxPulseUs = 2000;
 constexpr uint32_t kEscCommandTimeoutMs = 1000;
+constexpr uint8_t kEncoderAdcResolutionBits = 12;
+constexpr int32_t kEncoderCountsPerRevolution = 1 << kEncoderAdcResolutionBits;
+constexpr int32_t kEncoderHalfCounts = kEncoderCountsPerRevolution / 2;
+constexpr int32_t kEncoderCrossoverLowCounts = (kEncoderCountsPerRevolution * 2) / 5;
+constexpr int32_t kEncoderCrossoverHighCounts = kEncoderCountsPerRevolution - kEncoderCrossoverLowCounts;
+constexpr uint32_t kEncoderSamplePeriodMs = 1;
 constexpr uint8_t kImuSdaPin = SDA;
 constexpr uint8_t kImuSclPin = SCL;
 constexpr uint8_t kImuPrimaryAddress = 0x4B;
@@ -81,6 +91,7 @@ constexpr uint32_t kShtpDirectReportIntervalUs = 50000;
 constexpr uint32_t kShtpDumpDurationMs = 3000;
 constexpr uint32_t kZenohVideoPeriodMs = 100;
 constexpr uint32_t kZenohImuPeriodUs = 16667;
+constexpr uint32_t kZenohEncoderPeriodMs = 20;
 constexpr uint32_t kZenohStatusPeriodMs = 1000;
 constexpr size_t kZenohVideoHeaderBytes = 32;
 constexpr size_t kZenohImuPayloadBytes = 76;
@@ -88,7 +99,7 @@ constexpr size_t kZenohSyncRequestBytes = 16;
 constexpr size_t kZenohSyncReplyBytes = 32;
 
 WebServer server(80);
-BNO08x imu;
+BNO08x  imu;
 HardwareSerial imuRvcSerial(1);
 uint8_t shtpTxSeq[6] = {};
 uint8_t shtpControlChannel = kShtpDefaultControlChannel;
@@ -123,6 +134,7 @@ String imuLastError = "not initialized";
 #if defined(ZENOH_STREAM_MODE)
 constexpr char kZenohVideoKey[] = ROBOT_NAMESPACE "/camera/jpeg";
 constexpr char kZenohImuKey[] = ROBOT_NAMESPACE "/imu";
+constexpr char kZenohEncoderKey[] = ROBOT_NAMESPACE "/motors/encoders";
 constexpr char kZenohStatusKey[] = ROBOT_NAMESPACE "/status";
 constexpr char kZenohTimeSyncCmdKey[] = ROBOT_NAMESPACE "/cmd/time_sync";
 constexpr char kZenohTimeSyncReplyKey[] = ROBOT_NAMESPACE "/time_sync";
@@ -133,6 +145,7 @@ constexpr char kZenohMotorStopCmdKey[] = ROBOT_NAMESPACE "/cmd/motors/stop";
 z_owned_session_t zenohSession;
 z_owned_publisher_t zenohVideoPub;
 z_owned_publisher_t zenohImuPub;
+z_owned_publisher_t zenohEncoderPub;
 z_owned_publisher_t zenohStatusPub;
 z_owned_publisher_t zenohTimeSyncPub;
 z_owned_subscriber_t zenohTimeSyncSub;
@@ -144,13 +157,17 @@ bool zenohReady = false;
 uint32_t zenohVideoSeq = 0;
 uint32_t zenohImuSeq = 0;
 uint32_t zenohStatusSeq = 0;
+uint32_t zenohEncoderSeq = 0;
 uint32_t zenohVideoPublished = 0;
 uint32_t zenohImuPublished = 0;
+uint32_t zenohEncoderPublished = 0;
 uint32_t zenohVideoPublishErrors = 0;
 uint32_t zenohImuPublishErrors = 0;
+uint32_t zenohEncoderPublishErrors = 0;
 uint32_t zenohSyncReplies = 0;
 uint32_t zenohMotorCommands = 0;
 uint32_t zenohMotorCommandErrors = 0;
+uint32_t zenohLastEncoderMs = 0;
 uint32_t zenohLastStatusMs = 0;
 uint32_t zenohLastSerialStatsMs = 0;
 #endif
@@ -178,6 +195,52 @@ struct ImuState {
 };
 
 ImuState imuState;
+
+struct AnalogEncoderState {
+  AnalogEncoderState(const char *labelIn, uint8_t pinIn, int8_t polarityIn)
+      : label(labelIn), pin(pinIn), polarity(polarityIn >= 0 ? 1 : -1) {}
+
+  const char *label = "";
+  uint8_t pin = 0;
+  int8_t polarity = 1;
+  bool initialized = false;
+  uint16_t raw = 0;
+  uint16_t lastRaw = 0;
+  uint16_t minRaw = 0;
+  uint16_t maxRaw = 0;
+  int64_t count = 0;
+  int32_t rotations = 0;
+  int8_t direction = 0;
+  int8_t crossoverZone = 0;
+  uint32_t samples = 0;
+  uint32_t wrapEvents = 0;
+  uint32_t ambiguousDeltas = 0;
+  uint32_t updatedUs = 0;
+};
+
+struct EncoderChannelSnapshot {
+  bool initialized = false;
+  uint16_t raw = 0;
+  uint16_t minRaw = 0;
+  uint16_t maxRaw = 0;
+  int64_t count = 0;
+  int32_t rotations = 0;
+  int8_t direction = 0;
+  int8_t crossoverZone = 0;
+  uint32_t samples = 0;
+  uint32_t wrapEvents = 0;
+  uint32_t ambiguousDeltas = 0;
+  uint32_t updatedUs = 0;
+};
+
+struct EncoderSnapshot {
+  EncoderChannelSnapshot motor1;
+  EncoderChannelSnapshot motor2;
+};
+
+AnalogEncoderState motor1Encoder("motor1", kMotor1EncoderPin, kMotor1EncoderDirection);
+AnalogEncoderState motor2Encoder("motor2", kMotor2EncoderPin, kMotor2EncoderDirection);
+portMUX_TYPE encoderStateMux = portMUX_INITIALIZER_UNLOCKED;
 
 void handleCameraCaptureTest();
 bool initImuDirect();
@@ -425,6 +488,207 @@ void updateMotorFailsafe() {
     stopMotors();
     Serial.println("Motor command timed out; outputs returned to neutral.");
   }
+}
+
+uint16_t median3(uint16_t a, uint16_t b, uint16_t c) {
+  if (a > b) {
+    const uint16_t tmp = a;
+    a = b;
+    b = tmp;
+  }
+  if (b > c) {
+    const uint16_t tmp = b;
+    b = c;
+    c = tmp;
+  }
+  if (a > b) {
+    return a;
+  }
+  return b;
+}
+
+uint16_t readEncoderRaw(uint8_t pin) {
+  const uint16_t a = analogRead(pin);
+  const uint16_t b = analogRead(pin);
+  const uint16_t c = analogRead(pin);
+  return median3(a, b, c);
+}
+
+void configureAnalogEncoderPin(uint8_t pin) {
+  pinMode(pin, INPUT);
+  adcAttachPin(pin);
+  analogSetPinAttenuation(pin, ADC_11db);
+}
+
+int8_t encoderCrossoverZone(uint16_t raw) {
+  if (raw <= kEncoderCrossoverLowCounts) {
+    return -1;
+  }
+  if (raw >= kEncoderCrossoverHighCounts) {
+    return 1;
+  }
+  return 0;
+}
+
+int32_t signedEncoderDelta(const AnalogEncoderState &encoder,
+                           uint16_t currentRaw,
+                           int8_t currentZone,
+                           bool *crossedWrap,
+                           bool *ambiguous) {
+  int32_t delta = static_cast<int32_t>(currentRaw) - static_cast<int32_t>(encoder.lastRaw);
+  *crossedWrap = false;
+  *ambiguous = false;
+
+  if (encoder.crossoverZone > 0 && currentZone < 0) {
+    *crossedWrap = true;
+    return (kEncoderCountsPerRevolution - static_cast<int32_t>(encoder.lastRaw)) +
+           static_cast<int32_t>(currentRaw);
+  }
+  if (encoder.crossoverZone < 0 && currentZone > 0) {
+    *crossedWrap = true;
+    return static_cast<int32_t>(currentRaw) -
+           static_cast<int32_t>(encoder.lastRaw) -
+           kEncoderCountsPerRevolution;
+  }
+  if (delta == kEncoderHalfCounts || delta == -kEncoderHalfCounts) {
+    *ambiguous = true;
+    return 0;
+  }
+  if (delta > kEncoderHalfCounts) {
+    delta -= kEncoderCountsPerRevolution;
+    *crossedWrap = true;
+  } else if (delta < -kEncoderHalfCounts) {
+    delta += kEncoderCountsPerRevolution;
+    *crossedWrap = true;
+  }
+  return delta;
+}
+
+void seedAnalogEncoder(AnalogEncoderState &encoder, uint32_t nowUs) {
+  const uint16_t raw = readEncoderRaw(encoder.pin);
+  const int8_t zone = encoderCrossoverZone(raw);
+  portENTER_CRITICAL(&encoderStateMux);
+  encoder.initialized = true;
+  encoder.raw = raw;
+  encoder.lastRaw = raw;
+  encoder.minRaw = raw;
+  encoder.maxRaw = raw;
+  encoder.count = 0;
+  encoder.rotations = 0;
+  encoder.direction = 0;
+  encoder.crossoverZone = zone;
+  encoder.samples = 1;
+  encoder.wrapEvents = 0;
+  encoder.ambiguousDeltas = 0;
+  encoder.updatedUs = nowUs;
+  portEXIT_CRITICAL(&encoderStateMux);
+}
+
+void updateAnalogEncoder(AnalogEncoderState &encoder, uint32_t nowUs) {
+  const uint16_t raw = readEncoderRaw(encoder.pin);
+  const int8_t zone = encoderCrossoverZone(raw);
+
+  portENTER_CRITICAL(&encoderStateMux);
+  if (!encoder.initialized) {
+    encoder.initialized = true;
+    encoder.raw = raw;
+    encoder.lastRaw = raw;
+    encoder.minRaw = raw;
+    encoder.maxRaw = raw;
+    encoder.count = 0;
+    encoder.direction = 0;
+    encoder.crossoverZone = zone;
+    encoder.samples = 1;
+    encoder.updatedUs = nowUs;
+    portEXIT_CRITICAL(&encoderStateMux);
+    return;
+  }
+
+  bool crossedWrap = false;
+  bool ambiguous = false;
+  int32_t delta = signedEncoderDelta(encoder, raw, zone, &crossedWrap, &ambiguous);
+  if (raw < encoder.minRaw) {
+    encoder.minRaw = raw;
+  }
+  if (raw > encoder.maxRaw) {
+    encoder.maxRaw = raw;
+  }
+  if (ambiguous) {
+    ++encoder.ambiguousDeltas;
+    encoder.raw = raw;
+    encoder.lastRaw = raw;
+    encoder.direction = 0;
+    encoder.crossoverZone = zone;
+    ++encoder.samples;
+    encoder.updatedUs = nowUs;
+    portEXIT_CRITICAL(&encoderStateMux);
+    return;
+  }
+
+  delta *= encoder.polarity >= 0 ? 1 : -1;
+  encoder.count += delta;
+  if (crossedWrap && delta != 0) {
+    encoder.rotations += delta > 0 ? 1 : -1;
+    ++encoder.wrapEvents;
+  }
+  encoder.direction = delta > 0 ? 1 : (delta < 0 ? -1 : 0);
+  encoder.raw = raw;
+  encoder.lastRaw = raw;
+  encoder.crossoverZone = zone;
+  ++encoder.samples;
+  encoder.updatedUs = nowUs;
+  portEXIT_CRITICAL(&encoderStateMux);
+}
+
+void initEncoders() {
+  analogReadResolution(kEncoderAdcResolutionBits);
+  analogSetAttenuation(ADC_11db);
+  configureAnalogEncoderPin(kMotor1EncoderPin);
+  configureAnalogEncoderPin(kMotor2EncoderPin);
+  const uint32_t nowUs = static_cast<uint32_t>(esp_timer_get_time());
+  seedAnalogEncoder(motor1Encoder, nowUs);
+  seedAnalogEncoder(motor2Encoder, nowUs);
+  Serial.printf("AS5600 analog encoders ready: motor1 A3/GPIO%u, motor2 A10/GPIO%u, %ld counts/rev\n",
+                kMotor1EncoderPin,
+                kMotor2EncoderPin,
+                static_cast<long>(kEncoderCountsPerRevolution));
+}
+
+void updateEncoders() {
+  const uint32_t nowUs = static_cast<uint32_t>(esp_timer_get_time());
+  updateAnalogEncoder(motor1Encoder, nowUs);
+  updateAnalogEncoder(motor2Encoder, nowUs);
+}
+
+EncoderSnapshot snapshotEncoders() {
+  EncoderSnapshot snapshot;
+  portENTER_CRITICAL(&encoderStateMux);
+  snapshot.motor1.initialized = motor1Encoder.initialized;
+  snapshot.motor1.raw = motor1Encoder.raw;
+  snapshot.motor1.minRaw = motor1Encoder.minRaw;
+  snapshot.motor1.maxRaw = motor1Encoder.maxRaw;
+  snapshot.motor1.count = motor1Encoder.count;
+  snapshot.motor1.rotations = motor1Encoder.rotations;
+  snapshot.motor1.direction = motor1Encoder.direction;
+  snapshot.motor1.crossoverZone = motor1Encoder.crossoverZone;
+  snapshot.motor1.samples = motor1Encoder.samples;
+  snapshot.motor1.wrapEvents = motor1Encoder.wrapEvents;
+  snapshot.motor1.ambiguousDeltas = motor1Encoder.ambiguousDeltas;
+  snapshot.motor1.updatedUs = motor1Encoder.updatedUs;
+  snapshot.motor2.initialized = motor2Encoder.initialized;
+  snapshot.motor2.raw = motor2Encoder.raw;
+  snapshot.motor2.minRaw = motor2Encoder.minRaw;
+  snapshot.motor2.maxRaw = motor2Encoder.maxRaw;
+  snapshot.motor2.count = motor2Encoder.count;
+  snapshot.motor2.rotations = motor2Encoder.rotations;
+  snapshot.motor2.direction = motor2Encoder.direction;
+  snapshot.motor2.crossoverZone = motor2Encoder.crossoverZone;
+  snapshot.motor2.samples = motor2Encoder.samples;
+  snapshot.motor2.wrapEvents = motor2Encoder.wrapEvents;
+  snapshot.motor2.ambiguousDeltas = motor2Encoder.ambiguousDeltas;
+  snapshot.motor2.updatedUs = motor2Encoder.updatedUs;
+  portEXIT_CRITICAL(&encoderStateMux);
+  return snapshot;
 }
 
 bool initCamera() {
@@ -1110,6 +1374,7 @@ void handleStream() {
     client.println();
 
     esp_camera_fb_return(fb);
+    updateEncoders();
     updateImu();
     updateMotorFailsafe();
     delay(30);
@@ -2700,7 +2965,8 @@ bool declareZenohSubscriber(const char *key,
 }
 
 void publishZenohStatus() {
-  char payload[512];
+  const EncoderSnapshot encoders = snapshotEncoders();
+  char payload[768];
   const uint32_t nowMs = millis();
   const int written = snprintf(payload,
                                sizeof(payload),
@@ -2708,8 +2974,14 @@ void publishZenohStatus() {
                                "\"rssi\":%d,\"camera_ready\":%s,\"imu_ready\":%s,"
                                "\"motor1_percent\":%d,\"motor2_percent\":%d,"
                                "\"motor1_us\":%u,\"motor2_us\":%u,"
+                               "\"motor1_encoder_count\":%lld,\"motor2_encoder_count\":%lld,"
+                               "\"motor1_encoder_raw\":%u,\"motor2_encoder_raw\":%u,"
+                               "\"motor1_encoder_min_raw\":%u,\"motor1_encoder_max_raw\":%u,"
+                               "\"motor2_encoder_min_raw\":%u,\"motor2_encoder_max_raw\":%u,"
+                               "\"motor1_encoder_rotations\":%ld,\"motor2_encoder_rotations\":%ld,"
                                "\"video_published\":%lu,\"imu_published\":%lu,"
-                               "\"video_errors\":%lu,\"imu_errors\":%lu,"
+                               "\"encoder_published\":%lu,"
+                               "\"video_errors\":%lu,\"imu_errors\":%lu,\"encoder_errors\":%lu,"
                                "\"sync_replies\":%lu,\"motor_commands\":%lu,"
                                "\"motor_command_errors\":%lu}",
                                static_cast<unsigned long>(zenohStatusSeq++),
@@ -2722,10 +2994,22 @@ void publishZenohStatus() {
                                motor2Percent,
                                motor1PulseUs,
                                motor2PulseUs,
+                               static_cast<long long>(encoders.motor1.count),
+                               static_cast<long long>(encoders.motor2.count),
+                               encoders.motor1.raw,
+                               encoders.motor2.raw,
+                               encoders.motor1.minRaw,
+                               encoders.motor1.maxRaw,
+                               encoders.motor2.minRaw,
+                               encoders.motor2.maxRaw,
+                               static_cast<long>(encoders.motor1.rotations),
+                               static_cast<long>(encoders.motor2.rotations),
                                static_cast<unsigned long>(zenohVideoPublished),
                                static_cast<unsigned long>(zenohImuPublished),
+                               static_cast<unsigned long>(zenohEncoderPublished),
                                static_cast<unsigned long>(zenohVideoPublishErrors),
                                static_cast<unsigned long>(zenohImuPublishErrors),
+                               static_cast<unsigned long>(zenohEncoderPublishErrors),
                                static_cast<unsigned long>(zenohSyncReplies),
                                static_cast<unsigned long>(zenohMotorCommands),
                                static_cast<unsigned long>(zenohMotorCommandErrors));
@@ -2736,6 +3020,63 @@ void publishZenohStatus() {
   publishZenohBytes(&zenohStatusPub,
                     reinterpret_cast<const uint8_t *>(payload),
                     min(static_cast<size_t>(written), sizeof(payload) - 1));
+}
+
+void publishZenohEncoderSample() {
+  const EncoderSnapshot encoders = snapshotEncoders();
+  const uint64_t timestampUs = static_cast<uint64_t>(esp_timer_get_time());
+  char payload[640];
+  const int written = snprintf(payload,
+                               sizeof(payload),
+                               "{\"seq\":%lu,\"esp_us\":%llu,\"counts_per_rev\":%ld,"
+                               "\"crossover_low\":%ld,\"crossover_high\":%ld,"
+                               "\"m1_count\":%lld,\"m2_count\":%lld,"
+                               "\"m1_raw\":%u,\"m2_raw\":%u,"
+                               "\"m1_min_raw\":%u,\"m1_max_raw\":%u,"
+                               "\"m2_min_raw\":%u,\"m2_max_raw\":%u,"
+                               "\"m1_rotations\":%ld,\"m2_rotations\":%ld,"
+                               "\"m1_direction\":%d,\"m2_direction\":%d,"
+                               "\"m1_zone\":%d,\"m2_zone\":%d,"
+                               "\"m1_samples\":%lu,\"m2_samples\":%lu,"
+                               "\"m1_wraps\":%lu,\"m2_wraps\":%lu,"
+                               "\"m1_ambiguous\":%lu,\"m2_ambiguous\":%lu}",
+                               static_cast<unsigned long>(zenohEncoderSeq++),
+                               static_cast<unsigned long long>(timestampUs),
+                               static_cast<long>(kEncoderCountsPerRevolution),
+                               static_cast<long>(kEncoderCrossoverLowCounts),
+                               static_cast<long>(kEncoderCrossoverHighCounts),
+                               static_cast<long long>(encoders.motor1.count),
+                               static_cast<long long>(encoders.motor2.count),
+                               encoders.motor1.raw,
+                               encoders.motor2.raw,
+                               encoders.motor1.minRaw,
+                               encoders.motor1.maxRaw,
+                               encoders.motor2.minRaw,
+                               encoders.motor2.maxRaw,
+                               static_cast<long>(encoders.motor1.rotations),
+                               static_cast<long>(encoders.motor2.rotations),
+                               encoders.motor1.direction,
+                               encoders.motor2.direction,
+                               encoders.motor1.crossoverZone,
+                               encoders.motor2.crossoverZone,
+                               static_cast<unsigned long>(encoders.motor1.samples),
+                               static_cast<unsigned long>(encoders.motor2.samples),
+                               static_cast<unsigned long>(encoders.motor1.wrapEvents),
+                               static_cast<unsigned long>(encoders.motor2.wrapEvents),
+                               static_cast<unsigned long>(encoders.motor1.ambiguousDeltas),
+                               static_cast<unsigned long>(encoders.motor2.ambiguousDeltas));
+  if (written <= 0) {
+    ++zenohEncoderPublishErrors;
+    return;
+  }
+
+  if (publishZenohBytes(&zenohEncoderPub,
+                        reinterpret_cast<const uint8_t *>(payload),
+                        min(static_cast<size_t>(written), sizeof(payload) - 1))) {
+    ++zenohEncoderPublished;
+  } else {
+    ++zenohEncoderPublishErrors;
+  }
 }
 
 void publishZenohImuSample(uint64_t timestampUs) {
@@ -3110,6 +3451,7 @@ bool startZenohSession() {
 
   if (!declareZenohPublisher(kZenohVideoKey, &zenohVideoPub, Z_PRIORITY_DATA_HIGH) ||
       !declareZenohPublisher(kZenohImuKey, &zenohImuPub, Z_PRIORITY_REAL_TIME) ||
+      !declareZenohPublisher(kZenohEncoderKey, &zenohEncoderPub, Z_PRIORITY_REAL_TIME) ||
       !declareZenohPublisher(kZenohStatusKey, &zenohStatusPub, Z_PRIORITY_INTERACTIVE_LOW) ||
       !declareZenohPublisher(kZenohTimeSyncReplyKey, &zenohTimeSyncPub, Z_PRIORITY_INTERACTIVE_HIGH)) {
     Serial.println("Unable to declare one or more Zenoh publishers.");
@@ -3147,6 +3489,17 @@ void zenohImuTask(void *arg) {
   }
 }
 
+void zenohEncoderTask(void *arg) {
+  (void)arg;
+  TickType_t lastWake = xTaskGetTickCount();
+  const TickType_t periodTicks = pdMS_TO_TICKS(kEncoderSamplePeriodMs);
+
+  for (;;) {
+    updateEncoders();
+    vTaskDelayUntil(&lastWake, periodTicks);
+  }
+}
+
 void zenohCameraTask(void *arg) {
   (void)arg;
   TickType_t lastWake = xTaskGetTickCount();
@@ -3169,6 +3522,7 @@ void zenohStreamSetup() {
                 static_cast<unsigned long>(1000000 / kZenohImuPeriodUs));
 
   initMotorOutputs();
+  initEncoders();
   cameraReady = initCamera();
   if (!cameraReady) {
     Serial.println("Camera setup failed; Zenoh status will report camera_ready=false.");
@@ -3187,17 +3541,26 @@ void zenohStreamSetup() {
   }
 
   const BaseType_t imuTaskOk = xTaskCreatePinnedToCore(zenohImuTask, "zenoh_imu", 8192, nullptr, 3, nullptr, 1);
+  const BaseType_t encoderTaskOk = xTaskCreatePinnedToCore(zenohEncoderTask, "zenoh_enc", 4096, nullptr, 4, nullptr, 1);
   const BaseType_t cameraTaskOk = xTaskCreatePinnedToCore(zenohCameraTask, "zenoh_cam", 8192, nullptr, 2, nullptr, 0);
-  Serial.printf("Zenoh tasks: imu=%s camera=%s\n",
+  Serial.printf("Zenoh tasks: imu=%s encoders=%s camera=%s\n",
                 imuTaskOk == pdPASS ? "ok" : "failed",
+                encoderTaskOk == pdPASS ? "ok" : "failed",
                 cameraTaskOk == pdPASS ? "ok" : "failed");
 }
 
 void zenohStreamLoop() {
+  updateMotorFailsafe();
+
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("STA Wi-Fi disconnected; restarting station connection.");
     WiFi.disconnect(false);
     connectZenohWifi();
+  }
+
+  if (millis() - zenohLastEncoderMs >= kZenohEncoderPeriodMs) {
+    zenohLastEncoderMs = millis();
+    publishZenohEncoderSample();
   }
 
   if (millis() - zenohLastStatusMs >= kZenohStatusPeriodMs) {
@@ -3208,20 +3571,33 @@ void zenohStreamLoop() {
   if (millis() - zenohLastSerialStatsMs >= kZenohStatusPeriodMs) {
     static uint32_t lastVideoPublished = 0;
     static uint32_t lastImuPublished = 0;
+    static uint32_t lastEncoderPublished = 0;
     const uint32_t videoDelta = zenohVideoPublished - lastVideoPublished;
     const uint32_t imuDelta = zenohImuPublished - lastImuPublished;
+    const uint32_t encoderDelta = zenohEncoderPublished - lastEncoderPublished;
+    const EncoderSnapshot encoders = snapshotEncoders();
     lastVideoPublished = zenohVideoPublished;
     lastImuPublished = zenohImuPublished;
+    lastEncoderPublished = zenohEncoderPublished;
     zenohLastSerialStatsMs = millis();
     Serial.printf("zenoh stats ip=%s rssi=%d video=%lu(+%lu) imu=%lu(+%lu) "
+                  "enc=%lu(+%lu) counts=%lld/%lld raw=%u/%u rot=%ld/%ld "
                   "motors=%d/%d %u/%u cmd=%lu cmderr=%lu "
-                  "verr=%lu ierr=%lu frames=%lu/%lu last_jpeg=%lu heap=%lu\n",
+                  "verr=%lu ierr=%lu eerr=%lu frames=%lu/%lu last_jpeg=%lu heap=%lu\n",
                   WiFi.localIP().toString().c_str(),
                   WiFi.RSSI(),
                   static_cast<unsigned long>(zenohVideoPublished),
                   static_cast<unsigned long>(videoDelta),
                   static_cast<unsigned long>(zenohImuPublished),
                   static_cast<unsigned long>(imuDelta),
+                  static_cast<unsigned long>(zenohEncoderPublished),
+                  static_cast<unsigned long>(encoderDelta),
+                  static_cast<long long>(encoders.motor1.count),
+                  static_cast<long long>(encoders.motor2.count),
+                  encoders.motor1.raw,
+                  encoders.motor2.raw,
+                  static_cast<long>(encoders.motor1.rotations),
+                  static_cast<long>(encoders.motor2.rotations),
                   motor1Percent,
                   motor2Percent,
                   motor1PulseUs,
@@ -3230,6 +3606,7 @@ void zenohStreamLoop() {
                   static_cast<unsigned long>(zenohMotorCommandErrors),
                   static_cast<unsigned long>(zenohVideoPublishErrors),
                   static_cast<unsigned long>(zenohImuPublishErrors),
+                  static_cast<unsigned long>(zenohEncoderPublishErrors),
                   static_cast<unsigned long>(cameraFrameOkCount),
                   static_cast<unsigned long>(cameraFrameFailCount),
                   static_cast<unsigned long>(lastCameraFrameBytes),
@@ -3252,6 +3629,7 @@ void setup() {
   Serial.println();
   Serial.println("Booting XIAO ESP32S3 camera app");
   initMotorOutputs();
+  initEncoders();
   cameraReady = initCamera();
 
   if (!cameraReady) {
@@ -3275,6 +3653,7 @@ void loop() {
   server.handleClient();
   updateWifi();
   updateMotorFailsafe();
+  updateEncoders();
   updateImu();
 #endif
 }

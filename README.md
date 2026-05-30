@@ -47,10 +47,25 @@ To record without opening the viewer:
 .venv/bin/python scripts/zenoh_companion.py --duration 60 --rerun-save captures/session.rrd
 ```
 
+The companion records camera and IMU from the robot stream, and records motor
+training labels by subscribing directly to `flatdisk/xiao/cmd/motors/percent`.
+The 1 Hz robot status motor values are logged separately under `telemetry/`.
+
+To record every run automatically under a namespace folder with a unique file id:
+
+```sh
+.venv/bin/python scripts/zenoh_companion.py --duration 60 --connect tcp/192.168.1.238:7447 --logging-namespace flatdisk/xiao
+```
+
+This creates files like:
+
+`captures/flatdisk/xiao/20260528_143201-9f1a2b3c.rrd`
+
 The Zenoh build runs Wi-Fi station mode only and publishes:
 
 - `flatdisk/xiao/camera/jpeg`: binary `FDV1` header plus JPEG payload, targeted at 10 Hz.
 - `flatdisk/xiao/imu`: binary `FDI1` IMU sample, targeted at 60 Hz.
+- `flatdisk/xiao/motors/encoders`: JSON AS5600 motor encoder counts, targeted at 50 Hz.
 - `flatdisk/xiao/status`: JSON counters and device state.
 - `flatdisk/xiao/time_sync`: binary `FDSR` replies to `flatdisk/xiao/cmd/time_sync`.
 
@@ -66,6 +81,156 @@ The motor failsafe still returns both outputs to neutral if commands stop for 1 
 .venv/bin/python scripts/zenoh_companion.py --motor-us 1500 1500
 .venv/bin/python scripts/zenoh_companion.py --motor-percent 0 0
 ```
+
+For a small desktop motor-control GUI with live camera preview:
+
+```sh
+.venv/bin/python scripts/motor_gui.py
+```
+
+## ACT Training
+
+The `scripts/train_act.py` script trains a small ACT-style policy from Rerun `.rrd`
+recordings. It expects camera frames at `/camera/image` and motor labels at
+`/commands/motor1_percent` and `/commands/motor2_percent`.
+
+```sh
+python3 -m venv --system-site-packages .venv
+.venv/bin/python -m pip install -r requirements.txt -r requirements-train.txt
+.venv/bin/python scripts/train_act.py \
+  --data /Users/bencaunt/Documents/flat-disk-robot-code/captures/vla-act-ctrlr \
+  --temporal-ensembling \
+  --epochs 10
+```
+
+To train the same model in stick-mixed action space, use
+`--action-representation forward_steer`. This trains on
+`forward=(motor1+motor2)/2` and `steer=(motor1-motor2)/2`, while live inference
+and replay convert predictions back to motor1/motor2 percentages.
+
+For another useful ablation, add `--normalize-actions`. This centers and scales
+the model action dimensions using train-split statistics, saves those stats into
+the checkpoint, and live inference/replay denormalize before publishing or
+comparing motor commands.
+
+To make the policy less brittle when its own previous commands differ from the
+demonstration, add train-only past-action corruption such as
+`--past-action-noise-std-percent 2.0 --past-action-dropout-prob 0.15`.
+
+If camera/action alignment is suspect, train or replay with
+`--action-time-offset-s`. Positive values pair an image at time `t` with a later
+recorded command at `t + offset`. To sweep offsets for one recording:
+
+```sh
+.venv/bin/python scripts/sweep_act_action_offset.py \
+  captures/vla-act-no-obstacle-fast-collect/20260529_173242-a5aefa8a.rrd \
+  --checkpoint runs/act_vla_no_obstacle_fast_collect_norm_aug/best.pt \
+  --history-source demo \
+  --no-temporal-ensembling
+```
+
+Outputs are written under `runs/act_vla/` by default:
+
+- `config.json`: training and inference configuration, including temporal ensembling.
+- `metrics.json`: per-epoch train/validation loss and percent-output error.
+- `best.pt` and `last.pt`: PyTorch checkpoints.
+
+To run live ACT inference from the Zenoh camera stream:
+
+```sh
+zenohd --listen tcp/0.0.0.0:7447
+.venv/bin/python scripts/act_zenoh_inference.py --checkpoint runs/act_vla/best.pt
+```
+
+By default this runs inference and publishes monitor data to
+`flatdisk/xiao/act/status`, but it does not drive the robot. Add `--arm` to
+publish model outputs to `flatdisk/xiao/cmd/motors/percent`:
+
+```sh
+.venv/bin/python scripts/act_zenoh_inference.py --checkpoint runs/act_vla/best.pt --arm
+```
+
+The live camera frame is rotated 180 degrees before inference to match the motor
+GUI preview and the recorded ACT training data. Motor outputs are clamped to
+`+-10%` by default; use `--max-abs-output` to change that limit.
+
+To save a Rerun recording of live ACT inference while driving:
+
+```sh
+.venv/bin/python scripts/act_zenoh_inference.py \
+  --checkpoint runs/act_vla_no_obstacle_fast_collect_norm_aug/best.pt \
+  --no-temporal-ensembling \
+  --arm \
+  --rerun-save
+```
+
+The ACT inference recording logs `/act/camera/model_view`, raw and clamped motor
+predictions, chunk-0 and future chunk motor traces, forward/steer, motor deltas,
+video counters, and selected robot status values. With no explicit path,
+`--rerun-save` writes a unique recording under `captures/act-inference/`.
+
+To replay a recorded `.rrd` through a checkpoint and compare predicted motor
+outputs against the recorded commands:
+
+```sh
+.venv/bin/python scripts/replay_act_log.py \
+  captures/vla-act-no-obstacle-fast-collect/20260529_173242-a5aefa8a.rrd \
+  --checkpoint runs/act_vla_no_obstacle_fast_collect/best.pt \
+  --write-rerun
+```
+
+This writes a CSV, a PNG plot, an NPZ of predicted chunks, and optionally a
+Rerun comparison log under `runs/act_replay/`. Use
+`--history-source predicted` to mirror live inference, or
+`--history-source demo` to feed recorded past commands back into the model and
+isolate frame-to-action prediction quality.
+
+## Visual Localization
+
+A first-pass no-odometry hloc pipeline lives in `scripts/visual_localization.py`.
+It can build an SfM map from a video and then localize live Zenoh camera frames
+inside that map. Use the hloc Python environment for this script:
+
+```sh
+export KMP_DUPLICATE_LIB_OK=TRUE
+export OMP_NUM_THREADS=1
+export PYTORCH_ENABLE_MPS_FALLBACK=1
+export HLOC_DEVICE=mps
+
+../Hierarchical-Localization/.venv/bin/python scripts/visual_localization.py build-map \
+  --video captures/room_scan.mp4 \
+  --map-dir maps/room1 \
+  --fps 2 \
+  --max-frames 250 \
+  --global-conf netvlad
+
+../Hierarchical-Localization/.venv/bin/python scripts/visual_localization.py localize-zenoh \
+  --map-dir maps/room1 \
+  --namespace flatdisk/xiao \
+  --connect tcp/127.0.0.1:7447 \
+  --matcher-conf NN-superpoint \
+  --top-k 10 \
+  --max-rate 2
+```
+
+See `docs/visual-localization.md` for camera intrinsics, pose output, and
+matcher tradeoffs.
+
+For ESP32 camera calibration, collect checkerboard frames from Zenoh and write a
+calibration JSON that the visual localizer can read:
+
+```sh
+../Hierarchical-Localization/.venv/bin/python scripts/checkerboard_calibration_logger.py capture-calibrate \
+  --namespace flatdisk/xiao \
+  --connect tcp/127.0.0.1:7447 \
+  --pattern-cols 9 \
+  --pattern-rows 6 \
+  --square-size 0.024 \
+  --output-dir captures/esp32_calibration
+```
+
+Then pass `--query-camera-calibration captures/esp32_calibration/camera_calibration.json`
+to `localize-zenoh`. See `docs/camera-calibration.md`.
 
 If the serial monitor shows `AUTH_EXPIRE`, `AUTH_FAIL`, or `HANDSHAKE_TIMEOUT`, the ESP32 is failing before Zenoh. Check the `include/secrets.h` Wi-Fi credentials, bring the board closer to the AP, or use a stronger 2.4 GHz network before evaluating stream rates.
 
@@ -102,6 +267,13 @@ The motor controller outputs are RC-servo PWM for AM32 bidirectional drive:
 - 2000 us: full forward
 
 The firmware outputs neutral during boot and returns both channels to neutral if no motor command is received for 1 second. Connect ESP32 ground to the ESC signal ground.
+
+The motor encoders are analog AS5600 angle outputs read at 12-bit resolution. The firmware unwraps each 0..4095 sample stream with directional crossover detection, so `*_count` is signed encoder counts since boot and `*_rotations` increments or decrements on wrap crossings:
+
+- A3 / GPIO4: motor 1 AS5600 analog output
+- A10 / GPIO9: motor 2 AS5600 analog output
+- 4096 counts per revolution
+- The Zenoh encoder topic publishes `m1_count`, `m2_count`, `m1_raw`, `m2_raw`, raw min/max diagnostics, `m1_rotations`, `m2_rotations`, and direction/diagnostic fields.
 
 The IMU is configured for a BNO085/GY-BNO080-BNO085 module over I2C using a direct SHTP reader. This avoids depending on one breakout vendor's Arduino wrapper behavior:
 

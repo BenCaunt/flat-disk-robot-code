@@ -1,0 +1,4 @@
+interface:
+  display_name: "Update Travel Address"
+  short_description: "Update location/address context after travel."
+  default_prompt: "Update my address/location context for travel."
