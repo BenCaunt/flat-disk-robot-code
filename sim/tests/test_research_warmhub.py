@@ -770,6 +770,7 @@ def test_warmhub_status_snapshot_summarizes_queue_runs_and_next_actions(monkeypa
                             "trajectoryPreferenceCount": 0,
                             "qwenSftSampleCount": 4,
                             "qwenActionPreferenceCount": 6,
+                            "qwenDpoPreferenceCount": 6,
                         },
                     }
                 ]
@@ -798,6 +799,7 @@ def test_warmhub_status_snapshot_summarizes_queue_runs_and_next_actions(monkeypa
     assert snapshot["recent_training_readiness"][0]["sft_ready"] is True
     assert snapshot["recent_training_readiness"][0]["preference_tuning_ready"] is True
     assert snapshot["recent_training_readiness"][0]["qwen_action_preference_count"] == 6
+    assert snapshot["recent_training_readiness"][0]["qwen_dpo_preference_count"] == 6
     assert snapshot["recent_training_readiness"][0]["grpo_ready"] is False
     assert any("preflight" in action for action in snapshot["next_actions"])
 

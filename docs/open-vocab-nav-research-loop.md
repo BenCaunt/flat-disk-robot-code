@@ -34,7 +34,9 @@ ranking, SFT filtering, PPO, or GRPO; it is never inserted into model inputs or
 policy-review traces. `flatdisk-sim-prepare-qwen-tool-training` can also
 materialize guard-replaced actor actions as Qwen action-preference pairs, where
 the executed safe action is the chosen target and the rejected actor action is
-kept out of accepted SFT.
+kept out of accepted SFT. It also writes `qwen_dpo_messages.jsonl` with explicit
+`prompt`, `chosen`, `rejected`, and `images` columns for a future VLM
+preference-training worker.
 
 Seed config:
 
@@ -353,14 +355,15 @@ By default it skips tasks whose `notes.prerequisites` are not complete; pass
   `training_export/policy_dataset_v1/policy_samples.jsonl` with
   `policy_dataset_v1/evaluator_labels.jsonl`, resolve image paths, emit
   Qwen-compatible multimodal SFT JSONL plus `qwen_action_preferences.jsonl` for
-  guard-replaced actor actions, and write an audit report covering reward
-  filters, missing images, actor-vs-executed action targets, and privileged-token
-  leakage.
+  guard-replaced actor actions plus `qwen_dpo_messages.jsonl` for explicit
+  prompt/chosen/rejected preference training, and write an audit report covering
+  reward filters, missing images, actor-vs-executed action targets, and
+  privileged-token leakage.
 - Run `flatdisk-sim-nav-training-readiness` over both the `training_export/`
   tree and any `qwen_tool_training/` output before choosing a training method.
   The readiness assertion now reports raw policy samples, accepted Qwen SFT
-  records, Qwen guard-replacement preferences, missing Qwen images, and
-  privileged-token scans separately.
+  records, Qwen guard-replacement preferences, DPO handoff records, missing Qwen
+  images, and privileged-token scans separately.
 - Use `training_export/policy_review_traces.jsonl` first for failure triage and
   parallel-agent handoff; it records tool calls and contact-sheet paths without
   hidden target distances or THOR object metadata.

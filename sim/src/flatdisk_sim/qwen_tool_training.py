@@ -15,6 +15,7 @@ from .training_export import FORBIDDEN_POLICY_TOKENS
 QWEN_TOOL_SFT_SAMPLE_SCHEMA = "flatdisk.qwen_tool_sft_sample.v1"
 QWEN_TOOL_REJECTED_SAMPLE_SCHEMA = "flatdisk.qwen_tool_sft_rejected_sample.v1"
 QWEN_TOOL_ACTION_PREFERENCE_SCHEMA = "flatdisk.qwen_tool_action_preference.v1"
+QWEN_TOOL_DPO_SAMPLE_SCHEMA = "flatdisk.qwen_tool_dpo_sample.v1"
 QWEN_TOOL_TRAINING_MANIFEST_SCHEMA = "flatdisk.qwen_tool_training_manifest.v1"
 QWEN_TOOL_AUDIT_SCHEMA = "flatdisk.qwen_tool_training_audit.v1"
 
@@ -94,16 +95,20 @@ def prepare_qwen_tool_training(
     accepted_path = output_dir / "qwen_sft_messages.jsonl"
     rejected_path = output_dir / "rejected_samples.jsonl"
     preferences_path = output_dir / "qwen_action_preferences.jsonl"
+    dpo_path = output_dir / "qwen_dpo_messages.jsonl"
     audit_path = output_dir / "training_audit.json"
     manifest_path = output_dir / "qwen_tool_training_manifest.json"
+    dpo_preferences = [_dpo_sample_from_action_preference(preference) for preference in preferences]
     _write_jsonl(accepted_path, accepted)
     _write_jsonl(rejected_path, rejected)
     _write_jsonl(preferences_path, preferences)
+    _write_jsonl(dpo_path, dpo_preferences)
     audit = {
         "schema": QWEN_TOOL_AUDIT_SCHEMA,
         "accepted_count": len(accepted),
         "rejected_count": len(rejected),
         "action_preference_count": len(preferences),
+        "dpo_preference_count": len(dpo_preferences),
         "rejection_reasons": dict(sorted(reason_counts.items())),
         "action_preference_rejection_reasons": dict(sorted(preference_rejection_counts.items())),
         "require_existing_images": require_existing_images,
@@ -112,6 +117,7 @@ def prepare_qwen_tool_training(
         "policy_input_channel_only": True,
         "evaluator_labels_used_for_filtering_only": True,
         "action_preferences_use_model_facing_prompt_only": True,
+        "dpo_columns": ["prompt", "chosen", "rejected", "images"],
     }
     audit_path.write_text(json.dumps(audit, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     manifest = {
@@ -124,12 +130,15 @@ def prepare_qwen_tool_training(
         "qwen_sft_messages_jsonl": str(accepted_path),
         "rejected_samples_jsonl": str(rejected_path),
         "qwen_action_preferences_jsonl": str(preferences_path),
+        "qwen_dpo_messages_jsonl": str(dpo_path),
         "training_audit_json": str(audit_path),
         "sample_count": len(samples),
         "accepted_count": len(accepted),
         "rejected_count": len(rejected),
         "action_preference_count": len(preferences),
+        "dpo_preference_count": len(dpo_preferences),
         "message_format": "qwen-vl-chat-messages",
+        "preference_message_format": "trl-explicit-prompt-vlm-preference",
         "target_format": "json_object_with_thought_action_memory_update",
         "policy_input_only_in_messages": True,
         "privileged_labels_excluded_from_messages": True,
@@ -322,6 +331,38 @@ def _materialize_action_preference(
     )
 
 
+def _dpo_sample_from_action_preference(preference: dict[str, Any]) -> dict[str, Any]:
+    chosen_message = _assistant_message(preference.get("chosen_assistant_target_json"))
+    rejected_message = _assistant_message(preference.get("rejected_assistant_target_json"))
+    image_paths = [str(path) for path in preference.get("image_paths", []) if str(path)]
+    prompt_messages = preference.get("prompt_messages") if isinstance(preference.get("prompt_messages"), list) else []
+    sample_id = str(preference.get("sample_id") or "preference")
+    return {
+        "schema": QWEN_TOOL_DPO_SAMPLE_SCHEMA,
+        "sample_id": f"{sample_id}_dpo",
+        "source_preference_sample_id": preference.get("sample_id"),
+        "source_policy_sample_id": preference.get("source_policy_sample_id"),
+        "source_policy_step_id": preference.get("source_policy_step_id"),
+        "policy_input_hash": preference.get("policy_input_hash"),
+        "prompt": prompt_messages,
+        "chosen": [chosen_message],
+        "rejected": [rejected_message],
+        "images": image_paths,
+        "image_paths": image_paths,
+        "chosen_action_source": preference.get("chosen_action_source"),
+        "rejected_action_source": preference.get("rejected_action_source"),
+        "audit": {
+            "derived_from_action_preference": True,
+            "dpo_columns": ["prompt", "chosen", "rejected", "images"],
+            "explicit_prompt": True,
+            "vlm_image_column": "images",
+            "preference_labels_excluded_from_messages": True,
+            "evaluator_reward_excluded_from_messages": True,
+        },
+        "metadata": preference.get("metadata") if isinstance(preference.get("metadata"), dict) else {},
+    }
+
+
 def _label_sft_weight(label: dict[str, Any] | None) -> float:
     if not isinstance(label, dict):
         return 0.0
@@ -433,6 +474,10 @@ def _qwen_prompt_messages(user_text: str, *, image_paths: list[Path]) -> list[di
     content: list[dict[str, Any]] = [{"type": "image", "image": str(path)} for path in image_paths]
     content.append({"type": "text", "text": user_text})
     return [{"role": "user", "content": content}]
+
+
+def _assistant_message(payload: Any) -> dict[str, str]:
+    return {"role": "assistant", "content": json.dumps(payload if isinstance(payload, dict) else {}, sort_keys=True, default=str)}
 
 
 def _forbidden_tokens(messages: list[dict[str, Any]]) -> list[str]:

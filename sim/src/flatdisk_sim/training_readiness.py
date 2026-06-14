@@ -158,10 +158,12 @@ def _summarize_qwen_tool_training_manifest(manifest: dict[str, Any]) -> dict[str
     sft_path = _resolve_manifest_path(manifest, "qwen_sft_messages_jsonl")
     rejected_path = _resolve_manifest_path(manifest, "rejected_samples_jsonl")
     action_preferences_path = _resolve_manifest_path(manifest, "qwen_action_preferences_jsonl")
+    dpo_path = _resolve_manifest_path(manifest, "qwen_dpo_messages_jsonl")
     audit_path = _resolve_manifest_path(manifest, "training_audit_json")
     sft_records = _read_jsonl_if_exists(sft_path)
     rejected_records = _read_jsonl_if_exists(rejected_path)
     action_preferences = _read_jsonl_if_exists(action_preferences_path)
+    dpo_preferences = _read_jsonl_if_exists(dpo_path)
     required_artifacts = {
         "qwen_tool_training_manifest": manifest_path,
         "qwen_sft_messages_jsonl": sft_path,
@@ -169,8 +171,10 @@ def _summarize_qwen_tool_training_manifest(manifest: dict[str, Any]) -> dict[str
         "qwen_action_preferences_jsonl": action_preferences_path,
         "qwen_training_audit_json": audit_path,
     }
+    if manifest.get("qwen_dpo_messages_jsonl"):
+        required_artifacts["qwen_dpo_messages_jsonl"] = dpo_path
     missing_required = [name for name, path in required_artifacts.items() if path is None or not path.exists()]
-    qwen_records = [*sft_records, *action_preferences]
+    qwen_records = [*sft_records, *action_preferences, *dpo_preferences]
     return {
         "manifest_path": str(manifest_path),
         "output_dir": manifest.get("output_dir"),
@@ -178,12 +182,14 @@ def _summarize_qwen_tool_training_manifest(manifest: dict[str, Any]) -> dict[str
         "qwen_sft_sample_count": len(sft_records),
         "qwen_rejected_sample_count": len(rejected_records),
         "qwen_action_preference_count": len(action_preferences),
+        "qwen_dpo_preference_count": len(dpo_preferences),
         "qwen_missing_image_count": _qwen_missing_image_count(qwen_records),
         "forbidden_qwen_message_token_hits": _forbidden_qwen_message_hits(qwen_records),
         "missing_required_artifacts": missing_required,
         "manifest_accepted_count": _int(manifest.get("accepted_count")),
         "manifest_rejected_count": _int(manifest.get("rejected_count")),
         "manifest_action_preference_count": _int(manifest.get("action_preference_count")),
+        "manifest_dpo_preference_count": _int(manifest.get("dpo_preference_count")),
         "training_audit_path": str(audit_path or ""),
         "training_audit": _load_optional_json(audit_path),
     }
@@ -230,6 +236,7 @@ def _aggregate_with_qwen_tool_training(aggregate: dict[str, Any], qwen_runs: lis
             "qwen_sft_sample_count": sum(int(run["qwen_sft_sample_count"]) for run in qwen_runs),
             "qwen_rejected_sample_count": sum(int(run["qwen_rejected_sample_count"]) for run in qwen_runs),
             "qwen_action_preference_count": sum(int(run["qwen_action_preference_count"]) for run in qwen_runs),
+            "qwen_dpo_preference_count": sum(int(run["qwen_dpo_preference_count"]) for run in qwen_runs),
             "qwen_missing_image_count": sum(int(run["qwen_missing_image_count"]) for run in qwen_runs),
             "forbidden_qwen_message_token_hits": sorted(
                 {
@@ -277,7 +284,8 @@ def _readiness_decision(aggregate: dict[str, Any]) -> dict[str, Any]:
     qwen_materialized = aggregate["qwen_tool_training_manifest_count"] > 0
     sft_basis_count = aggregate["qwen_sft_sample_count"] if qwen_materialized else aggregate["policy_sample_count"]
     sft_ready = sft_basis_count > 0 and not blockers
-    preference_tuning_ready = aggregate["qwen_action_preference_count"] > 0 and not blockers
+    preference_basis_count = aggregate["qwen_dpo_preference_count"] or aggregate["qwen_action_preference_count"]
+    preference_tuning_ready = preference_basis_count > 0 and not blockers
     ppo_ready = aggregate["evaluator_label_count"] > 0 and aggregate["step_count"] > 0 and not blockers
     grpo_ready = (
         (aggregate["trajectory_preference_count"] > 0 or aggregate["max_rollouts_per_group"] >= 2 or aggregate["grpo_eligible_sample_count"] > 0)
@@ -289,6 +297,8 @@ def _readiness_decision(aggregate: dict[str, Any]) -> dict[str, Any]:
         warnings.append("Qwen tool-training materializer output was not found; SFT readiness is based on raw policy samples only.")
     if aggregate["qwen_action_preference_count"] == 0 and not blockers:
         warnings.append("Preference tuning is not yet ready: no Qwen guard-replacement action preferences were found.")
+    if aggregate["qwen_action_preference_count"] > 0 and aggregate["qwen_dpo_preference_count"] == 0 and not blockers:
+        warnings.append("Qwen preference tuning is using action-preference records only; rerun the materializer to emit qwen_dpo_messages.jsonl.")
     if not grpo_ready and not blockers:
         warnings.append("GRPO is not yet ready: need at least two comparable rollouts, preference pairs, or eligible grouped samples.")
     return {
@@ -415,7 +425,8 @@ def _warmhub_ops(report: dict[str, Any], *, about: str | None, author: str) -> l
         f"PPO={readiness['ppo_ready']}, GRPO={readiness['grpo_ready']}. "
         f"Samples={aggregate['policy_sample_count']}, labels={aggregate['evaluator_label_count']}, "
         f"trajectory_preferences={aggregate['trajectory_preference_count']}, "
-        f"qwen_action_preferences={aggregate['qwen_action_preference_count']}. Report: {report['report_path']}"
+        f"qwen_action_preferences={aggregate['qwen_action_preference_count']}, "
+        f"qwen_dpo_preferences={aggregate['qwen_dpo_preference_count']}. Report: {report['report_path']}"
     )
     return [
         {
@@ -443,6 +454,7 @@ def _warmhub_ops(report: dict[str, Any], *, about: str | None, author: str) -> l
                 "qwenSftSampleCount": int(aggregate["qwen_sft_sample_count"]),
                 "qwenRejectedSampleCount": int(aggregate["qwen_rejected_sample_count"]),
                 "qwenActionPreferenceCount": int(aggregate["qwen_action_preference_count"]),
+                "qwenDpoPreferenceCount": int(aggregate["qwen_dpo_preference_count"]),
                 "qwenMissingImageCount": int(aggregate["qwen_missing_image_count"]),
                 "grpoEligibleSampleCount": int(aggregate["grpo_eligible_sample_count"]),
                 "missingRequiredArtifacts": aggregate["missing_required_artifacts"],
@@ -483,7 +495,7 @@ def _markdown_report(report: dict[str, Any]) -> str:
         "| Channel | Ready | Evidence |",
         "|---|---:|---|",
         f"| SFT | `{readiness['sft_ready']}` | {_sft_evidence(aggregate)} |",
-        f"| Preference tuning | `{readiness['preference_tuning_ready']}` | {aggregate['qwen_action_preference_count']} Qwen guard-replacement action preferences |",
+        f"| Preference tuning | `{readiness['preference_tuning_ready']}` | {aggregate['qwen_dpo_preference_count']} DPO handoff records; {aggregate['qwen_action_preference_count']} Qwen guard-replacement action preferences |",
         f"| PPO | `{readiness['ppo_ready']}` | {aggregate['evaluator_label_count']} evaluator labels over {aggregate['step_count']} steps |",
         f"| GRPO | `{readiness['grpo_ready']}` | {aggregate['rollout_group_count']} rollout groups, {aggregate['trajectory_preference_count']} preferences |",
         "",
@@ -543,6 +555,7 @@ def main() -> int:
                 "grpo_ready": report["readiness"]["grpo_ready"],
                 "qwen_sft_sample_count": report["aggregate"]["qwen_sft_sample_count"],
                 "qwen_action_preference_count": report["aggregate"]["qwen_action_preference_count"],
+                "qwen_dpo_preference_count": report["aggregate"]["qwen_dpo_preference_count"],
                 "report_path": report["report_path"],
                 "markdown_path": report["markdown_path"],
                 "warmhub_ops_path": report["warmhub_ops_path"],

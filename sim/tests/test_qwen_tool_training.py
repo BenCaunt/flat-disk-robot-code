@@ -106,6 +106,7 @@ def test_prepare_qwen_tool_training_writes_policy_only_sft_messages(tmp_path: Pa
     assert manifest["accepted_count"] == 1
     assert manifest["rejected_count"] == 0
     assert manifest["action_preference_count"] == 0
+    assert manifest["dpo_preference_count"] == 0
     record = json.loads((tmp_path / "qwen_training" / "qwen_sft_messages.jsonl").read_text(encoding="utf-8").splitlines()[0])
     assert record["schema"] == "flatdisk.qwen_tool_sft_sample.v1"
     assert record["source_policy_step_id"] == "trial_001_step_000"
@@ -143,6 +144,7 @@ def test_prepare_qwen_tool_training_rejects_replaced_actor_actions(tmp_path: Pat
     assert manifest["accepted_count"] == 0
     assert manifest["rejected_count"] == 1
     assert manifest["action_preference_count"] == 1
+    assert manifest["dpo_preference_count"] == 1
     rejected = json.loads((tmp_path / "qwen_training" / "rejected_samples.jsonl").read_text(encoding="utf-8").splitlines()[0])
     assert "actor_action_differs_from_executed_action" in rejected["reject_reasons"]
     preference = json.loads((tmp_path / "qwen_training" / "qwen_action_preferences.jsonl").read_text(encoding="utf-8").splitlines()[0])
@@ -157,6 +159,22 @@ def test_prepare_qwen_tool_training_rejects_replaced_actor_actions(tmp_path: Pat
     messages_text = json.dumps(preference["prompt_messages"]).lower()
     for token in ("hidden_score", "nearest_target", "object_metadata", "target_pose", "distance_m", "candidate_step_reward", "final_distance_m"):
         assert token not in messages_text
+    dpo = json.loads((tmp_path / "qwen_training" / "qwen_dpo_messages.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert dpo["schema"] == "flatdisk.qwen_tool_dpo_sample.v1"
+    assert dpo["source_preference_sample_id"] == preference["sample_id"]
+    assert dpo["prompt"] == preference["prompt_messages"]
+    assert dpo["chosen"][0]["role"] == "assistant"
+    assert dpo["rejected"][0]["role"] == "assistant"
+    assert json.loads(dpo["chosen"][0]["content"])["action"]["tool"] == "wait"
+    assert json.loads(dpo["rejected"][0]["content"])["action"]["tool"] == "drive_straight"
+    assert dpo["images"] == preference["image_paths"]
+    assert dpo["image_paths"] == preference["image_paths"]
+    assert all(Path(path).exists() for path in dpo["images"])
+    assert dpo["audit"]["dpo_columns"] == ["prompt", "chosen", "rejected", "images"]
+    assert dpo["audit"]["evaluator_reward_excluded_from_messages"] is True
+    dpo_messages_text = json.dumps([dpo["prompt"], dpo["chosen"], dpo["rejected"]]).lower()
+    for token in ("hidden_score", "nearest_target", "object_metadata", "target_pose", "distance_m", "candidate_step_reward", "final_distance_m"):
+        assert token not in dpo_messages_text
 
 
 def test_prepare_qwen_tool_training_allows_safety_contract_terms(tmp_path: Path) -> None:

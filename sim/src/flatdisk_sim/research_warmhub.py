@@ -938,6 +938,7 @@ def _training_readiness_item_summary(item: dict[str, Any]) -> dict[str, Any]:
         "trajectory_preference_count": data.get("trajectoryPreferenceCount"),
         "qwen_sft_sample_count": data.get("qwenSftSampleCount"),
         "qwen_action_preference_count": data.get("qwenActionPreferenceCount"),
+        "qwen_dpo_preference_count": data.get("qwenDpoPreferenceCount"),
         "blockers": data.get("blockers") if isinstance(data.get("blockers"), list) else [],
         "warnings": data.get("warnings") if isinstance(data.get("warnings"), list) else [],
         "report_path": data.get("reportPath"),

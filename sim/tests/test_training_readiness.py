@@ -160,14 +160,16 @@ def test_training_readiness_counts_qwen_tool_action_preferences(tmp_path: Path) 
     assert report["aggregate"]["qwen_sft_sample_count"] == 0
     assert report["aggregate"]["qwen_rejected_sample_count"] == 1
     assert report["aggregate"]["qwen_action_preference_count"] == 1
+    assert report["aggregate"]["qwen_dpo_preference_count"] == 1
     assert report["aggregate"]["qwen_missing_image_count"] == 0
     assert report["aggregate"]["forbidden_qwen_message_token_hits"] == []
     readiness_op = next(op for op in report["warmhub_ops"] if op["name"] == "TrainingReadiness/qwen-preferences")
     assert readiness_op["data"]["preferenceTuningReady"] is True
     assert readiness_op["data"]["qwenActionPreferenceCount"] == 1
+    assert readiness_op["data"]["qwenDpoPreferenceCount"] == 1
     markdown = (tmp_path / "readiness" / "training_readiness.md").read_text(encoding="utf-8")
     assert "Preference tuning" in markdown
-    assert "1 Qwen guard-replacement action preferences" in markdown
+    assert "1 DPO handoff records; 1 Qwen guard-replacement action preferences" in markdown
 
 
 def test_training_readiness_relocates_runpod_absolute_manifest_paths(tmp_path: Path) -> None:

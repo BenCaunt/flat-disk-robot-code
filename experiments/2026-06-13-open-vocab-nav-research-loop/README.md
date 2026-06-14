@@ -147,7 +147,9 @@ Before training, run the Qwen tool-training materializer, which joins
 `policy_dataset_v1/evaluator_labels.jsonl`, validates referenced image paths,
 filters unsafe or rejected actions, emits Qwen-compatible multimodal SFT JSONL,
 emits `qwen_action_preferences.jsonl` for guard-replaced actor actions, and
-audits that no privileged evaluator fields leak into model-facing messages.
+emits `qwen_dpo_messages.jsonl` with explicit `prompt`, `chosen`, `rejected`,
+and `images` columns for VLM preference tuning. It also audits that no
+privileged evaluator fields leak into model-facing messages.
 Preference records use only the model-facing Qwen prompt as input, choose the
 executed safe action, and reject the original actor action without contaminating
 accepted SFT.
@@ -164,7 +166,8 @@ Then run training readiness over the run directory. It will discover both
 `training_export/training_manifest.json` and
 `qwen_tool_training/qwen_tool_training_manifest.json`, reporting raw policy
 samples, accepted Qwen SFT records, Qwen guard-replacement preference pairs, and
-any missing Qwen image or privileged-token blockers separately.
+standard DPO handoff records. Any missing Qwen image or privileged-token blocker
+is reported separately.
 
 ```bash
 uv run --project sim flatdisk-sim-nav-training-readiness \

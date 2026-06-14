@@ -473,6 +473,7 @@ def warmhub_shapes() -> dict[str, dict[str, Any]]:
                 "qwenSftSampleCount": "number",
                 "qwenRejectedSampleCount": "number",
                 "qwenActionPreferenceCount": "number",
+                "qwenDpoPreferenceCount": "number",
                 "qwenMissingImageCount": "number",
                 "grpoEligibleSampleCount": "number",
                 "missingRequiredArtifacts": ["string"],
