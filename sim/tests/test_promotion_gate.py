@@ -81,8 +81,14 @@ def test_evaluate_promotion_promotes_best_distance_improvement_without_prompt_au
     assert (tmp_path / "gate" / "promotion_decision.json").exists()
     assert (tmp_path / "gate" / "promotion_decision.md").exists()
     ops = json.loads((tmp_path / "gate" / "warmhub_ops.json").read_text(encoding="utf-8"))
-    assert ops[0]["name"] == "AgentNote/candidate-vs-baseline"
-    assert "promotion-gate" in ops[0]["data"]["tags"]
+    decision_op = next(op for op in ops if op["name"] == "PromotionDecision/candidate-vs-baseline")
+    assert decision_op["data"]["status"] == "promote"
+    assert decision_op["data"]["promote"] is True
+    assert decision_op["data"]["baselineVariants"] == ["qwen_baseline"]
+    assert decision_op["data"]["candidateVariants"] == ["qwen_candidate"]
+    assert decision_op["data"]["meanBestDistanceImprovementM"] == 0.1
+    note_op = next(op for op in ops if op["name"] == "AgentNote/candidate-vs-baseline")
+    assert "promotion-gate" in note_op["data"]["tags"]
 
 
 def test_evaluate_promotion_rejects_metric_regression(tmp_path: Path) -> None:

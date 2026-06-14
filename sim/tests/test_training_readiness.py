@@ -107,8 +107,14 @@ def test_training_readiness_marks_sft_ppo_and_grpo_ready_for_ranked_rollouts(tmp
     assert (tmp_path / "readiness" / "training_readiness.json").exists()
     assert (tmp_path / "readiness" / "training_readiness.md").exists()
     ops = json.loads((tmp_path / "readiness" / "warmhub_ops.json").read_text(encoding="utf-8"))
-    assert ops[0]["name"] == "AgentNote/ready"
-    assert "training-readiness" in ops[0]["data"]["tags"]
+    readiness_op = next(op for op in ops if op["name"] == "TrainingReadiness/ready")
+    assert readiness_op["data"]["status"] == "ready"
+    assert readiness_op["data"]["sftReady"] is True
+    assert readiness_op["data"]["ppoReady"] is True
+    assert readiness_op["data"]["grpoReady"] is True
+    assert readiness_op["data"]["policySampleCount"] == 2
+    note_op = next(op for op in ops if op["name"] == "AgentNote/ready")
+    assert "training-readiness" in note_op["data"]["tags"]
 
 
 def test_training_readiness_relocates_runpod_absolute_manifest_paths(tmp_path: Path) -> None:

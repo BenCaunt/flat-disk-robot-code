@@ -743,6 +743,16 @@ def warmhub_status_snapshot(
     failures = [_assertion_item_summary(item) for item in failure_payload.get("items", [])]
     result_payload = _query_assertions(repo, shape="SubAgentResult", limit=limit)
     results = [_assertion_item_summary(item) for item in result_payload.get("items", [])]
+    promotion_payload = _query_assertions(repo, shape="PromotionDecision", limit=limit)
+    promotion_decisions = _filter_assertions_about_experiment(
+        [_promotion_decision_item_summary(item) for item in promotion_payload.get("items", [])],
+        related_experiment=related_experiment,
+    )
+    training_payload = _query_assertions(repo, shape="TrainingReadiness", limit=limit)
+    training_readiness = _filter_assertions_about_experiment(
+        [_training_readiness_item_summary(item) for item in training_payload.get("items", [])],
+        related_experiment=related_experiment,
+    )
     return {
         "repo": repo,
         "related_experiment": related_experiment,
@@ -756,6 +766,8 @@ def warmhub_status_snapshot(
         },
         "recent_failures": failures,
         "recent_subagent_results": results,
+        "recent_promotion_decisions": promotion_decisions,
+        "recent_training_readiness": training_readiness,
         "next_actions": _status_next_actions(tasks_by_status, runs, failures),
     }
 
@@ -838,6 +850,45 @@ def _assertion_item_summary(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _promotion_decision_item_summary(item: dict[str, Any]) -> dict[str, Any]:
+    data = item.get("data") if isinstance(item.get("data"), dict) else {}
+    return {
+        "wref": item.get("wref"),
+        "name": item.get("name"),
+        "about": item.get("aboutWref") or item.get("about"),
+        "status": data.get("status"),
+        "promote": data.get("promote"),
+        "baseline_variants": data.get("baselineVariants") if isinstance(data.get("baselineVariants"), list) else [],
+        "candidate_variants": data.get("candidateVariants") if isinstance(data.get("candidateVariants"), list) else [],
+        "mean_best_distance_improvement_m": data.get("meanBestDistanceImprovementM"),
+        "mean_final_distance_regression_m": data.get("meanFinalDistanceRegressionM"),
+        "blockers": data.get("blockers") if isinstance(data.get("blockers"), list) else [],
+        "warnings": data.get("warnings") if isinstance(data.get("warnings"), list) else [],
+        "report_path": data.get("reportPath"),
+        "created_at": data.get("createdAt"),
+    }
+
+
+def _training_readiness_item_summary(item: dict[str, Any]) -> dict[str, Any]:
+    data = item.get("data") if isinstance(item.get("data"), dict) else {}
+    return {
+        "wref": item.get("wref"),
+        "name": item.get("name"),
+        "about": item.get("aboutWref") or item.get("about"),
+        "status": data.get("status"),
+        "sft_ready": data.get("sftReady"),
+        "ppo_ready": data.get("ppoReady"),
+        "grpo_ready": data.get("grpoReady"),
+        "policy_sample_count": data.get("policySampleCount"),
+        "evaluator_label_count": data.get("evaluatorLabelCount"),
+        "trajectory_preference_count": data.get("trajectoryPreferenceCount"),
+        "blockers": data.get("blockers") if isinstance(data.get("blockers"), list) else [],
+        "warnings": data.get("warnings") if isinstance(data.get("warnings"), list) else [],
+        "report_path": data.get("reportPath"),
+        "created_at": data.get("createdAt"),
+    }
+
+
 def _filter_related_experiment(items: list[dict[str, Any]], *, related_experiment: str | None) -> list[dict[str, Any]]:
     if not related_experiment:
         return items
@@ -848,6 +899,14 @@ def _filter_related_experiment(items: list[dict[str, Any]], *, related_experimen
         for item in items
         if str(item.get("related_experiment") or item.get("experiment") or "").split("@", 1)[0] == versionless
     ]
+
+
+def _filter_assertions_about_experiment(items: list[dict[str, Any]], *, related_experiment: str | None) -> list[dict[str, Any]]:
+    if not related_experiment:
+        return items
+    experiment_ref = related_experiment if related_experiment.startswith("NavExperiment/") else f"NavExperiment/{related_experiment}"
+    versionless = experiment_ref.split("@", 1)[0]
+    return [item for item in items if str(item.get("about") or "").split("@", 1)[0] == versionless]
 
 
 def _status_next_actions(tasks_by_status: dict[str, list[dict[str, Any]]], runs: list[dict[str, Any]], failures: list[dict[str, Any]]) -> list[str]:
@@ -1544,6 +1603,21 @@ def _format_status_text(snapshot: dict[str, Any]) -> str:
         lines.append("Recent failures:")
         for failure in snapshot["recent_failures"][:5]:
             lines.append(f"  - {failure.get('about') or failure.get('wref')}: {failure.get('summary') or failure.get('reason')}")
+    if snapshot.get("recent_promotion_decisions"):
+        lines.append("")
+        lines.append("Recent promotion decisions:")
+        for decision in snapshot["recent_promotion_decisions"][:5]:
+            candidates = ",".join(decision.get("candidate_variants", []))
+            lines.append(f"  - {decision.get('status')} {candidates}: promote={decision.get('promote')}")
+    if snapshot.get("recent_training_readiness"):
+        lines.append("")
+        lines.append("Recent training readiness:")
+        for readiness in snapshot["recent_training_readiness"][:5]:
+            lines.append(
+                "  - "
+                f"{readiness.get('status')}: SFT={readiness.get('sft_ready')}, "
+                f"PPO={readiness.get('ppo_ready')}, GRPO={readiness.get('grpo_ready')}"
+            )
     lines.append("")
     lines.append("Next actions:")
     for action in snapshot.get("next_actions", []):

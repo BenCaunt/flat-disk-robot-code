@@ -700,6 +700,41 @@ def test_warmhub_status_snapshot_summarizes_queue_runs_and_next_actions(monkeypa
             }
         if command[:3] == ["wh", "assertion", "list"] and "SubAgentResult" in command:
             return {"items": []}
+        if command[:3] == ["wh", "assertion", "list"] and "PromotionDecision" in command:
+            return {
+                "items": [
+                    {
+                        "wref": "PromotionDecision/gate-a",
+                        "aboutWref": "NavExperiment/exp@v1",
+                        "data": {
+                            "status": "reject",
+                            "promote": False,
+                            "candidateVariants": ["qwen_candidate"],
+                            "meanBestDistanceImprovementM": -0.4,
+                            "blockers": ["regressed"],
+                            "createdAt": "2026-06-14T00:00:00Z",
+                        },
+                    }
+                ]
+            }
+        if command[:3] == ["wh", "assertion", "list"] and "TrainingReadiness" in command:
+            return {
+                "items": [
+                    {
+                        "wref": "TrainingReadiness/ready-a",
+                        "aboutWref": "NavExperiment/exp@v1",
+                        "data": {
+                            "status": "ready",
+                            "sftReady": True,
+                            "ppoReady": True,
+                            "grpoReady": False,
+                            "policySampleCount": 18,
+                            "evaluatorLabelCount": 18,
+                            "trajectoryPreferenceCount": 0,
+                        },
+                    }
+                ]
+            }
         raise AssertionError(command)
 
     monkeypatch.setattr(research_warmhub, "_read_warmhub_json", fake_read)
@@ -709,6 +744,10 @@ def test_warmhub_status_snapshot_summarizes_queue_runs_and_next_actions(monkeypa
     assert snapshot["task_counts"]["planned"] == 2
     assert snapshot["run_counts"] == {"total": 1, "success": 0, "failed": 1}
     assert snapshot["recent_failures"][0]["summary"] == "stalled"
+    assert snapshot["recent_promotion_decisions"][0]["status"] == "reject"
+    assert snapshot["recent_promotion_decisions"][0]["candidate_variants"] == ["qwen_candidate"]
+    assert snapshot["recent_training_readiness"][0]["sft_ready"] is True
+    assert snapshot["recent_training_readiness"][0]["grpo_ready"] is False
     assert any("preflight" in action for action in snapshot["next_actions"])
 
 
@@ -782,6 +821,8 @@ def test_warmhub_status_cli_prints_json(monkeypatch, capsys) -> None:
             "run_counts": {"total": 0, "success": 0, "failed": 0},
             "recent_failures": [],
             "recent_subagent_results": [],
+            "recent_promotion_decisions": [],
+            "recent_training_readiness": [],
             "next_actions": ["Run planned preflight task next."],
         },
     )

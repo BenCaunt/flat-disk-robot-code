@@ -331,26 +331,54 @@ def _default_about(experiment_id: str | None) -> str | None:
 
 
 def _warmhub_ops(report: dict[str, Any], *, about: str | None, author: str) -> list[dict[str, Any]]:
-    data = {
+    decision = report["decision"]
+    structured = {
+        "operation": "add",
+        "kind": "assertion",
+        "name": f"PromotionDecision/{_safe_id(report['decision_id'])}",
+        "about": about,
+        "data": {
+            "decisionId": report["decision_id"],
+            "status": decision["status"],
+            "promote": bool(decision["promote"]),
+            "createdAt": report["compared_at"],
+            "author": author,
+            "baselineVariants": report["baseline"].get("variants", []),
+            "candidateVariants": report["candidate"].get("variants", []),
+            "baselineTrialCount": int(report["baseline"].get("completed_trial_count") or 0),
+            "candidateTrialCount": int(report["candidate"].get("completed_trial_count") or 0),
+            "successRateDelta": decision["success_rate_delta"],
+            "meanBestDistanceImprovementM": decision["mean_best_distance_improvement_m"],
+            "meanFinalDistanceRegressionM": decision["mean_final_distance_regression_m"],
+            "blockers": decision["blockers"],
+            "warnings": decision["warnings"],
+            "reasons": decision["reasons"],
+            "reportPath": report["report_path"],
+            "markdownPath": report["markdown_path"],
+            "confidence": 0.85,
+        },
+    }
+    note_data = {
         "author": author,
         "createdAt": report["compared_at"],
         "note": (
-            f"Promotion gate {report['decision']['status']}: "
-            f"best-distance delta={report['decision']['mean_best_distance_improvement_m']}, "
-            f"final-distance regression={report['decision']['mean_final_distance_regression_m']}. "
+            f"Promotion gate {decision['status']}: "
+            f"best-distance delta={decision['mean_best_distance_improvement_m']}, "
+            f"final-distance regression={decision['mean_final_distance_regression_m']}. "
             f"Report: {report['report_path']}"
         ),
-        "tags": ["open-vocab-nav", "promotion-gate", report["decision"]["status"]],
+        "tags": ["open-vocab-nav", "promotion-gate", decision["status"]],
         "confidence": 0.85,
     }
     return [
+        structured,
         {
             "operation": "add",
             "kind": "assertion",
             "name": f"AgentNote/{_safe_id(report['decision_id'])}",
             "about": about,
-            "data": data,
-        }
+            "data": note_data,
+        },
     ]
 
 

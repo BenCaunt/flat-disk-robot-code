@@ -272,13 +272,44 @@ def _default_about(experiment_id: str | None) -> str | None:
 
 def _warmhub_ops(report: dict[str, Any], *, about: str | None, author: str) -> list[dict[str, Any]]:
     readiness = report["readiness"]
+    aggregate = report["aggregate"]
     note = (
         f"Training readiness {readiness['status']}: "
         f"SFT={readiness['sft_ready']}, PPO={readiness['ppo_ready']}, GRPO={readiness['grpo_ready']}. "
-        f"Samples={report['aggregate']['policy_sample_count']}, labels={report['aggregate']['evaluator_label_count']}, "
-        f"preferences={report['aggregate']['trajectory_preference_count']}. Report: {report['report_path']}"
+        f"Samples={aggregate['policy_sample_count']}, labels={aggregate['evaluator_label_count']}, "
+        f"preferences={aggregate['trajectory_preference_count']}. Report: {report['report_path']}"
     )
     return [
+        {
+            "operation": "add",
+            "kind": "assertion",
+            "name": f"TrainingReadiness/{_safe_id(report['analysis_id'])}",
+            "about": about,
+            "data": {
+                "analysisId": report["analysis_id"],
+                "status": readiness["status"],
+                "createdAt": report["created_at"],
+                "author": author,
+                "sftReady": bool(readiness["sft_ready"]),
+                "ppoReady": bool(readiness["ppo_ready"]),
+                "grpoReady": bool(readiness["grpo_ready"]),
+                "runCount": int(aggregate["run_count"]),
+                "episodeCount": int(aggregate["episode_count"]),
+                "stepCount": int(aggregate["step_count"]),
+                "policySampleCount": int(aggregate["policy_sample_count"]),
+                "evaluatorLabelCount": int(aggregate["evaluator_label_count"]),
+                "rolloutGroupCount": int(aggregate["rollout_group_count"]),
+                "trajectoryPreferenceCount": int(aggregate["trajectory_preference_count"]),
+                "grpoEligibleSampleCount": int(aggregate["grpo_eligible_sample_count"]),
+                "missingRequiredArtifacts": aggregate["missing_required_artifacts"],
+                "forbiddenPolicySampleTokenHits": aggregate["forbidden_policy_sample_token_hits"],
+                "blockers": readiness["blockers"],
+                "warnings": readiness["warnings"],
+                "reportPath": report["report_path"],
+                "markdownPath": report["markdown_path"],
+                "confidence": 0.85,
+            },
+        },
         {
             "operation": "add",
             "kind": "assertion",
