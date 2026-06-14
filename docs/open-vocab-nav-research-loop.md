@@ -333,6 +333,8 @@ By default it skips tasks whose `notes.prerequisites` are not complete; pass
 - Use `training_export/policy_review_traces.jsonl` first for failure triage and
   parallel-agent handoff; it records tool calls and contact-sheet paths without
   hidden target distances or THOR object metadata.
+- Use `flatdisk-sim-analyze-nav-failures` to turn policy-review traces into
+  WarmHub AgentNotes with trace-grounded prompt/tool recommendations.
 - Use `rollout_groups.jsonl` / `trajectory_preferences.jsonl` for trajectory
   ranking only after the materializer can prove policy inputs remain clean and
   there are enough successful and failed runs for a meaningful comparison.

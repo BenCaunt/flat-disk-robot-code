@@ -66,6 +66,7 @@ flatdisk-sim-nomad-topomap-doctor = "flatdisk_sim.nomad_topomap_doctor:main"
 flatdisk-sim-convert-topological-graph = "flatdisk_sim.topological_graph_adapter:main"
 flatdisk-sim-export-nav-training = "flatdisk_sim.training_export:main"
 flatdisk-sim-prepare-qwen-tool-training = "flatdisk_sim.qwen_tool_training:main"
+flatdisk-sim-analyze-nav-failures = "flatdisk_sim.failure_analysis:main"
 
 [build-system]
 requires = ["hatchling"]

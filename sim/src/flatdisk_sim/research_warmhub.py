@@ -342,6 +342,16 @@ def make_task_plan_ops(
             tags=[*common_tags, "failure-analysis", "prompt-design"],
             prerequisites=run_task_refs,
             notes={
+                "commands": [
+                    (
+                        "uv run --project sim flatdisk-sim-analyze-nav-failures "
+                        f"--input {output_dir} "
+                        f"--output-dir {output_dir / 'failure_analysis' / plan_name} "
+                        f"--experiment-id {config.experiment_id} "
+                        f"--about {experiment_ref} "
+                        "--commit-warmhub"
+                    )
+                ],
                 "warmhub_queries": [
                     f"wh thing query --repo {DEFAULT_WARMHUB_REPO} --shape NavEvalRun --limit 20 --json",
                     f"wh assertion list --repo {DEFAULT_WARMHUB_REPO} --shape FailureObservation --limit 20 --json",

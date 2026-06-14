@@ -6,30 +6,30 @@
   ],
   "experiment_id": "open_vocab_nav_qwen_strategy_runpod_linux_v1",
   "max_steps": 18,
-  "objective": "Generated general Qwen strategy sweep for indoor navigation using bounded tools, scratchpad memory, motion strips, and optional CLIP-backed topomap image memory.",
+  "objective": "Generated general Qwen strategy sweep based on open_vocab_nav_qwen_topomap_memory_runpod_linux_v1.",
   "parallelism": 1,
   "render_height": 240,
   "render_width": 320,
   "repetitions": 1,
   "rerun": false,
-  "strict_model_based": true,
   "strategy_sweep": {
     "no_static_object_or_color_examples": true,
     "schema": "flatdisk.nav_strategy_sweep_config.v1",
     "semantic_topomap_terms_allowed": false,
     "source_experiment_id": "open_vocab_nav_qwen_topomap_memory_runpod_linux_v1",
-    "strategy_count": 5
+    "strategy_count": 6
   },
+  "strict_model_based": true,
   "success_radius_m": 0.1,
   "variants": [
     {
       "actor_rules": [],
+      "critic_mode": "none",
       "critic_rules": [],
       "description": "Qwen tool-use baseline with bounded motion, memory, motion strips, and model-based phrase grounding.",
       "name": "qwen_baseline",
       "object_drive_detector": "florence-transformers",
       "prompt_profile": "baseline",
-      "critic_mode": "none",
       "qwen_endpoint": "http://127.0.0.1:8000/v1/chat/completions",
       "qwen_max_tokens": 512,
       "qwen_model": "Qwen/Qwen3-VL-8B-Instruct",
@@ -43,6 +43,7 @@
         "After any movement that changes the view, compare the latest RGB frame with the previous motion strip before selecting the next tool.",
         "Avoid long straight-line commitments unless the latest image provides a plausible free path or clear target evidence."
       ],
+      "critic_mode": "none",
       "critic_rules": [
         "Warn when the actor repeats the same search pattern without new visual evidence or a memory-based reason.",
         "Approve bounded viewpoint-seeking actions when they increase visual coverage and preserve the chance to reassess."
@@ -51,7 +52,6 @@
       "name": "qwen_frontier_scan",
       "object_drive_detector": "florence-transformers",
       "prompt_profile": "frontier-scan-v1",
-      "critic_mode": "none",
       "qwen_endpoint": "http://127.0.0.1:8000/v1/chat/completions",
       "qwen_max_tokens": 512,
       "qwen_model": "Qwen/Qwen3-VL-8B-Instruct",
@@ -65,6 +65,7 @@
         "When evidence is partial, first turn or move briefly to improve centering rather than declaring success.",
         "When evidence is weak, switch to exploration rather than forcing a final-goal servo phrase."
       ],
+      "critic_mode": "none",
       "critic_rules": [
         "Reject stop decisions that do not cite repeated strong live visual evidence.",
         "Warn when exploitation is attempted from weak or stale evidence."
@@ -73,7 +74,6 @@
       "name": "qwen_evidence_exploit",
       "object_drive_detector": "florence-transformers",
       "prompt_profile": "evidence-exploit-v1",
-      "critic_mode": "none",
       "qwen_endpoint": "http://127.0.0.1:8000/v1/chat/completions",
       "qwen_max_tokens": 512,
       "qwen_model": "Qwen/Qwen3-VL-8B-Instruct",
@@ -87,6 +87,7 @@
         "If short drives do not improve visual evidence, switch to rotation or memory lookup instead of continuing forward.",
         "Prefer reversible, bounded actions when uncertainty is high."
       ],
+      "critic_mode": "none",
       "critic_rules": [
         "Warn when the actor repeats a failed tool choice without explaining what changed.",
         "Approve switching strategies after clear stalled progress or failed tool feedback."
@@ -95,7 +96,30 @@
       "name": "qwen_recovery_switch",
       "object_drive_detector": "florence-transformers",
       "prompt_profile": "recovery-switch-v1",
+      "qwen_endpoint": "http://127.0.0.1:8000/v1/chat/completions",
+      "qwen_max_tokens": 512,
+      "qwen_model": "Qwen/Qwen3-VL-8B-Instruct",
+      "qwen_temperature": 0.0,
+      "runner": "qwen"
+    },
+    {
+      "actor_rules": [
+        "Maintain failed_servo_prompts and failed_viewpoints in memory_update; remove an entry only after a later tool result reports stable grounding.",
+        "If the previous grounding_audit says the detector box mismatched or next_prompt_should_change is true, do not reuse the same visual_servo_object prompt on the next step.",
+        "After two rejected or no-motion steps from similar views, choose a viewpoint-changing tool or query_topomap_memory before another visual_servo_object call.",
+        "Use non-target visible landmarks only as navigation waypoints; state why the landmark move should improve the next observation and reassess immediately afterward.",
+        "Treat sparse_detection_coverage and no_detection as weak control evidence, not proof that the robot is moving toward the goal."
+      ],
       "critic_mode": "none",
+      "critic_rules": [
+        "Reject a repeated visual_servo_object prompt when the previous grounding_audit says the prompt should change or the box mismatched.",
+        "Warn when the actor narrates a strategy change but the emitted action reuses the same tool arguments.",
+        "Approve bounded viewpoint changes or memory queries after repeated unstable phrase grounding."
+      ],
+      "description": "Trace-derived strategy that binds grounding audits to the next action and avoids repeated failed servo prompts.",
+      "name": "qwen_grounding_recovery",
+      "object_drive_detector": "florence-transformers",
+      "prompt_profile": "grounding-recovery-v1",
       "qwen_endpoint": "http://127.0.0.1:8000/v1/chat/completions",
       "qwen_max_tokens": 512,
       "qwen_model": "Qwen/Qwen3-VL-8B-Instruct",
@@ -109,6 +133,7 @@
         "After memory lookup, choose a bounded action that is consistent with both the latest RGB frame and the returned image memory.",
         "If memory is unavailable or conflicts with the latest frame, fall back to camera-only exploration."
       ],
+      "critic_mode": "none",
       "critic_rules": [
         "Approve memory lookup when uncertainty is high and no strong live target evidence is present.",
         "Warn if memory output is treated as ground-truth success."
@@ -117,7 +142,6 @@
       "name": "qwen_topomap_memory",
       "object_drive_detector": "florence-transformers",
       "prompt_profile": "topomap-memory-v2",
-      "critic_mode": "none",
       "qwen_endpoint": "http://127.0.0.1:8000/v1/chat/completions",
       "qwen_max_tokens": 512,
       "qwen_model": "Qwen/Qwen3-VL-8B-Instruct",

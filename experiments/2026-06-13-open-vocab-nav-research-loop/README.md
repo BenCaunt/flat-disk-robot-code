@@ -118,6 +118,12 @@ off. It relies on the default strict research-loop gate. Use
 `flatdisk-sim-research-warmhub task-plan-config` to seed planned Runpod
 trial-slice tasks from it.
 
+The `qwen_grounding_recovery` variant is derived from policy-review trace
+failure analysis. It specifically tests whether Qwen can bind its own
+grounding-audit result to the next action: after mismatched or unstable visual
+servo grounding, it should avoid repeating the same servo prompt and instead
+change viewpoint, query image memory, or use a distinct visible waypoint.
+
 Executed sweeps write `training_export/policy_steps.jsonl`,
 `training_export/policy_review_traces.jsonl`,
 `training_export/episode_rollouts.jsonl`, `training_export/rollout_groups.jsonl`,

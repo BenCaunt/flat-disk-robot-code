@@ -217,6 +217,9 @@ def test_task_plan_config_creates_planned_slice_tasks(tmp_path) -> None:
     analysis_notes = json.loads(failure_analysis["data"]["notes"])
     assert "AgentTask/plan-001-run-qwen_baseline-living_room_sofa" in analysis_notes["prerequisites"]
     assert "AgentTask/plan-001-run-qwen_topomap-living_room_sofa" in analysis_notes["prerequisites"]
+    assert analysis_notes["commands"][0].startswith("uv run --project sim flatdisk-sim-analyze-nav-failures")
+    assert "--input sim/scratch/open_vocab_nav_research_loop" in analysis_notes["commands"][0]
+    assert "--commit-warmhub" in analysis_notes["commands"][0]
 
 
 def test_task_finish_ops_write_subagent_result() -> None:

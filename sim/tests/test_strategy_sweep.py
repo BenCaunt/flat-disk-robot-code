@@ -36,7 +36,7 @@ def test_generate_strategy_config_produces_qwen_variants_without_semantic_terms(
     output_config = tmp_path / "generated.json"
     output_config.write_text(json.dumps(generated), encoding="utf-8")
     parsed = load_config(output_config)
-    assert len(parsed.variants) == 5
+    assert len(parsed.variants) == 6
     assert {variant.runner for variant in parsed.variants} == {"qwen"}
     assert all(variant.qwen_endpoint == "http://127.0.0.1:8000/v1/chat/completions" for variant in parsed.variants)
     assert all(variant.qwen_model == "Qwen/Qwen3-VL-8B-Instruct" for variant in parsed.variants)
@@ -45,6 +45,9 @@ def test_generate_strategy_config_produces_qwen_variants_without_semantic_terms(
     topomap = next(variant for variant in parsed.variants if variant.name == "qwen_topomap_memory")
     assert topomap.topomap_memory_use_clip is True
     assert topomap.topomap_memory_map_dir == "sim/scratch/semantic_topomaps/{episode}_clip"
+    grounding = next(variant for variant in parsed.variants if variant.name == "qwen_grounding_recovery")
+    assert grounding.prompt_profile == "grounding-recovery-v1"
+    assert any("failed_servo_prompts" in rule for rule in grounding.actor_rules)
 
 
 def test_generated_strategy_prompts_pass_static_generality_audit(tmp_path) -> None:
@@ -119,12 +122,13 @@ def test_strategy_sweep_cli_writes_loadable_config(monkeypatch, tmp_path, capsys
 
     assert strategy_sweep.main() == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["variant_count"] == 4
+    assert payload["variant_count"] == 5
     parsed = load_config(output_config)
-    assert len(parsed.variants) == 4
+    assert len(parsed.variants) == 5
     assert {variant.name for variant in parsed.variants} == {
         "qwen_baseline",
         "qwen_frontier_scan",
         "qwen_evidence_exploit",
         "qwen_recovery_switch",
+        "qwen_grounding_recovery",
     }

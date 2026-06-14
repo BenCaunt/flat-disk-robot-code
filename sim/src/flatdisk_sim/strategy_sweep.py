@@ -74,6 +74,23 @@ STRATEGY_TEMPLATES: tuple[StrategyTemplate, ...] = (
         ),
     ),
     StrategyTemplate(
+        name="grounding_recovery",
+        description="Trace-derived strategy that binds grounding audits to the next action and avoids repeated failed servo prompts.",
+        prompt_profile="grounding-recovery-v1",
+        actor_rules=(
+            "Maintain failed_servo_prompts and failed_viewpoints in memory_update; remove an entry only after a later tool result reports stable grounding.",
+            "If the previous grounding_audit says the detector box mismatched or next_prompt_should_change is true, do not reuse the same visual_servo_object prompt on the next step.",
+            "After two rejected or no-motion steps from similar views, choose a viewpoint-changing tool or query_topomap_memory before another visual_servo_object call.",
+            "Use non-target visible landmarks only as navigation waypoints; state why the landmark move should improve the next observation and reassess immediately afterward.",
+            "Treat sparse_detection_coverage and no_detection as weak control evidence, not proof that the robot is moving toward the goal.",
+        ),
+        critic_rules=(
+            "Reject a repeated visual_servo_object prompt when the previous grounding_audit says the prompt should change or the box mismatched.",
+            "Warn when the actor narrates a strategy change but the emitted action reuses the same tool arguments.",
+            "Approve bounded viewpoint changes or memory queries after repeated unstable phrase grounding.",
+        ),
+    ),
+    StrategyTemplate(
         name="topomap_memory",
         description="Memory-first strategy that uses CLIP-backed topomap image memory as a non-motion route hint when live evidence is weak.",
         prompt_profile="topomap-memory-v2",
