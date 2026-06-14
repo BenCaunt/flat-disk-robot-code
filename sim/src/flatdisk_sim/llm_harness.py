@@ -88,6 +88,7 @@ POLICY_INPUT_ALLOWLIST = [
     "topomap image-memory tool result",
     "relative memory log",
     "previous motion strip",
+    "previous raw/detector paired grounding audit strip",
     "previous detector debug overlay strip",
 ]
 PROMPT_MEMORY_RECORD_LIMIT = 8
@@ -107,6 +108,7 @@ PROMPT_TOOL_RESULT_KEYS = {
     "frame_count",
     "goal_candidates",
     "goal_query",
+    "grounding_audit_contact_sheet",
     "heading_error_deg",
     "last_command",
     "map_summary",
@@ -1015,9 +1017,12 @@ def build_actor_prompt(
     rules = [
         "Use only the provided camera/IMU observation, memory, and tool results.",
         "When an image is attached, treat it as the authoritative latest RGB camera frame.",
-        "Image attachments are ordered as: latest RGB frame; previous raw motion strip if present; previous detector debug overlay strip if present; topomap contact sheet if present.",
+        "Image attachments are ordered as: latest RGB frame; previous raw/detector paired grounding audit strip if present; previous raw motion strip if present; previous detector debug overlay strip if present; topomap contact sheet if present.",
+        "When a previous raw/detector paired grounding audit strip is attached, read columns left-to-right; each column shows the same moment as raw camera above and detector overlay below.",
         "When a previous raw motion strip is attached, read it left-to-right as evenly spaced frames from the last tool call.",
         "When a previous detector debug overlay strip is attached, inspect the boxes/labels yourself; if the box is on the wrong object, treat moved=true as a detector grounding failure and switch strategy or use a more precise visible phrase.",
+        "For visual_servo_object in clutter, prefer a precise visible phrase that identifies the intended instance by category plus color/material, part, or image location, not a bare category prompt.",
+        "If a grounding audit or overlay shows the detector box on a nearby wrong object, do not repeat the same prompt; change viewpoint or use a more specific visible phrase selected from the latest RGB frame.",
         "Treat brightness_center as a low-level camera summary that may be wrong or incomplete.",
         "Do not assume access to map coordinates, object metadata, target distance, wheel encoders, or simulator state.",
         "Use the image, IMU yaw, and recent motion history to choose exactly one bounded action.",
@@ -1082,7 +1087,8 @@ def build_critic_prompt(
     rules = [
         "Approve only bounded actions that make sense from camera/IMU and memory.",
         "When an image is attached, evaluate it as the authoritative latest RGB camera frame.",
-        "Image attachments are ordered as: latest RGB frame; previous raw motion strip if present; previous detector debug overlay strip if present; topomap contact sheet if present.",
+        "Image attachments are ordered as: latest RGB frame; previous raw/detector paired grounding audit strip if present; previous raw motion strip if present; previous detector debug overlay strip if present; topomap contact sheet if present.",
+        "When a previous raw/detector paired grounding audit strip is attached, compare each raw frame with its detector overlay before trusting moved=true or last_detection.",
         "When a previous detector debug overlay strip is attached, check whether the detector box is actually on the named object before trusting moved=true or last_detection.",
         "Treat brightness_center as a low-level camera summary that may be wrong or incomplete.",
         "Reject unsafe, looping, ungrounded, or impossible commands.",
@@ -1495,12 +1501,16 @@ def _observation_image_paths(observation: dict[str, Any]) -> list[Path]:
 
 def _actor_image_paths(observation: dict[str, Any], recent_memory: list[dict[str, Any]], *, root: Path) -> list[Path]:
     paths = _observation_image_paths(observation)
-    previous_strip = _latest_motion_contact_sheet(recent_memory, root=root)
-    if previous_strip is not None and previous_strip.exists():
-        paths.append(previous_strip)
-    debug_overlay_strip = _latest_debug_overlay_contact_sheet(recent_memory, root=root)
-    if debug_overlay_strip is not None and debug_overlay_strip.exists():
-        paths.append(debug_overlay_strip)
+    grounding_audit_strip = _latest_grounding_audit_contact_sheet(recent_memory, root=root)
+    if grounding_audit_strip is not None and grounding_audit_strip.exists():
+        paths.append(grounding_audit_strip)
+    else:
+        previous_strip = _latest_motion_contact_sheet(recent_memory, root=root)
+        if previous_strip is not None and previous_strip.exists():
+            paths.append(previous_strip)
+        debug_overlay_strip = _latest_debug_overlay_contact_sheet(recent_memory, root=root)
+        if debug_overlay_strip is not None and debug_overlay_strip.exists():
+            paths.append(debug_overlay_strip)
     topomap_sheet = _latest_topomap_contact_sheet(recent_memory, root=root)
     if topomap_sheet is not None and topomap_sheet.exists():
         paths.append(topomap_sheet)
@@ -1520,7 +1530,10 @@ def latest_motion_summary(recent_memory: list[dict[str, Any]]) -> dict[str, Any]
             return {
                 "executed_action": record.get("executed_action", {}),
                 "tool_result": result,
-                "reading_order": "left-to-right, evenly spaced over the previous tool call",
+                "reading_order": (
+                    "motion strips read left-to-right; grounding_audit_contact_sheet pairs raw camera "
+                    "over detector overlay for the same moment in each column"
+                ),
             }
     return {}
 
@@ -1533,6 +1546,19 @@ def _latest_motion_contact_sheet(recent_memory: list[dict[str, Any]], *, root: P
         if not isinstance(result, dict):
             continue
         path_text = result.get("motion_contact_sheet") or result.get("stitched_path")
+        if path_text:
+            return _resolve_model_path(str(path_text), root=root)
+    return None
+
+
+def _latest_grounding_audit_contact_sheet(recent_memory: list[dict[str, Any]], *, root: Path) -> Path | None:
+    for record in reversed(recent_memory):
+        if not isinstance(record, dict):
+            continue
+        result = record.get("tool_result")
+        if not isinstance(result, dict):
+            continue
+        path_text = result.get("grounding_audit_contact_sheet")
         if path_text:
             return _resolve_model_path(str(path_text), root=root)
     return None

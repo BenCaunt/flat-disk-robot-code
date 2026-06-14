@@ -13,7 +13,7 @@ import sys
 import time
 from typing import Any
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from .paths import REPO_ROOT
 from .protocol import DEFAULT_NAMESPACE
@@ -212,12 +212,19 @@ class AgentTools:
         debug_overlay_paths = tuple(sorted(overlay_dir.glob("*.jpg"))[-5:])
         contact_sheet = None
         debug_overlay_sheet = None
+        grounding_audit_sheet = None
         if frame_paths:
             contact_sheet = make_contact_sheet(list(frame_paths), self.motion_frames_dir / f"{self._motion_count:04d}_visual_servo_strip.jpg")
         if debug_overlay_paths:
             debug_overlay_sheet = make_contact_sheet(
                 list(debug_overlay_paths),
                 self.motion_frames_dir / f"{self._motion_count:04d}_visual_servo_debug_overlay_strip.jpg",
+            )
+        if frame_paths and debug_overlay_paths:
+            grounding_audit_sheet = make_visual_servo_grounding_audit_sheet(
+                list(frame_paths),
+                list(debug_overlay_paths),
+                self.motion_frames_dir / f"{self._motion_count:04d}_visual_servo_grounding_audit.jpg",
             )
         summary = {
             "action": "visual_servo_object",
@@ -235,6 +242,7 @@ class AgentTools:
             "motion_frame_source": "raw_camera",
             "debug_overlay_frame_paths": [str(path) for path in debug_overlay_paths],
             "debug_overlay_contact_sheet": str(debug_overlay_sheet) if debug_overlay_sheet else None,
+            "grounding_audit_contact_sheet": str(grounding_audit_sheet) if grounding_audit_sheet else None,
             "stdout_tail": _tail_text(completed.stdout),
             "stderr_tail": _tail_text(completed.stderr),
         }
@@ -288,6 +296,42 @@ def make_contact_sheet(paths: list[Path], output_path: Path) -> Path:
     for thumb in thumbs:
         sheet.paste(thumb, (x, 0))
         x += thumb.width
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    sheet.save(output_path, format="JPEG", quality=90)
+    return output_path
+
+
+def make_visual_servo_grounding_audit_sheet(raw_paths: list[Path], overlay_paths: list[Path], output_path: Path) -> Path:
+    if not raw_paths or not overlay_paths:
+        raise ValueError("raw and overlay paths are required for grounding audit sheet")
+    pairs = list(zip(raw_paths, overlay_paths))
+    if not pairs:
+        raise ValueError("no paired frames for grounding audit sheet")
+
+    thumb_w = 200
+    label_h = 18
+    raw_thumbs: list[Image.Image] = []
+    overlay_thumbs: list[Image.Image] = []
+    for raw_path, overlay_path in pairs:
+        raw = Image.open(raw_path).convert("RGB")
+        overlay = Image.open(overlay_path).convert("RGB")
+        for image, target in ((raw, raw_thumbs), (overlay, overlay_thumbs)):
+            scale = thumb_w / image.width
+            target.append(image.resize((thumb_w, max(1, int(image.height * scale))), Image.Resampling.LANCZOS))
+
+    tile_h = max([thumb.height for thumb in raw_thumbs + overlay_thumbs])
+    sheet = Image.new("RGB", (thumb_w * len(pairs), (tile_h + label_h) * 2), "white")
+    draw = ImageDraw.Draw(sheet)
+    for index, (raw_thumb, overlay_thumb) in enumerate(zip(raw_thumbs, overlay_thumbs), start=1):
+        x = (index - 1) * thumb_w
+        draw.rectangle((x, 0, x + thumb_w, label_h), fill=(32, 32, 32))
+        draw.text((x + 5, 3), f"raw t{index}", fill=(255, 255, 255))
+        sheet.paste(raw_thumb, (x, label_h))
+        overlay_y = tile_h + label_h
+        draw.rectangle((x, overlay_y, x + thumb_w, overlay_y + label_h), fill=(96, 24, 24))
+        draw.text((x + 5, overlay_y + 3), f"detector overlay t{index}", fill=(255, 255, 255))
+        sheet.paste(overlay_thumb, (x, overlay_y + label_h))
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     sheet.save(output_path, format="JPEG", quality=90)
     return output_path

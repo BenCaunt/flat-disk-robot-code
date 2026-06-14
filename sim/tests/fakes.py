@@ -83,12 +83,16 @@ class FakeHarnessTools:
         self._progress = min(1.0, self._progress + 0.2)
         summary = self._fake_motion_result("visual_servo_object", elapsed_s=0.01).summary()
         debug_overlay = self.motion_frames_dir / f"{self.motion_seq:04d}_visual_servo_debug_overlay_strip.jpg"
+        grounding_audit = self.motion_frames_dir / f"{self.motion_seq:04d}_visual_servo_grounding_audit.jpg"
         if summary.get("motion_contact_sheet"):
-            debug_overlay.write_bytes(Path(str(summary["motion_contact_sheet"])).read_bytes())
+            source = Path(str(summary["motion_contact_sheet"]))
+            debug_overlay.write_bytes(source.read_bytes())
+            grounding_audit.write_bytes(source.read_bytes())
         summary.update(
             {
                 "action": "visual_servo_object",
                 "debug_overlay_contact_sheet": str(debug_overlay),
+                "grounding_audit_contact_sheet": str(grounding_audit),
                 "servo_status": "moved",
                 "target_detected": True,
                 "ever_detected": True,

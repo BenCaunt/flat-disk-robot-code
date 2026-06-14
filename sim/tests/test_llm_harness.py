@@ -282,6 +282,7 @@ def test_prompt_memory_tail_compacts_verbose_records() -> None:
                 "action": "drive_straight",
                 "motion_contact_sheet": f"motion_frames/{step:04d}_strip.jpg",
                 "debug_overlay_contact_sheet": f"motion_frames/{step:04d}_debug_overlay_strip.jpg",
+                "grounding_audit_contact_sheet": f"motion_frames/{step:04d}_grounding_audit.jpg",
                 "motion_frame_paths": [f"motion_frames/{step:04d}_{index}.jpg" for index in range(5)],
                 "debug_overlay_frame_paths": [f"motion_frames/{step:04d}_debug_{index}.jpg" for index in range(5)],
                 "stderr_tail": "stack trace " * 200,
@@ -303,6 +304,7 @@ def test_prompt_memory_tail_compacts_verbose_records() -> None:
     assert "debug_overlay_frame_paths" not in compact[-1]["tool_result"]
     assert compact[-1]["tool_result"]["motion_contact_sheet"].endswith("_strip.jpg")
     assert compact[-1]["tool_result"]["debug_overlay_contact_sheet"].endswith("_debug_overlay_strip.jpg")
+    assert compact[-1]["tool_result"]["grounding_audit_contact_sheet"].endswith("_grounding_audit.jpg")
     assert len(compact[-1]["actor_memory_update"]["observation_note"]) <= 220
 
 
@@ -568,7 +570,7 @@ def test_session_attaches_previous_motion_strip_and_saves_requested_frame(tmp_pa
     assert saved_path.exists()
 
 
-def test_session_attaches_visual_servo_debug_overlay_after_raw_strip(tmp_path) -> None:
+def test_session_attaches_visual_servo_grounding_audit_after_latest_frame(tmp_path) -> None:
     actor = _ServoAuditActor()
     session = HarnessSession(
         config=HarnessConfig(run_dir=tmp_path, max_steps=2),
@@ -584,9 +586,8 @@ def test_session_attaches_visual_servo_debug_overlay_after_raw_strip(tmp_path) -
 
     assert first is not None and second is not None
     assert len(actor.image_paths_by_call[0]) == 1
-    assert len(actor.image_paths_by_call[1]) == 3
-    assert actor.image_paths_by_call[1][1].name.endswith("_strip.jpg")
-    assert actor.image_paths_by_call[1][2].name.endswith("_debug_overlay_strip.jpg")
+    assert len(actor.image_paths_by_call[1]) == 2
+    assert actor.image_paths_by_call[1][1].name.endswith("_grounding_audit.jpg")
 
 
 def test_session_logs_llm_outputs_to_rerun_sink(tmp_path) -> None:
