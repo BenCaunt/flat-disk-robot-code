@@ -197,6 +197,29 @@ Current handoff for GRPO training, 2026-06-14:
   `completions/clipped_ratio=0`. Exact action rate did not improve over the
   reward-cap run on this tiny four-step comparison; the useful change is the
   now-measurable generic partial-credit reward surface.
+- Commit `deef420` adds an opt-in GRPO planner audit and
+  `--balance-reference-tools` mode. It duplicates underrepresented reference
+  tool-family samples with provenance fields and records before/after tool and
+  reward distributions in `dataset_action_audit`. The bathroom handoff changes
+  from `98` samples (`visual_servo_object=56`, `turn_by_angle=28`,
+  `check_object_grounding=13`, `stop=1`) to `168` samples
+  (`visual_servo_object=56`, `turn_by_angle=56`, `check_object_grounding=52`,
+  `stop=4`) with `--max-balance-multiplier 4`.
+- The balanced 4-step comparison completed in
+  `/workspace/flat-disk-robot-code-train-20260614-grpo-toolbalanced4`.
+  Local result:
+  `sim/scratch/open_vocab_nav_research_loop/qwen_grpo_jobs/bathroom_cross_run_lora_4step_cap48_tool_balanced/qwen_grpo_training_result.json`.
+  It reports `status=complete`, `returncode=0`, `duration_s=1695.164`,
+  `completion_log_sample_count=32`, `32/32` parsed actions, `12/32` exact
+  reference actions, `20/32` same-tool matches, mean argument-match fraction
+  `0.489583`, `0` positive non-reference rewards, `0` markdown fences, and `0`
+  truncated texts. TRL reported train runtime about `1467` seconds, train loss
+  `-0.01278`, reward mean `-0.1391`, reward std `0.1333`, and
+  `completions/clipped_ratio=0`. Compared with the unbalanced shaped-reward run,
+  exact stayed `12/32`, same-tool matches improved from `17/32` to `20/32`,
+  mean argument-match fraction improved from `0.4375` to `0.489583`, mean
+  completion length dropped from `92.406` to `84.938`, and expected tool
+  exposure shifted toward turn/check samples.
 - The working pod venv is `/workspace/flatdisk-grpo-venv`, created with
   `--system-site-packages` so it can see image Torch `2.9.1+cu128`; install
   `torchvision==0.24.1 --no-deps` to match that Torch build. Do not let pip pull
@@ -205,11 +228,12 @@ Current handoff for GRPO training, 2026-06-14:
   the separate `images` column, use PEFT LoRA, and cap generation length for
   smoke jobs. Full-model Adam OOMs on A40; uncapped generation makes "tiny"
   smoke runs unreasonably long.
-- Next action is to tune action-choice data and evaluation. The JSON format is
-  stable and generic partial reward exists, but exact reference rate is still
-  only `12/32` on the latest four-step comparison. Useful next directions:
-  balance visual-servo/check/turn examples, train for more steps from the
-  shaped reward, or collect more diverse grouped rollouts.
+- Next action is to scale action-choice data and evaluation. The JSON format is
+  stable, generic partial reward exists, and balancing improves same-tool
+  behavior, but exact reference rate is still only `12/32` on the latest
+  four-step comparison. Useful next directions: train for more steps from the
+  balanced shaped-reward dataset, collect more diverse grouped rollouts, and add
+  more stop/arrival examples before treating stop behavior as learned.
 - Future continuation should treat this as past verification, not a blocker.
   There is no known Runpod auth issue when `.env` is loaded as above, and no
   user action is needed before launching the next capped LoRA training attempt.

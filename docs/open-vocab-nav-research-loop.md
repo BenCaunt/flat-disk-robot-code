@@ -530,6 +530,34 @@ A generic tool/argument reward-shaping 4-step run then completed in
   surface: same-tool and argument-key matches receive graded negative rewards,
   while non-reference actions still never receive positive reward.
 
+A reference-tool-balanced 4-step run then completed in
+`/workspace/flat-disk-robot-code-train-20260614-grpo-toolbalanced4`, from commit
+`deef420`:
+
+- Planner change: `--balance-reference-tools` duplicates underrepresented
+  reference tool-family samples with `balance_original_sample_id` provenance and
+  records before/after counts in `dataset_action_audit`.
+- Dataset shift: the bathroom handoff changed from `98` samples
+  (`visual_servo_object=56`, `turn_by_angle=28`, `check_object_grounding=13`,
+  `stop=1`) to `168` samples (`visual_servo_object=56`, `turn_by_angle=56`,
+  `check_object_grounding=52`, `stop=4`) using `--max-balance-multiplier 4`.
+- Result:
+  `sim/scratch/open_vocab_nav_research_loop/qwen_grpo_jobs/bathroom_cross_run_lora_4step_cap48_tool_balanced/qwen_grpo_training_result.json`
+- Status `complete`, return code `0`, duration `1695.164` seconds.
+- `completion_log_sample_count` was `32`.
+- `completion_log_metrics`: `32/32` parsed actions, `12/32` exact reference
+  actions, `20/32` same-tool matches, mean argument-match fraction `0.489583`,
+  `0` positive non-reference rewards, `0` markdown fences, `0` truncated texts,
+  and mean completion length `84.938` characters.
+- TRL metrics: train runtime about `1467` seconds, train loss `-0.01278`,
+  reward mean `-0.1391`, reward std `0.1333`, and
+  `completions/clipped_ratio=0`.
+- Compared with the unbalanced shaped-reward run, exact action rate stayed
+  `12/32`, same-tool matches improved from `17/32` to `20/32`, mean argument
+  match improved from `0.4375` to `0.489583`, and completion length shortened.
+  This suggests balancing helps action family selection, but exact argument
+  choice and broader data coverage are still limiting factors.
+
 Resume status for a future continuation:
 
 - This is no longer a verification-only blocker. Runpod auth works when
@@ -540,14 +568,15 @@ Resume status for a future continuation:
 - Use the pushed `codex/open-vocab-nav-research-loop` ref for a clean checkout;
   the original `/workspace/flat-disk-robot-code` directory on the pod is not a
   git repo.
-- The next useful experiment is action-choice data/evaluation tuning. The
-  JSON-format issue is no longer the main blocker, and generic partial reward is
-  in place; exact reference action rate is still only `12/32` on the latest
-  four-step comparison. Useful next directions are balancing
-  visual-servo/check/turn examples, training for more steps from the shaped
-  reward, or collecting more diverse grouped rollouts. Keep
-  `--max-completion-length` explicit so smoke and short training jobs cannot
-  spend most of their time generating long completions.
+- The next useful experiment is action-choice data/evaluation scaling. The
+  JSON-format issue is no longer the main blocker, generic partial reward is in
+  place, and reference-tool balancing improves same-tool behavior; exact
+  reference action rate is still only `12/32` on the latest four-step
+  comparison. Useful next directions are training for more steps from the
+  balanced shaped-reward dataset, collecting more diverse grouped rollouts, and
+  adding more stop/arrival examples before treating stop behavior as learned.
+  Keep `--max-completion-length` explicit so smoke and short training jobs
+  cannot spend most of their time generating long completions.
 
 The fixes needed to make the smoke complete were:
 
