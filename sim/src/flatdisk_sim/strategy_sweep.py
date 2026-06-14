@@ -1,0 +1,199 @@
+"""Generate general Qwen strategy-sweep configs for open-vocab navigation."""
+
+from __future__ import annotations
+
+import argparse
+from dataclasses import asdict, dataclass
+import json
+from pathlib import Path
+from typing import Any
+
+from .research_loop import DEFAULT_WARMHUB_REPO, ResearchConfig, _config_to_dict, _parse_variant, _safe_id, load_config
+
+
+@dataclass(frozen=True)
+class StrategyTemplate:
+    name: str
+    description: str
+    prompt_profile: str
+    actor_rules: tuple[str, ...]
+    critic_rules: tuple[str, ...] = ()
+    topomap_memory: bool = False
+
+
+STRATEGY_TEMPLATES: tuple[StrategyTemplate, ...] = (
+    StrategyTemplate(
+        name="baseline",
+        description="Qwen tool-use baseline with bounded motion, memory, motion strips, and model-based phrase grounding.",
+        prompt_profile="baseline",
+        actor_rules=(),
+    ),
+    StrategyTemplate(
+        name="frontier_scan",
+        description="Exploration-biased strategy that tracks viewpoint coverage before committing to repeated movement.",
+        prompt_profile="frontier-scan-v1",
+        actor_rules=(
+            "Maintain scratchpad coverage notes: recent headings, areas with weak evidence, areas with stronger evidence, and the next viewpoint to test.",
+            "When goal evidence is weak, prefer viewpoint diversity using bounded turns or short drives instead of repeating the same servo phrase.",
+            "After any movement that changes the view, compare the latest RGB frame with the previous motion strip before selecting the next tool.",
+            "Avoid long straight-line commitments unless the latest image provides a plausible free path or clear target evidence.",
+        ),
+        critic_rules=(
+            "Warn when the actor repeats the same search pattern without new visual evidence or a memory-based reason.",
+            "Approve bounded viewpoint-seeking actions when they increase visual coverage and preserve the chance to reassess.",
+        ),
+    ),
+    StrategyTemplate(
+        name="evidence_exploit",
+        description="Exploitation-biased strategy that commits quickly when live visual evidence is strong, otherwise falls back to bounded exploration.",
+        prompt_profile="evidence-exploit-v1",
+        actor_rules=(
+            "Classify the latest visual evidence as strong, partial, or weak before choosing a tool.",
+            "When evidence is strong and currently visible, use visual_servo_object with a phrase selected from the latest RGB frame.",
+            "When evidence is partial, first turn or move briefly to improve centering rather than declaring success.",
+            "When evidence is weak, switch to exploration rather than forcing a final-goal servo phrase.",
+        ),
+        critic_rules=(
+            "Reject stop decisions that do not cite repeated strong live visual evidence.",
+            "Warn when exploitation is attempted from weak or stale evidence.",
+        ),
+    ),
+    StrategyTemplate(
+        name="recovery_switch",
+        description="Failure-recovery strategy that changes tools after stalls, failed grounding, or repeated low-information views.",
+        prompt_profile="recovery-switch-v1",
+        actor_rules=(
+            "Track failed tool choices and stale views in memory_update so the next step does not repeat them blindly.",
+            "If a phrase-grounded servo reports failure or no movement, switch to a bounded turn, short drive, or memory query on the next step.",
+            "If short drives do not improve visual evidence, switch to rotation or memory lookup instead of continuing forward.",
+            "Prefer reversible, bounded actions when uncertainty is high.",
+        ),
+        critic_rules=(
+            "Warn when the actor repeats a failed tool choice without explaining what changed.",
+            "Approve switching strategies after clear stalled progress or failed tool feedback.",
+        ),
+    ),
+    StrategyTemplate(
+        name="topomap_memory",
+        description="Memory-first strategy that uses CLIP-backed topomap image memory as a non-motion route hint when live evidence is weak.",
+        prompt_profile="topomap-memory-v2",
+        actor_rules=(
+            "When live visual evidence is weak or motion progress stalls, query topomap memory before another movement.",
+            "Use returned contact sheets as visual memory hints only; never treat memory results as proof of completion.",
+            "After memory lookup, choose a bounded action that is consistent with both the latest RGB frame and the returned image memory.",
+            "If memory is unavailable or conflicts with the latest frame, fall back to camera-only exploration.",
+        ),
+        critic_rules=(
+            "Approve memory lookup when uncertainty is high and no strong live target evidence is present.",
+            "Warn if memory output is treated as ground-truth success.",
+        ),
+        topomap_memory=True,
+    ),
+)
+
+
+def generate_strategy_config(
+    base: ResearchConfig,
+    *,
+    experiment_id: str,
+    objective: str | None = None,
+    qwen_endpoint: str | None = None,
+    qwen_model: str | None = None,
+    object_drive_detector: str | None = None,
+    include_topomap: bool = True,
+    topomap_memory_map_dir: str = "sim/scratch/semantic_topomaps/{episode}_clip",
+    topomap_memory_use_clip: bool = True,
+) -> dict[str, Any]:
+    inherited = _first_qwen_variant(base)
+    variants: list[dict[str, Any]] = []
+    for template in STRATEGY_TEMPLATES:
+        if template.topomap_memory and not include_topomap:
+            continue
+        variant: dict[str, Any] = {
+            "name": f"qwen_{template.name}",
+            "description": template.description,
+            "runner": "qwen",
+            "prompt_profile": template.prompt_profile,
+            "qwen_endpoint": qwen_endpoint or inherited.get("qwen_endpoint"),
+            "qwen_model": qwen_model or inherited.get("qwen_model"),
+            "qwen_temperature": inherited.get("qwen_temperature", 0.0),
+            "qwen_max_tokens": inherited.get("qwen_max_tokens", 512),
+            "object_drive_detector": object_drive_detector or inherited.get("object_drive_detector"),
+            "actor_rules": list(template.actor_rules),
+            "critic_rules": list(template.critic_rules),
+            "critic_mode": "none",
+        }
+        if template.topomap_memory:
+            variant.update(
+                {
+                    "topomap_memory_map_dir": topomap_memory_map_dir,
+                    "topomap_memory_use_clip": topomap_memory_use_clip,
+                    "topomap_memory_allow_semantic_terms": False,
+                }
+            )
+        variants.append(variant)
+
+    payload = _config_to_dict(base)
+    payload.update(
+        {
+            "experiment_id": _safe_id(experiment_id),
+            "objective": objective or f"Generated general Qwen strategy sweep based on {base.experiment_id}.",
+            "warmhub_repo": base.warmhub_repo or DEFAULT_WARMHUB_REPO,
+            "variants": variants,
+            "strategy_sweep": {
+                "schema": "flatdisk.nav_strategy_sweep_config.v1",
+                "source_experiment_id": base.experiment_id,
+                "strategy_count": len(variants),
+                "no_static_object_or_color_examples": True,
+                "semantic_topomap_terms_allowed": False,
+            },
+        }
+    )
+    return payload
+
+
+def _first_qwen_variant(base: ResearchConfig) -> dict[str, Any]:
+    for variant in base.variants:
+        if variant.runner == "qwen":
+            return asdict(variant)
+    fallback = asdict(_parse_variant({"name": "qwen_baseline", "runner": "qwen"}))
+    return fallback
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--base-config", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--experiment-id", required=True)
+    parser.add_argument("--objective", default=None)
+    parser.add_argument("--qwen-endpoint", default=None)
+    parser.add_argument("--qwen-model", default=None)
+    parser.add_argument("--object-drive-detector", default=None)
+    parser.add_argument("--exclude-topomap", action="store_true")
+    parser.add_argument("--topomap-memory-map-dir", default="sim/scratch/semantic_topomaps/{episode}_clip")
+    parser.add_argument("--no-topomap-clip", action="store_true")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    base = load_config(args.base_config)
+    payload = generate_strategy_config(
+        base,
+        experiment_id=args.experiment_id,
+        objective=args.objective,
+        qwen_endpoint=args.qwen_endpoint,
+        qwen_model=args.qwen_model,
+        object_drive_detector=args.object_drive_detector,
+        include_topomap=not args.exclude_topomap,
+        topomap_memory_map_dir=args.topomap_memory_map_dir,
+        topomap_memory_use_clip=not args.no_topomap_clip,
+    )
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(json.dumps({"output": str(args.output), "variant_count": len(payload["variants"])}, indent=2, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

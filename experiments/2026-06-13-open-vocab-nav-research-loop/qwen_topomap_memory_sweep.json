@@ -1,0 +1,74 @@
+{
+  "experiment_id": "open_vocab_nav_qwen_topomap_memory_v1",
+  "objective": "Compare Qwen open-vocabulary navigation with and without opt-in semantic topomap image memory, keeping policy inputs real-robot-compatible and evaluator data privileged.",
+  "warmhub_repo": "bencaunt-2/open-vocab-nav-research-loop",
+  "episodes": [
+    "living_room_sofa",
+    "bedroom_bed",
+    "bathroom_toilet"
+  ],
+  "repetitions": 1,
+  "parallelism": 1,
+  "max_steps": 18,
+  "success_radius_m": 0.1,
+  "render_width": 320,
+  "render_height": 240,
+  "rerun": false,
+  "strict_model_based": true,
+  "variants": [
+    {
+      "name": "qwen_baseline",
+      "description": "Current Qwen tool-use baseline with bounded movement, scratchpad memory, motion strips, and Florence visual servo.",
+      "runner": "qwen",
+      "critic_mode": "none",
+      "prompt_profile": "baseline",
+      "qwen_endpoint": "http://127.0.0.1:8080/v1/chat/completions",
+      "qwen_model": "mlx-community/Qwen3-VL-8B-Instruct-4bit",
+      "object_drive_detector": "florence-mlx"
+    },
+    {
+      "name": "qwen_explore_memory",
+      "description": "Exploration-biased Qwen prompt that explicitly tracks explored headings, visual evidence, failed strategies, and visible-landmark waypoint use.",
+      "runner": "qwen",
+      "critic_mode": "none",
+      "prompt_profile": "explore-memory-v1",
+      "qwen_endpoint": "http://127.0.0.1:8080/v1/chat/completions",
+      "qwen_model": "mlx-community/Qwen3-VL-8B-Instruct-4bit",
+      "object_drive_detector": "florence-mlx",
+      "actor_rules": [
+        "Maintain a compact belief state in memory_update: last clear goal evidence, explored headings, failed strategies, and next exploration target.",
+        "If the goal object is not visible, prefer gaining viewpoint diversity over repeating the same final-goal visual_servo_object prompt.",
+        "Use visual_servo_object on a visible landmark only when it plausibly moves the robot into a more informative area, then reassess from the new image.",
+        "Balance exploration and exploitation: exploit clear target evidence, otherwise rotate or move briefly to reveal unseen space."
+      ],
+      "critic_rules": [
+        "Warn when the actor repeats a strategy without explaining new visual evidence or memory-based reason.",
+        "Approve exploratory landmark moves when they are bounded and based on visible scene structure."
+      ]
+    },
+    {
+      "name": "qwen_topomap_memory_clip",
+      "description": "Qwen with opt-in CLIP-backed semantic topomap memory as a non-motion route/image lookup tool.",
+      "runner": "qwen",
+      "critic_mode": "none",
+      "prompt_profile": "topomap-memory-v1",
+      "qwen_endpoint": "http://127.0.0.1:8080/v1/chat/completions",
+      "qwen_model": "mlx-community/Qwen3-VL-8B-Instruct-4bit",
+      "object_drive_detector": "florence-mlx",
+      "topomap_memory_map_dir": "sim/scratch/semantic_topomaps/{episode}_clip",
+      "topomap_memory_use_clip": true,
+      "topomap_memory_allow_semantic_terms": false,
+      "actor_rules": [
+        "When the final goal is not clearly visible or the recent motion strip shows poor progress, use query_topomap_memory before choosing another movement.",
+        "After query_topomap_memory, inspect the returned contact sheet on the next step and use it only as visual memory, not proof of goal completion.",
+        "If topomap memory suggests a route, choose bounded turns, short drives, or visible-landmark visual_servo_object calls that make sense from the live RGB frame.",
+        "If topomap memory is unavailable, ambiguous, or conflicts with the live camera, fall back to exploration-biased camera-only behavior."
+      ],
+      "critic_rules": [
+        "Approve query_topomap_memory when the actor is uncertain about where to explore next.",
+        "Warn if the actor treats a topomap route or goal candidate as proof that the robot has reached the target.",
+        "Warn if the actor ignores a recent useful topomap contact sheet without explaining why the live camera contradicts it."
+      ]
+    }
+  ]
+}

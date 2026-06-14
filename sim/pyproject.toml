@@ -1,0 +1,79 @@
+[project]
+name = "flatdisk-sim"
+version = "0.1.0"
+description = "Protocol-compatible simulator and visual-agent tools for the flat disk robot."
+readme = "README.md"
+requires-python = ">=3.10,<3.14"
+dependencies = [
+    "eclipse-zenoh==1.9.0",
+    "numpy>=1.24.0",
+    "Pillow>=10.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+thor = [
+    "ai2thor>=5.0.0,<6.0.0",
+]
+procthor = [
+    "ai2thor>=5.0.0,<6.0.0",
+    "attrs>=21.2.0",
+    "moviepy>=1.0.3,<2.0.0",
+    "networkx>=2.8.0",
+    "pandas>=1.5.0",
+    "procthor==0.0.1.dev2",
+    "python-fcl>=0.7.0",
+    "shapely>=1.8.0",
+]
+vlm = [
+    "openai>=2.0.0",
+]
+harness = [
+    "flask>=3.0.0",
+    "mlx-vlm>=0.1.27",
+    "rerun-sdk>=0.22.0",
+]
+nomad = [
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "diffusers>=0.20.0",
+    "efficientnet-pytorch>=0.7.1",
+    "einops>=0.6.0",
+    "PyYAML>=6.0.0",
+]
+
+[project.scripts]
+flatdisk-sim = "flatdisk_sim.zenoh_bridge:main"
+flatdisk-sim-agent = "flatdisk_sim.agent_vlm:main"
+flatdisk-sim-compete-text-goals = "flatdisk_sim.compete_text_goals:main"
+flatdisk-sim-evaluate-text-goals = "flatdisk_sim.evaluate_text_goals:main"
+flatdisk-sim-evaluate-harness-thor = "flatdisk_sim.evaluate_harness_thor:main"
+flatdisk-sim-evaluate-object-drive = "flatdisk_sim.evaluate_object_drive:main"
+flatdisk-sim-harness-dashboard = "flatdisk_sim.harness_dashboard:main"
+flatdisk-sim-research-loop = "flatdisk_sim.research_loop:main"
+flatdisk-sim-research-warmhub = "flatdisk_sim.research_warmhub:main"
+flatdisk-sim-runpod-dispatch = "flatdisk_sim.runpod_dispatcher:main"
+flatdisk-sim-runpod-launch-task = "flatdisk_sim.runpod_launcher:main"
+flatdisk-sim-generate-nav-strategy-sweep = "flatdisk_sim.strategy_sweep:main"
+flatdisk-sim-render-thor = "flatdisk_sim.render_thor:main"
+flatdisk-sim-build-semantic-topomap = "flatdisk_sim.semantic_topomap:build_cli_main"
+flatdisk-sim-query-semantic-topomap = "flatdisk_sim.semantic_topomap:query_cli_main"
+flatdisk-sim-query-topomap-memory = "flatdisk_sim.topomap_memory:main"
+flatdisk-sim-evaluate-nomad-topomap = "flatdisk_sim.evaluate_nomad_topomap:main"
+flatdisk-sim-nomad-topomap-doctor = "flatdisk_sim.nomad_topomap_doctor:main"
+flatdisk-sim-convert-topological-graph = "flatdisk_sim.topological_graph_adapter:main"
+flatdisk-sim-export-nav-training = "flatdisk_sim.training_export:main"
+flatdisk-sim-prepare-qwen-tool-training = "flatdisk_sim.qwen_tool_training:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/flatdisk_sim"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

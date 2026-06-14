@@ -1,0 +1,415 @@
+<?xml version='1.0' encoding='utf-8'?>
+<robot name="flat_disk_robot">
+  <link name="base_footprint" />
+  <link name="base_link">
+    <inertial>
+      <origin xyz="0 0 0.021825" rpy="0 0 0" />
+      <mass value="0.23" />
+      <inertia ixx="0.000930759" ixy="0" ixz="0" iyy="0.000930759" iyz="0" izz="0.00178848" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/flat_disk_robot_base_link.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+      <material name="base_link_material">
+        <color rgba="0.42745098 0.450980392 0.470588235 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/flat_disk_robot_base_link.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="lid_link">
+    <inertial>
+      <origin xyz="0 0 0.03625" rpy="0 0 0" />
+      <mass value="0.075" />
+      <inertia ixx="0.000295989" ixy="0" ixz="0" iyy="0.000295989" iyz="0" izz="0.0005832" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/flat_disk_robot_lid_link.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+      <material name="lid_link_material">
+        <color rgba="0.42745098 0.450980392 0.470588235 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/flat_disk_robot_lid_link.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="battery_link">
+    <inertial>
+      <origin xyz="0 0 0.019" rpy="0 0 0" />
+      <mass value="0.18" />
+      <inertia ixx="0.0000411" ixy="0" ixz="0" iyy="0.000101595" iyz="0" izz="0.000099375" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/flat_disk_robot_battery.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+      <material name="battery_link_material">
+        <color rgba="0.066666667 0.066666667 0.066666667 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/flat_disk_robot_battery.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="esp32_link">
+    <inertial>
+      <origin xyz="0.003208329 0.00673 -0.0061114" rpy="0 0 0" />
+      <mass value="0.008" />
+      <inertia ixx="0.000000341" ixy="0" ixz="0" iyy="0.000000606" iyz="0" izz="0.000000526" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/seeed_xiao_esp32s3_sense.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+      <material name="esp32_link_material">
+        <color rgba="0.066666667 0.066666667 0.066666667 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/seeed_xiao_esp32s3_sense.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="ov2640_camera_link">
+    <inertial>
+      <origin xyz="0 0.00435 0.005875" rpy="0 0 0" />
+      <mass value="0.004" />
+      <inertia ixx="0.0000002" ixy="0" ixz="0" iyy="0.00000021" iyz="0" izz="0.000000095" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/ov2640_21mm_160_camera.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+      <material name="ov2640_camera_link_material">
+        <color rgba="0.066666667 0.066666667 0.066666667 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/ov2640_21mm_160_camera.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="tof_link">
+    <inertial>
+      <origin xyz="0 0 0.00325" rpy="0 0 0" />
+      <mass value="0.006" />
+      <inertia ixx="0.000000399" ixy="0" ixz="0" iyy="0.000000903" iyz="0" izz="0.00000126" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/tof_sensor_board.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+      <material name="tof_link_material">
+        <color rgba="0.784313725 0.623529412 0.176470588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/tof_sensor_board.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="radar_link">
+    <inertial>
+      <origin xyz="0 0 0.0018" rpy="0 0 0" />
+      <mass value="0.004" />
+      <inertia ixx="0.000000112" ixy="0" ixz="0" iyy="0.000000196" iyz="0" izz="0.0000003" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/forward_radar_module.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+      <material name="radar_link_material">
+        <color rgba="0.784313725 0.623529412 0.176470588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/forward_radar_module.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="left_motor_link">
+    <inertial>
+      <origin xyz="0.002169596 -0.002169596 0.00235" rpy="0 0 0" />
+      <mass value="0.09" />
+      <inertia ixx="0.000031979" ixy="0" ixz="0" iyy="0.000031979" iyz="0" izz="0.000011211" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/repeat_compact_1806_motor.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+      <material name="left_motor_link_material">
+        <color rgba="0.725490196 0.725490196 0.725490196 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/repeat_compact_1806_motor.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="left_wheel_link">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="0.032" />
+      <inertia ixx="0.000012544" ixy="0" ixz="0" iyy="0.000007136" iyz="0" izz="0.000007136" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/repeat_drive_wheel_x_axis.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+      <material name="left_wheel_link_material">
+        <color rgba="0.094117647 0.094117647 0.094117647 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/repeat_drive_wheel_x_axis.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="left_encoder_link">
+    <inertial>
+      <origin xyz="0 0 0.00015" rpy="0 0 0" />
+      <mass value="0.006" />
+      <inertia ixx="0.000000263" ixy="0" ixz="0" iyy="0.000000275" iyz="0" izz="0.000000526" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/as5600_encoder_module.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+      <material name="left_encoder_link_material">
+        <color rgba="0.11372549 0.37254902 0.6 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/as5600_encoder_module.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="left_encoder_magnet_link">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="0.001" />
+      <inertia ixx="0.000000005" ixy="0" ixz="0" iyy="0.000000003" iyz="0" izz="0.000000003" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/encoder_magnet.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+      <material name="left_encoder_magnet_link_material">
+        <color rgba="0.066666667 0.066666667 0.066666667 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/encoder_magnet.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="right_motor_link">
+    <inertial>
+      <origin xyz="0.002169596 -0.002169596 0.00235" rpy="0 0 0" />
+      <mass value="0.09" />
+      <inertia ixx="0.000031979" ixy="0" ixz="0" iyy="0.000031979" iyz="0" izz="0.000011211" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/repeat_compact_1806_motor.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+      <material name="right_motor_link_material">
+        <color rgba="0.725490196 0.725490196 0.725490196 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/repeat_compact_1806_motor.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="right_wheel_link">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="0.032" />
+      <inertia ixx="0.000012544" ixy="0" ixz="0" iyy="0.000007136" iyz="0" izz="0.000007136" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/repeat_drive_wheel_x_axis.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+      <material name="right_wheel_link_material">
+        <color rgba="0.094117647 0.094117647 0.094117647 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/repeat_drive_wheel_x_axis.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="right_encoder_link">
+    <inertial>
+      <origin xyz="0 0 0.00015" rpy="0 0 0" />
+      <mass value="0.006" />
+      <inertia ixx="0.000000263" ixy="0" ixz="0" iyy="0.000000275" iyz="0" izz="0.000000526" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/as5600_encoder_module.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+      <material name="right_encoder_link_material">
+        <color rgba="0.11372549 0.37254902 0.6 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/as5600_encoder_module.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="right_encoder_magnet_link">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="0.001" />
+      <inertia ixx="0.000000005" ixy="0" ixz="0" iyy="0.000000003" iyz="0" izz="0.000000003" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/encoder_magnet.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+      <material name="right_encoder_magnet_link_material">
+        <color rgba="0.066666667 0.066666667 0.066666667 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/encoder_magnet.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="base_footprint_to_base_link" type="fixed">
+    <origin xyz="0 0 0.006" rpy="0 0 0" />
+    <parent link="base_footprint" />
+    <child link="base_link" />
+  </joint>
+  <joint name="base_link_to_lid" type="fixed">
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <parent link="base_link" />
+    <child link="lid_link" />
+  </joint>
+  <joint name="base_link_to_battery" type="fixed">
+    <origin xyz="0 -0.028 0.005" rpy="0 0 1.570796327" />
+    <parent link="base_link" />
+    <child link="battery_link" />
+  </joint>
+  <joint name="base_link_to_esp32" type="fixed">
+    <origin xyz="0.008 0.082 0.03" rpy="0 1.570796327 0" />
+    <parent link="base_link" />
+    <child link="esp32_link" />
+  </joint>
+  <joint name="base_link_to_ov2640_camera" type="fixed">
+    <origin xyz="0 0.097874347 0.02125" rpy="0 0 0" />
+    <parent link="base_link" />
+    <child link="ov2640_camera_link" />
+  </joint>
+  <joint name="base_link_to_tof" type="fixed">
+    <origin xyz="-0.034 0.086 0.03" rpy="-1.570796327 0 3.141592654" />
+    <parent link="base_link" />
+    <child link="tof_link" />
+  </joint>
+  <joint name="base_link_to_radar" type="fixed">
+    <origin xyz="0.034 0.084 0.028" rpy="-1.570796327 0 0" />
+    <parent link="base_link" />
+    <child link="radar_link" />
+  </joint>
+  <joint name="base_link_to_left_motor" type="fixed">
+    <origin xyz="-0.0658 -0.018 0.022" rpy="0 -1.570796327 0" />
+    <parent link="base_link" />
+    <child link="left_motor_link" />
+  </joint>
+  <joint name="left_wheel_joint" type="continuous">
+    <origin xyz="-0.0865 -0.018 0.022" rpy="0 0 0" />
+    <parent link="base_link" />
+    <child link="left_wheel_link" />
+    <axis xyz="-1 0 0" />
+    <limit effort="1.5" velocity="40" />
+    <dynamics damping="0.05" friction="0.02" />
+  </joint>
+  <joint name="base_link_to_left_encoder" type="fixed">
+    <origin xyz="-0.0341 -0.018 0.022" rpy="0 -1.570796327 0" />
+    <parent link="base_link" />
+    <child link="left_encoder_link" />
+  </joint>
+  <joint name="base_link_to_left_encoder_magnet" type="fixed">
+    <origin xyz="-0.0375 -0.018 0.022" rpy="0 0 0" />
+    <parent link="base_link" />
+    <child link="left_encoder_magnet_link" />
+  </joint>
+  <joint name="base_link_to_right_motor" type="fixed">
+    <origin xyz="0.0658 -0.018 0.022" rpy="0 1.570796327 0" />
+    <parent link="base_link" />
+    <child link="right_motor_link" />
+  </joint>
+  <joint name="right_wheel_joint" type="continuous">
+    <origin xyz="0.0865 -0.018 0.022" rpy="0 0 0" />
+    <parent link="base_link" />
+    <child link="right_wheel_link" />
+    <axis xyz="-1 0 0" />
+    <limit effort="1.5" velocity="40" />
+    <dynamics damping="0.05" friction="0.02" />
+  </joint>
+  <joint name="base_link_to_right_encoder" type="fixed">
+    <origin xyz="0.0341 -0.018 0.022" rpy="0 1.570796327 0" />
+    <parent link="base_link" />
+    <child link="right_encoder_link" />
+  </joint>
+  <joint name="base_link_to_right_encoder_magnet" type="fixed">
+    <origin xyz="0.0375 -0.018 0.022" rpy="0 0 0" />
+    <parent link="base_link" />
+    <child link="right_encoder_magnet_link" />
+  </joint>
+</robot>

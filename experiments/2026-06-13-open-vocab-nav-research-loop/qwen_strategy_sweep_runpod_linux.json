@@ -1,0 +1,132 @@
+{
+  "episodes": [
+    "living_room_sofa",
+    "bedroom_bed",
+    "bathroom_toilet"
+  ],
+  "experiment_id": "open_vocab_nav_qwen_strategy_runpod_linux_v1",
+  "max_steps": 18,
+  "objective": "Generated general Qwen strategy sweep for indoor navigation using bounded tools, scratchpad memory, motion strips, and optional CLIP-backed topomap image memory.",
+  "parallelism": 1,
+  "render_height": 240,
+  "render_width": 320,
+  "repetitions": 1,
+  "rerun": false,
+  "strict_model_based": true,
+  "strategy_sweep": {
+    "no_static_object_or_color_examples": true,
+    "schema": "flatdisk.nav_strategy_sweep_config.v1",
+    "semantic_topomap_terms_allowed": false,
+    "source_experiment_id": "open_vocab_nav_qwen_topomap_memory_runpod_linux_v1",
+    "strategy_count": 5
+  },
+  "success_radius_m": 0.1,
+  "variants": [
+    {
+      "actor_rules": [],
+      "critic_rules": [],
+      "description": "Qwen tool-use baseline with bounded motion, memory, motion strips, and model-based phrase grounding.",
+      "name": "qwen_baseline",
+      "object_drive_detector": "florence-transformers",
+      "prompt_profile": "baseline",
+      "critic_mode": "none",
+      "qwen_endpoint": "http://127.0.0.1:8000/v1/chat/completions",
+      "qwen_max_tokens": 512,
+      "qwen_model": "Qwen/Qwen3-VL-8B-Instruct",
+      "qwen_temperature": 0.0,
+      "runner": "qwen"
+    },
+    {
+      "actor_rules": [
+        "Maintain scratchpad coverage notes: recent headings, areas with weak evidence, areas with stronger evidence, and the next viewpoint to test.",
+        "When goal evidence is weak, prefer viewpoint diversity using bounded turns or short drives instead of repeating the same servo phrase.",
+        "After any movement that changes the view, compare the latest RGB frame with the previous motion strip before selecting the next tool.",
+        "Avoid long straight-line commitments unless the latest image provides a plausible free path or clear target evidence."
+      ],
+      "critic_rules": [
+        "Warn when the actor repeats the same search pattern without new visual evidence or a memory-based reason.",
+        "Approve bounded viewpoint-seeking actions when they increase visual coverage and preserve the chance to reassess."
+      ],
+      "description": "Exploration-biased strategy that tracks viewpoint coverage before committing to repeated movement.",
+      "name": "qwen_frontier_scan",
+      "object_drive_detector": "florence-transformers",
+      "prompt_profile": "frontier-scan-v1",
+      "critic_mode": "none",
+      "qwen_endpoint": "http://127.0.0.1:8000/v1/chat/completions",
+      "qwen_max_tokens": 512,
+      "qwen_model": "Qwen/Qwen3-VL-8B-Instruct",
+      "qwen_temperature": 0.0,
+      "runner": "qwen"
+    },
+    {
+      "actor_rules": [
+        "Classify the latest visual evidence as strong, partial, or weak before choosing a tool.",
+        "When evidence is strong and currently visible, use visual_servo_object with a phrase selected from the latest RGB frame.",
+        "When evidence is partial, first turn or move briefly to improve centering rather than declaring success.",
+        "When evidence is weak, switch to exploration rather than forcing a final-goal servo phrase."
+      ],
+      "critic_rules": [
+        "Reject stop decisions that do not cite repeated strong live visual evidence.",
+        "Warn when exploitation is attempted from weak or stale evidence."
+      ],
+      "description": "Exploitation-biased strategy that commits quickly when live visual evidence is strong, otherwise falls back to bounded exploration.",
+      "name": "qwen_evidence_exploit",
+      "object_drive_detector": "florence-transformers",
+      "prompt_profile": "evidence-exploit-v1",
+      "critic_mode": "none",
+      "qwen_endpoint": "http://127.0.0.1:8000/v1/chat/completions",
+      "qwen_max_tokens": 512,
+      "qwen_model": "Qwen/Qwen3-VL-8B-Instruct",
+      "qwen_temperature": 0.0,
+      "runner": "qwen"
+    },
+    {
+      "actor_rules": [
+        "Track failed tool choices and stale views in memory_update so the next step does not repeat them blindly.",
+        "If a phrase-grounded servo reports failure or no movement, switch to a bounded turn, short drive, or memory query on the next step.",
+        "If short drives do not improve visual evidence, switch to rotation or memory lookup instead of continuing forward.",
+        "Prefer reversible, bounded actions when uncertainty is high."
+      ],
+      "critic_rules": [
+        "Warn when the actor repeats a failed tool choice without explaining what changed.",
+        "Approve switching strategies after clear stalled progress or failed tool feedback."
+      ],
+      "description": "Failure-recovery strategy that changes tools after stalls, failed grounding, or repeated low-information views.",
+      "name": "qwen_recovery_switch",
+      "object_drive_detector": "florence-transformers",
+      "prompt_profile": "recovery-switch-v1",
+      "critic_mode": "none",
+      "qwen_endpoint": "http://127.0.0.1:8000/v1/chat/completions",
+      "qwen_max_tokens": 512,
+      "qwen_model": "Qwen/Qwen3-VL-8B-Instruct",
+      "qwen_temperature": 0.0,
+      "runner": "qwen"
+    },
+    {
+      "actor_rules": [
+        "When live visual evidence is weak or motion progress stalls, query topomap memory before another movement.",
+        "Use returned contact sheets as visual memory hints only; never treat memory results as proof of completion.",
+        "After memory lookup, choose a bounded action that is consistent with both the latest RGB frame and the returned image memory.",
+        "If memory is unavailable or conflicts with the latest frame, fall back to camera-only exploration."
+      ],
+      "critic_rules": [
+        "Approve memory lookup when uncertainty is high and no strong live target evidence is present.",
+        "Warn if memory output is treated as ground-truth success."
+      ],
+      "description": "Memory-first strategy that uses CLIP-backed topomap image memory as a non-motion route hint when live evidence is weak.",
+      "name": "qwen_topomap_memory",
+      "object_drive_detector": "florence-transformers",
+      "prompt_profile": "topomap-memory-v2",
+      "critic_mode": "none",
+      "qwen_endpoint": "http://127.0.0.1:8000/v1/chat/completions",
+      "qwen_max_tokens": 512,
+      "qwen_model": "Qwen/Qwen3-VL-8B-Instruct",
+      "qwen_temperature": 0.0,
+      "runner": "qwen",
+      "topomap_memory_allow_semantic_terms": false,
+      "topomap_memory_map_dir": "sim/scratch/semantic_topomaps/{episode}_clip",
+      "topomap_memory_use_clip": true
+    }
+  ],
+  "warmhub_repo": "bencaunt-2/open-vocab-nav-research-loop"
+}

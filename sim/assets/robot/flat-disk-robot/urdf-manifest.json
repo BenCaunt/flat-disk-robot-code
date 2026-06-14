@@ -1,0 +1,105 @@
+{
+  "robot_name": "flat_disk_robot",
+  "project": "flat-disk-robot",
+  "artifact_name": "flat-disk-robot",
+  "package_dir": "/Users/bencaunt/Documents/SynthCAD/projects/flat-disk-robot/generated/urdf/flat-disk-robot",
+  "urdf": "/Users/bencaunt/Documents/SynthCAD/projects/flat-disk-robot/generated/urdf/flat-disk-robot/flat-disk-robot.urdf",
+  "meshes": [
+    {
+      "name": "flat_disk_robot_base_link",
+      "path": "/Users/bencaunt/Documents/SynthCAD/projects/flat-disk-robot/generated/urdf/flat-disk-robot/meshes/flat_disk_robot_base_link.stl",
+      "relative_path": "meshes/flat_disk_robot_base_link.stl"
+    },
+    {
+      "name": "flat_disk_robot_lid_link",
+      "path": "/Users/bencaunt/Documents/SynthCAD/projects/flat-disk-robot/generated/urdf/flat-disk-robot/meshes/flat_disk_robot_lid_link.stl",
+      "relative_path": "meshes/flat_disk_robot_lid_link.stl"
+    },
+    {
+      "name": "flat_disk_robot_battery",
+      "path": "/Users/bencaunt/Documents/SynthCAD/projects/flat-disk-robot/generated/urdf/flat-disk-robot/meshes/flat_disk_robot_battery.stl",
+      "relative_path": "meshes/flat_disk_robot_battery.stl"
+    },
+    {
+      "name": "seeed_xiao_esp32s3_sense",
+      "path": "/Users/bencaunt/Documents/SynthCAD/projects/flat-disk-robot/generated/urdf/flat-disk-robot/meshes/seeed_xiao_esp32s3_sense.stl",
+      "relative_path": "meshes/seeed_xiao_esp32s3_sense.stl"
+    },
+    {
+      "name": "ov2640_21mm_160_camera",
+      "path": "/Users/bencaunt/Documents/SynthCAD/projects/flat-disk-robot/generated/urdf/flat-disk-robot/meshes/ov2640_21mm_160_camera.stl",
+      "relative_path": "meshes/ov2640_21mm_160_camera.stl"
+    },
+    {
+      "name": "tof_sensor_board",
+      "path": "/Users/bencaunt/Documents/SynthCAD/projects/flat-disk-robot/generated/urdf/flat-disk-robot/meshes/tof_sensor_board.stl",
+      "relative_path": "meshes/tof_sensor_board.stl"
+    },
+    {
+      "name": "forward_radar_module",
+      "path": "/Users/bencaunt/Documents/SynthCAD/projects/flat-disk-robot/generated/urdf/flat-disk-robot/meshes/forward_radar_module.stl",
+      "relative_path": "meshes/forward_radar_module.stl"
+    },
+    {
+      "name": "repeat_compact_1806_motor",
+      "path": "/Users/bencaunt/Documents/SynthCAD/projects/flat-disk-robot/generated/urdf/flat-disk-robot/meshes/repeat_compact_1806_motor.stl",
+      "relative_path": "meshes/repeat_compact_1806_motor.stl"
+    },
+    {
+      "name": "repeat_drive_wheel_x_axis",
+      "path": "/Users/bencaunt/Documents/SynthCAD/projects/flat-disk-robot/generated/urdf/flat-disk-robot/meshes/repeat_drive_wheel_x_axis.stl",
+      "relative_path": "meshes/repeat_drive_wheel_x_axis.stl"
+    },
+    {
+      "name": "as5600_encoder_module",
+      "path": "/Users/bencaunt/Documents/SynthCAD/projects/flat-disk-robot/generated/urdf/flat-disk-robot/meshes/as5600_encoder_module.stl",
+      "relative_path": "meshes/as5600_encoder_module.stl"
+    },
+    {
+      "name": "encoder_magnet",
+      "path": "/Users/bencaunt/Documents/SynthCAD/projects/flat-disk-robot/generated/urdf/flat-disk-robot/meshes/encoder_magnet.stl",
+      "relative_path": "meshes/encoder_magnet.stl"
+    }
+  ],
+  "links": [
+    "base_footprint",
+    "base_link",
+    "lid_link",
+    "battery_link",
+    "esp32_link",
+    "ov2640_camera_link",
+    "tof_link",
+    "radar_link",
+    "left_motor_link",
+    "left_wheel_link",
+    "left_encoder_link",
+    "left_encoder_magnet_link",
+    "right_motor_link",
+    "right_wheel_link",
+    "right_encoder_link",
+    "right_encoder_magnet_link"
+  ],
+  "joints": [
+    "base_footprint_to_base_link",
+    "base_link_to_lid",
+    "base_link_to_battery",
+    "base_link_to_esp32",
+    "base_link_to_ov2640_camera",
+    "base_link_to_tof",
+    "base_link_to_radar",
+    "base_link_to_left_motor",
+    "left_wheel_joint",
+    "base_link_to_left_encoder",
+    "base_link_to_left_encoder_magnet",
+    "base_link_to_right_motor",
+    "right_wheel_joint",
+    "base_link_to_right_encoder",
+    "base_link_to_right_encoder_magnet"
+  ],
+  "notes": [
+    "All coordinates originate from synthcad.projects.flat_disk_robot.robot.",
+    "URDF mesh geometry is exported in millimeters and scaled to meters with mesh scale 0.001.",
+    "Wheel joints are continuous around the robot X axis; all other joints are fixed reference placements.",
+    "Mass and inertia values are first-pass assumptions for visualization, TF, and basic simulation setup."
+  ]
+}

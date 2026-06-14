@@ -1,0 +1,50 @@
+{
+  "experiment_id": "open_vocab_nav_qwen_prompt_sweep_v1",
+  "objective": "Evaluate general open-vocabulary indoor navigation strategies using Qwen as the planner and Florence/GroundingDINO-style model tools, without color/name heuristics in the policy input path.",
+  "warmhub_repo": "bencaunt-2/open-vocab-nav-research-loop",
+  "episodes": [
+    "living_room_sofa",
+    "bedroom_bed",
+    "bathroom_toilet"
+  ],
+  "repetitions": 1,
+  "parallelism": 1,
+  "max_steps": 18,
+  "success_radius_m": 0.1,
+  "render_width": 320,
+  "render_height": 240,
+  "rerun": false,
+  "strict_model_based": true,
+  "variants": [
+    {
+      "name": "qwen_baseline",
+      "description": "Current Qwen tool-use baseline with bounded movement, scratchpad memory, motion strips, and Florence visual servo.",
+      "runner": "qwen",
+      "critic_mode": "none",
+      "prompt_profile": "baseline",
+      "qwen_endpoint": "http://127.0.0.1:8080/v1/chat/completions",
+      "qwen_model": "mlx-community/Qwen3-VL-8B-Instruct-4bit",
+      "object_drive_detector": "florence-mlx"
+    },
+    {
+      "name": "qwen_explore_memory",
+      "description": "Exploration-biased Qwen prompt that explicitly tracks explored headings, visual evidence, failed strategies, and visible-landmark waypoint use.",
+      "runner": "qwen",
+      "critic_mode": "none",
+      "prompt_profile": "explore-memory-v1",
+      "qwen_endpoint": "http://127.0.0.1:8080/v1/chat/completions",
+      "qwen_model": "mlx-community/Qwen3-VL-8B-Instruct-4bit",
+      "object_drive_detector": "florence-mlx",
+      "actor_rules": [
+        "Maintain a compact belief state in memory_update: last clear goal evidence, explored headings, failed strategies, and next exploration target.",
+        "If the goal object is not visible, prefer gaining viewpoint diversity over repeating the same final-goal visual_servo_object prompt.",
+        "Use visual_servo_object on a visible landmark only when it plausibly moves the robot into a more informative area, then reassess from the new image.",
+        "Balance exploration and exploitation: exploit clear target evidence, otherwise rotate or move briefly to reveal unseen space."
+      ],
+      "critic_rules": [
+        "Warn when the actor repeats a strategy without explaining new visual evidence or memory-based reason.",
+        "Approve exploratory landmark moves when they are bounded and based on visible scene structure."
+      ]
+    }
+  ]
+}
