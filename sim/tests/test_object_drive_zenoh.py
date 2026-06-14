@@ -25,6 +25,7 @@ from object_drive_zenoh import (  # noqa: E402
     _load_florence_transformers_model,
     _patch_florence_forced_bos_token_id,
     _patch_transformers_tokenizer_additional_special_tokens,
+    _parse_florence_loc_tokens,
     bbox_center_x_from_bearing_rad,
     clipped_cos,
     command_from_bbox,
@@ -82,6 +83,21 @@ def test_florence_post_processed_detection_prefers_matching_label() -> None:
 
     assert len(detections) == 2
     assert max(detections, key=lambda det: det.score).label == "chair"
+
+
+def test_florence_loc_token_fallback_parses_bbox() -> None:
+    detections = _parse_florence_loc_tokens(
+        "</s><s>toilet.<loc_0><loc_0><loc_244><loc_617></s>",
+        (320, 240),
+        prompt="toilet",
+        source="test",
+        elapsed_s=0.0,
+    )
+
+    assert len(detections) == 1
+    assert detections[0].label == "toilet"
+    assert detections[0].bbox_xyxy[2] > 75.0
+    assert detections[0].bbox_xyxy[3] > 145.0
 
 
 def test_closest_prompt_prefers_lower_larger_non_oversized_box() -> None:

@@ -366,7 +366,10 @@ class FlorenceTransformersDetector:
             )
         raw_text = self.processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
         parsed = _post_process_florence(self.processor, raw_text, task=task, image_size=image.size)
-        return _detections_from_parsed(parsed, task=task, prompt=prompt, source="florence-transformers", raw=raw_text)
+        detections = _detections_from_parsed(parsed, task=task, prompt=prompt, source="florence-transformers", raw=raw_text)
+        if detections:
+            return detections
+        return _parse_florence_loc_tokens(raw_text, image.size, prompt=prompt, source="florence-transformers", elapsed_s=0.0)
 
 
 class GroundingDinoDetector:
