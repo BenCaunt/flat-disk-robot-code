@@ -426,13 +426,23 @@ def test_run_qwen_grpo_training_job_executes_ready_job(tmp_path: Path) -> None:
     job_path = tmp_path / "grpo_job" / "qwen_grpo_training_job.json"
     job = json.loads(job_path.read_text(encoding="utf-8"))
     completion_log = Path(job["completion_log_jsonl"])
+    completion_log_payload = (
+        '{"completion_text":"{\\"action\\":{\\"tool\\":\\"wait\\",\\"args\\":{}}}",'
+        '"parsed_action":{"args":{},"tool":"wait"},'
+        '"reference_action_canonical":"{\\"args\\": {}, \\"tool\\": \\"wait\\"}",'
+        '"completion_text_truncated":false}\n'
+        '{"completion_text":"```json",'
+        '"parsed_action":{},'
+        '"reference_action_canonical":"{\\"args\\": {}, \\"tool\\": \\"wait\\"}",'
+        '"completion_text_truncated":false}\n'
+    )
     fake_train.write_text(
         "\n".join(
             [
                 "from pathlib import Path",
                 f"path = Path({str(completion_log)!r})",
                 "path.parent.mkdir(parents=True, exist_ok=True)",
-                "path.write_text('{\"schema\":\"flatdisk.qwen_grpo_completion_sample.v1\"}\\n{\"schema\":\"flatdisk.qwen_grpo_completion_sample.v1\"}\\n', encoding='utf-8')",
+                f"path.write_text({completion_log_payload!r}, encoding='utf-8')",
                 "print('grpo-trained-ok')",
             ]
         )
@@ -452,6 +462,10 @@ def test_run_qwen_grpo_training_job_executes_ready_job(tmp_path: Path) -> None:
     assert "grpo-trained-ok" in result["stdout_tail"]
     assert result["completion_log_jsonl"] == str(completion_log)
     assert result["completion_log_sample_count"] == 2
+    assert result["completion_log_metrics"]["sample_count"] == 2
+    assert result["completion_log_metrics"]["parsed_action_count"] == 1
+    assert result["completion_log_metrics"]["exact_reference_action_count"] == 1
+    assert result["completion_log_metrics"]["markdown_fence_count"] == 1
 
 
 def test_run_qwen_grpo_training_cli_dry_run(tmp_path: Path, monkeypatch) -> None:

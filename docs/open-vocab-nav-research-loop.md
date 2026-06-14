@@ -449,6 +449,27 @@ The first longer capped run also completed on 2026-06-14 in
   clipped ratio was `0.9688`; this is a useful signal that the next run should
   improve completion formatting or reward/data before scaling.
 
+Two logged one-step follow-up runs isolated and fixed the formatting issue:
+
+- Commit `0961739` added `adapter/completion_samples.jsonl`. The run in
+  `/workspace/flat-disk-robot-code-train-20260614-grpo-log1` completed with
+  `duration_s=644.804`, but `completion_samples.jsonl` showed `0/8` parsed
+  actions. The model usually began with a plausible action JSON object, then
+  continued into `thought` or `grounding_audit`, so the object was truncated
+  before closing.
+- Commit `6b4eaac` appends a generic `GRPO_RESPONSE_CONTRACT` to training
+  prompts. It tells the model to output only one compact JSON object of the form
+  `{"action":{"tool":"<tool_name>","args":{...}}}` and then stop. This contract
+  is generic; it does not introduce object or color names.
+- The comparison run in
+  `/workspace/flat-disk-robot-code-train-20260614-grpo-contract1` completed with
+  status `complete`, return code `0`, and `duration_s=675.898`. It logged 8
+  completion samples: `8/8` parsed actions, `5/8` exact reference actions, no
+  markdown fences, and TRL `completions/clipped_ratio=0`.
+- Future result manifests include `completion_log_jsonl`,
+  `completion_log_sample_count`, and `completion_log_metrics` so this quality
+  check can be automated in the research loop.
+
 Resume status for a future continuation:
 
 - This is no longer a verification-only blocker. Runpod auth works when
@@ -459,11 +480,12 @@ Resume status for a future continuation:
 - Use the pushed `codex/open-vocab-nav-research-loop` ref for a clean checkout;
   the original `/workspace/flat-disk-robot-code` directory on the pod is not a
   git repo.
-- The next useful experiment is to inspect or log generated completions, then
-  tune the prompt/reward/data so Qwen emits short valid tool calls before
-  launching a larger multi-step run. Keep `--max-completion-length` explicit so
-  smoke and short training jobs cannot spend most of their time generating long
-  completions.
+- The next useful experiment is a larger capped LoRA run from `6b4eaac` or
+  later, followed by automated inspection of `completion_log_metrics`. If the
+  exact reference action rate remains low, tune the reward/data; the JSON-format
+  issue is no longer the main blocker. Keep `--max-completion-length` explicit
+  so smoke and short training jobs cannot spend most of their time generating
+  long completions.
 
 The fixes needed to make the smoke complete were:
 
@@ -479,6 +501,9 @@ The fixes needed to make the smoke complete were:
   step.
 - Cap `max_completion_length` for smoke jobs; uncapped generation made a tiny
   run take too long.
+- When using the persistent pod venv from a fresh checkout, set
+  `PYTHONPATH=sim/src` before `flatdisk-sim-run-qwen-grpo-training` so the entry
+  point imports the checked-out source instead of an older editable install.
 
 With `--start-qwen-server`, the generated worker claims the Warmhub task, starts
 `Qwen/Qwen3-VL-8B-Instruct` through vLLM, waits for `/v1/models`, and then runs

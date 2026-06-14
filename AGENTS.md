@@ -149,6 +149,17 @@ Current handoff for GRPO training, 2026-06-14:
   reward mean `-0.4789`, reward std `0.1339`, mean completion length `47.25`,
   clipped ratio `0.9688`, and step time about 383 s. The high clipped ratio is
   the main signal to address before scaling much further.
+- A logged one-step run from commit `0961739` in
+  `/workspace/flat-disk-robot-code-train-20260614-grpo-log1` confirmed the
+  failure mode: `completion_samples.jsonl` had 8 samples, `0/8` parsed actions,
+  and every completion was cut off after starting a larger JSON object with
+  `thought` or `grounding_audit`.
+- Commit `6b4eaac` adds a generic GRPO action-only response contract to the
+  training prompt. The comparison run in
+  `/workspace/flat-disk-robot-code-train-20260614-grpo-contract1` completed with
+  `duration_s=675.898`, `completion_log_sample_count=8`, `8/8` parsed actions,
+  `5/8` exact reference actions, `0` markdown fences, and TRL
+  `completions/clipped_ratio=0`.
 - The working pod venv is `/workspace/flatdisk-grpo-venv`, created with
   `--system-site-packages` so it can see image Torch `2.9.1+cu128`; install
   `torchvision==0.24.1 --no-deps` to match that Torch build. Do not let pip pull
@@ -157,16 +168,18 @@ Current handoff for GRPO training, 2026-06-14:
   the separate `images` column, use PEFT LoRA, and cap generation length for
   smoke jobs. Full-model Adam OOMs on A40; uncapped generation makes "tiny"
   smoke runs unreasonably long.
-- Next action is to inspect or log generated completions, then tune the GRPO
-  prompt/reward/data so the model emits short valid tool calls before launching
-  a larger multi-step run.
+- Next action is to run a larger capped LoRA job from `6b4eaac` or later and
+  inspect `completion_log_metrics` in `qwen_grpo_training_result.json`; if exact
+  reference rate remains low, tune reward/data rather than the JSON format.
 - Future continuation should treat this as past verification, not a blocker.
   There is no known Runpod auth issue when `.env` is loaded as above, and no
   user action is needed before launching the next capped LoRA training attempt.
   Start from the pushed `codex/open-vocab-nav-research-loop` ref, regenerate the
   GRPO job with an explicit `--max-completion-length`, transfer only the job
   files plus dataset-referenced images, and run through
-  `/workspace/flatdisk-grpo-venv`.
+  `/workspace/flatdisk-grpo-venv`. Set `PYTHONPATH=sim/src` when invoking
+  `flatdisk-sim-run-qwen-grpo-training` from a fresh checkout so the runner uses
+  the checked-out source rather than an older editable install in the venv.
 
 To fan out several planned trial-slice tasks, use the dispatcher. It is also
 dry-run by default and skips incomplete prerequisites unless

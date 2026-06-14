@@ -222,6 +222,40 @@ def _attach_completion_log_summary(result: dict[str, Any], job: dict[str, Any], 
     completion_log = _job_path(job, "completion_log_jsonl", relative_to=job_path.parent)
     result["completion_log_jsonl"] = str(completion_log) if completion_log else ""
     result["completion_log_sample_count"] = _count_lines(completion_log) if completion_log and completion_log.exists() else 0
+    result["completion_log_metrics"] = _completion_log_metrics(completion_log) if completion_log and completion_log.exists() else {}
+
+
+def _completion_log_metrics(path: Path) -> dict[str, Any]:
+    records = []
+    malformed_count = 0
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                malformed_count += 1
+    completion_texts = [str(record.get("completion_text") or "") for record in records]
+    exact_reference_count = 0
+    parsed_action_count = 0
+    for record in records:
+        parsed_action = record.get("parsed_action") if isinstance(record.get("parsed_action"), dict) else {}
+        if parsed_action:
+            parsed_action_count += 1
+        if _canonical_json(parsed_action) == record.get("reference_action_canonical"):
+            exact_reference_count += 1
+    return {
+        "sample_count": len(records),
+        "malformed_line_count": malformed_count,
+        "parsed_action_count": parsed_action_count,
+        "exact_reference_action_count": exact_reference_count,
+        "markdown_fence_count": sum("```" in text for text in completion_texts),
+        "truncated_text_count": sum(bool(record.get("completion_text_truncated")) for record in records),
+        "mean_completion_chars": round(sum(len(text) for text in completion_texts) / len(completion_texts), 3)
+        if completion_texts
+        else 0.0,
+    }
 
 
 def _trl_dataset_records(ppo_step_records: list[dict[str, Any]]) -> list[dict[str, Any]]:
