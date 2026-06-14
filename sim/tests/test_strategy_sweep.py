@@ -40,6 +40,7 @@ def test_generate_strategy_config_produces_qwen_variants_without_semantic_terms(
     assert {variant.runner for variant in parsed.variants} == {"qwen"}
     assert all(variant.qwen_endpoint == "http://127.0.0.1:8000/v1/chat/completions" for variant in parsed.variants)
     assert all(variant.qwen_model == "Qwen/Qwen3-VL-8B-Instruct" for variant in parsed.variants)
+    assert all(variant.qwen_max_tokens >= 1024 for variant in parsed.variants)
     assert all(variant.critic_mode == "none" for variant in parsed.variants)
     assert all(not variant.topomap_memory_allow_semantic_terms for variant in parsed.variants)
     topomap = next(variant for variant in parsed.variants if variant.name == "qwen_topomap_memory")

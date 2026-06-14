@@ -130,6 +130,19 @@ class _MalformedActor:
         return '{"thought":"missing comma" "action":{"tool":"wait","args":{"duration_s":0.2}}}'
 
 
+class _MalformedThenValidActor:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def run(self, prompt: str, *, role: str, image_paths=None) -> str:  # noqa: ANN001
+        del role, image_paths
+        self.calls += 1
+        if self.calls == 1:
+            return '{"thought":"truncated","action":{"tool":"wait","args":{"duration_s":0.2}'
+        assert "ACTOR_JSON_REPAIR" in prompt
+        return json.dumps({"thought": "repaired", "action": {"tool": "wait", "args": {"duration_s": 0.2}}})
+
+
 class _RecordingRerun:
     save_path = None
 
@@ -746,6 +759,30 @@ def test_session_logs_raw_actor_output_on_parse_error(tmp_path) -> None:
     assert actor_errors
     assert "missing comma" in actor_errors[-1]["output"]
     assert actor_errors[-1]["prompt_path"] == "prompts/000_actor.txt"
+    assert actor_errors[-1]["attempt_count"] == 2
+
+
+def test_session_retries_malformed_actor_json_once(tmp_path) -> None:
+    actor = _MalformedThenValidActor()
+    session = HarnessSession(
+        config=HarnessConfig(run_dir=tmp_path, max_steps=1),
+        tools=FakeHarnessTools(run_dir=tmp_path, environment="living_room"),
+        actor=actor,
+        critic=_AlwaysApproveCritic(),
+    )
+
+    session.start_goal("Drive to the sofa.")
+    record = session.run_auto_step()
+    events = session.read_events_tail(20)
+    session.close()
+
+    assert record is not None
+    assert actor.calls == 2
+    assert record["executed_action"]["tool"] == "wait"
+    assert (tmp_path / "prompts" / "000_actor_retry.txt").exists()
+    retries = [event for event in events if event.get("event") == "actor_parse_retry"]
+    assert retries
+    assert "invalid JSON" not in retries[-1]["previous_output"]
 
 
 def test_safety_critic_rejects_third_same_direction_turn() -> None:

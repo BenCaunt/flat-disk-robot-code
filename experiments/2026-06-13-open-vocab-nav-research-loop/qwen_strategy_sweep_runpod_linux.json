@@ -31,7 +31,7 @@
       "object_drive_detector": "florence-transformers",
       "prompt_profile": "baseline",
       "qwen_endpoint": "http://127.0.0.1:8000/v1/chat/completions",
-      "qwen_max_tokens": 512,
+      "qwen_max_tokens": 1024,
       "qwen_model": "Qwen/Qwen3-VL-8B-Instruct",
       "qwen_temperature": 0.0,
       "runner": "qwen"
@@ -53,7 +53,7 @@
       "object_drive_detector": "florence-transformers",
       "prompt_profile": "frontier-scan-v1",
       "qwen_endpoint": "http://127.0.0.1:8000/v1/chat/completions",
-      "qwen_max_tokens": 512,
+      "qwen_max_tokens": 1024,
       "qwen_model": "Qwen/Qwen3-VL-8B-Instruct",
       "qwen_temperature": 0.0,
       "runner": "qwen"
@@ -75,7 +75,7 @@
       "object_drive_detector": "florence-transformers",
       "prompt_profile": "evidence-exploit-v1",
       "qwen_endpoint": "http://127.0.0.1:8000/v1/chat/completions",
-      "qwen_max_tokens": 512,
+      "qwen_max_tokens": 1024,
       "qwen_model": "Qwen/Qwen3-VL-8B-Instruct",
       "qwen_temperature": 0.0,
       "runner": "qwen"
@@ -97,7 +97,7 @@
       "object_drive_detector": "florence-transformers",
       "prompt_profile": "recovery-switch-v1",
       "qwen_endpoint": "http://127.0.0.1:8000/v1/chat/completions",
-      "qwen_max_tokens": 512,
+      "qwen_max_tokens": 1024,
       "qwen_model": "Qwen/Qwen3-VL-8B-Instruct",
       "qwen_temperature": 0.0,
       "runner": "qwen"
@@ -121,7 +121,7 @@
       "object_drive_detector": "florence-transformers",
       "prompt_profile": "grounding-recovery-v1",
       "qwen_endpoint": "http://127.0.0.1:8000/v1/chat/completions",
-      "qwen_max_tokens": 512,
+      "qwen_max_tokens": 1024,
       "qwen_model": "Qwen/Qwen3-VL-8B-Instruct",
       "qwen_temperature": 0.0,
       "runner": "qwen"
@@ -148,7 +148,7 @@
       "object_drive_detector": "grounding-dino",
       "prompt_profile": "grounding-dino-recovery-v1",
       "qwen_endpoint": "http://127.0.0.1:8000/v1/chat/completions",
-      "qwen_max_tokens": 512,
+      "qwen_max_tokens": 1024,
       "qwen_model": "Qwen/Qwen3-VL-8B-Instruct",
       "qwen_temperature": 0.0,
       "runner": "qwen"
@@ -170,7 +170,7 @@
       "object_drive_detector": "florence-transformers",
       "prompt_profile": "topomap-memory-v2",
       "qwen_endpoint": "http://127.0.0.1:8000/v1/chat/completions",
-      "qwen_max_tokens": 512,
+      "qwen_max_tokens": 1024,
       "qwen_model": "Qwen/Qwen3-VL-8B-Instruct",
       "qwen_temperature": 0.0,
       "runner": "qwen",

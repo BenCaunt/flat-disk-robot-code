@@ -156,7 +156,7 @@ def generate_strategy_config(
             "qwen_endpoint": qwen_endpoint or inherited.get("qwen_endpoint"),
             "qwen_model": qwen_model or inherited.get("qwen_model"),
             "qwen_temperature": inherited.get("qwen_temperature", 0.0),
-            "qwen_max_tokens": inherited.get("qwen_max_tokens", 512),
+            "qwen_max_tokens": _qwen_completion_budget(inherited.get("qwen_max_tokens", 512)),
             "object_drive_detector": object_drive_detector or template.object_drive_detector or inherited.get("object_drive_detector"),
             "actor_rules": list(template.actor_rules),
             "critic_rules": list(template.critic_rules),
@@ -197,6 +197,14 @@ def _first_qwen_variant(base: ResearchConfig) -> dict[str, Any]:
             return asdict(variant)
     fallback = asdict(_parse_variant({"name": "qwen_baseline", "runner": "qwen"}))
     return fallback
+
+
+def _qwen_completion_budget(value: Any) -> int:
+    try:
+        inherited = int(value)
+    except (TypeError, ValueError):
+        inherited = 512
+    return max(1024, inherited)
 
 
 def parse_args() -> argparse.Namespace:

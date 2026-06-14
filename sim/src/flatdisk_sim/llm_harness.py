@@ -738,14 +738,35 @@ class HarnessSession:
             self._write_prompt(step, "actor", prompt)
             image_paths = _actor_image_paths(observation_summary, recent_memory, root=self.run_dir)
             actor_output = ""
+            actor_attempt_outputs: list[str] = []
             try:
                 actor_output = self.actor.run(prompt, role="actor", image_paths=image_paths)
-                action = parse_actor_action(actor_output)
-                actor_side_effects = parse_actor_side_effects(actor_output)
+                actor_attempt_outputs.append(actor_output)
+                try:
+                    action = parse_actor_action(actor_output)
+                    actor_side_effects = parse_actor_side_effects(actor_output)
+                except Exception as first_exc:
+                    retry_prompt = build_actor_json_repair_prompt(prompt, error=str(first_exc))
+                    self._write_prompt(step, "actor_retry", retry_prompt)
+                    self.log_event(
+                        "actor_parse_retry",
+                        {
+                            "step": step,
+                            "error": str(first_exc),
+                            "prompt_path": str(Path("prompts") / f"{step:03d}_actor_retry.txt"),
+                            "previous_output": actor_output[:1200],
+                        },
+                    )
+                    actor_output = self.actor.run(retry_prompt, role="actor", image_paths=image_paths)
+                    actor_attempt_outputs.append(actor_output)
+                    action = parse_actor_action(actor_output)
+                    actor_side_effects = parse_actor_side_effects(actor_output)
             except Exception as exc:
                 error_payload = {
                     "error": str(exc),
                     "output": actor_output,
+                    "attempt_count": len(actor_attempt_outputs),
+                    "previous_output": actor_attempt_outputs[0] if len(actor_attempt_outputs) > 1 else None,
                     "prompt_path": str(Path("prompts") / f"{step:03d}_actor.txt"),
                     "image_paths": [str(path.relative_to(self.run_dir)) if _path_is_relative_to(path, self.run_dir) else path.name for path in image_paths],
                 }
@@ -1165,6 +1186,20 @@ def build_actor_prompt(
         + json.dumps(dynamic_state, indent=2, sort_keys=True, default=str)
         + "\n"
     )
+
+
+def build_actor_json_repair_prompt(prompt: str, *, error: str) -> str:
+    repair = {
+        "role": "actor_json_repair",
+        "error": str(error)[:240],
+        "rules": [
+            "The previous actor output was invalid JSON or was truncated.",
+            "Return exactly one complete JSON object and no prose.",
+            "Keep thought, evidence, check_overlay_evidence, and memory_update strings concise.",
+            "Choose exactly one bounded action using the same tool contract and latest attached images.",
+        ],
+    }
+    return prompt + "\n\nACTOR_JSON_REPAIR\n" + json.dumps(repair, indent=2, sort_keys=True) + "\n"
 
 
 def build_critic_prompt(
