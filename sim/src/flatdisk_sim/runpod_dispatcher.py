@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import shlex
@@ -49,6 +50,7 @@ TASK_STAGE_ORDER = (
 TASK_STAGE_CHOICES = ("auto", "any", *TASK_STAGE_ORDER)
 ACTIVE_QUEUE_STATUSES = ("running", "blocked")
 DEFAULT_QUEUE_HEALTH_LIMIT = 5
+DEFAULT_STALE_RUNNING_AFTER_S = 4 * 60 * 60
 
 
 @dataclass(frozen=True)
@@ -61,6 +63,9 @@ class AgentTaskSummary:
     tags: tuple[str, ...]
     prerequisites: tuple[str, ...] = ()
     related_experiment: str | None = None
+    priority: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
 
     def prerequisites_satisfied(self, completed_task_refs: set[str]) -> bool:
         return all(_normalize_task_ref(ref) in completed_task_refs for ref in self.prerequisites)
@@ -105,6 +110,9 @@ def query_agent_tasks(repo: str, *, status: str = "planned", limit: int = 20) ->
                 tags=tuple(str(tag) for tag in tags if str(tag)),
                 prerequisites=tuple(_normalize_task_ref(str(ref)) for ref in raw_prerequisites if str(ref).strip()),
                 related_experiment=str(data["relatedExperiment"]) if data.get("relatedExperiment") else None,
+                priority=str(data["priority"]) if data.get("priority") else None,
+                created_at=str(data["createdAt"]) if data.get("createdAt") else None,
+                updated_at=str(data["updatedAt"]) if data.get("updatedAt") else None,
             )
         )
     return tasks
@@ -198,6 +206,8 @@ def query_queue_health(
     sample_limit: int = DEFAULT_QUEUE_HEALTH_LIMIT,
     query_limit: int = 100,
     related_experiment: str | None = None,
+    stale_running_after_s: float | None = DEFAULT_STALE_RUNNING_AFTER_S,
+    now_s: float | None = None,
 ) -> dict[str, Any]:
     sample_count = max(1, sample_limit)
     read_count = max(sample_count, query_limit, 1)
@@ -214,7 +224,17 @@ def query_queue_health(
 
     running = tasks_by_status["running"]
     blocked = tasks_by_status["blocked"]
+    now = time.time() if now_s is None else now_s
+    stale_running = [
+        task
+        for task in running
+        if _is_stale_task(task, now_s=now, stale_after_s=stale_running_after_s)
+    ]
     actions: list[str] = []
+    if stale_running:
+        actions.append(
+            f"Review {len(stale_running)} stale-looking running AgentTask(s) before dispatching more workers."
+        )
     if running:
         actions.append(f"Inspect {len(running)} running AgentTask(s) before dispatching more workers.")
     if blocked:
@@ -229,6 +249,12 @@ def query_queue_health(
         "related_experiment_filter": related_experiment,
         "running_task_count": len(running),
         "running_tasks": [_task_payload(task) for task in running[:sample_count]],
+        "stale_running_after_s": stale_running_after_s,
+        "stale_running_task_count": len(stale_running),
+        "stale_running_tasks": [
+            _stale_task_payload(task, now_s=now)
+            for task in stale_running[:sample_count]
+        ],
         "blocked_task_count": len(blocked),
         "blocked_tasks": [_task_payload(task) for task in blocked[:sample_count]],
         "next_actions": actions,
@@ -246,9 +272,57 @@ def _task_payload(task: AgentTaskSummary) -> dict[str, Any]:
     }
     if task.related_experiment:
         payload["related_experiment"] = task.related_experiment
+    if task.priority:
+        payload["priority"] = task.priority
+    if task.created_at:
+        payload["created_at"] = task.created_at
+    if task.updated_at:
+        payload["updated_at"] = task.updated_at
     if task.prerequisites:
         payload["prerequisites"] = list(task.prerequisites)
     return payload
+
+
+def _stale_task_payload(task: AgentTaskSummary, *, now_s: float) -> dict[str, Any]:
+    payload = _task_payload(task)
+    age_s = _task_updated_age_s(task, now_s=now_s)
+    if age_s is not None:
+        payload["updated_age_s"] = round(age_s, 1)
+    return payload
+
+
+def _is_stale_task(
+    task: AgentTaskSummary,
+    *,
+    now_s: float,
+    stale_after_s: float | None,
+) -> bool:
+    if stale_after_s is None or stale_after_s <= 0:
+        return False
+    age_s = _task_updated_age_s(task, now_s=now_s)
+    return age_s is not None and age_s >= stale_after_s
+
+
+def _task_updated_age_s(task: AgentTaskSummary, *, now_s: float) -> float | None:
+    updated_s = _timestamp_s(task.updated_at)
+    if updated_s is None:
+        return None
+    return max(0.0, now_s - updated_s)
+
+
+def _timestamp_s(value: str | None) -> float | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
 
 
 def task_stage(task: AgentTaskSummary) -> str:
@@ -455,6 +529,12 @@ def parse_args() -> argparse.Namespace:
         help="Maximum running and blocked AgentTasks to include in the dispatch review payload.",
     )
     parser.add_argument(
+        "--stale-running-after-s",
+        type=float,
+        default=DEFAULT_STALE_RUNNING_AFTER_S,
+        help="Flag running AgentTasks whose updatedAt is at least this many seconds old. Use 0 to disable.",
+    )
+    parser.add_argument(
         "--stage",
         choices=TASK_STAGE_CHOICES,
         default="trial-slice",
@@ -548,6 +628,7 @@ def main() -> int:
         sample_limit=args.queue_health_limit,
         query_limit=max(args.limit, 100),
         related_experiment=args.related_experiment,
+        stale_running_after_s=args.stale_running_after_s,
     )
     specs = make_dispatch_specs(args, selected, git_url=git_url, git_ref=git_ref)
     base_payload = dispatch_payload(specs, launch=args.launch, dirty_worktree=dirty)

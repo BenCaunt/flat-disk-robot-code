@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 from types import SimpleNamespace
 
@@ -144,6 +145,7 @@ def test_query_queue_health_summarizes_active_tasks(monkeypatch) -> None:
                     objective="Run active A",
                     tags=("trial-slice", "runpod"),
                     related_experiment="NavExperiment/exp@v1",
+                    updated_at="2026-06-14T08:00:00Z",
                 ),
                 AgentTaskSummary(
                     wref="AgentTask/run-active-b",
@@ -153,6 +155,7 @@ def test_query_queue_health_summarizes_active_tasks(monkeypatch) -> None:
                     objective="Run active B",
                     tags=("trial-slice", "runpod"),
                     related_experiment="NavExperiment/exp@v1",
+                    updated_at="2026-06-14T14:00:00Z",
                 ),
                 AgentTaskSummary(
                     wref="AgentTask/run-other",
@@ -180,14 +183,27 @@ def test_query_queue_health_summarizes_active_tasks(monkeypatch) -> None:
         raise AssertionError(status)
 
     monkeypatch.setattr(runpod_dispatcher, "query_agent_tasks", fake_query_agent_tasks)
+    now_s = datetime(2026, 6, 14, 15, tzinfo=timezone.utc).timestamp()
 
-    health = query_queue_health("repo/example", sample_limit=1, query_limit=100, related_experiment="exp")
+    health = query_queue_health(
+        "repo/example",
+        sample_limit=1,
+        query_limit=100,
+        related_experiment="exp",
+        stale_running_after_s=4 * 60 * 60,
+        now_s=now_s,
+    )
 
     assert health["running_task_count"] == 2
     assert [task["task"] for task in health["running_tasks"]] == ["AgentTask/run-active-a"]
+    assert health["running_tasks"][0]["updated_at"] == "2026-06-14T08:00:00Z"
+    assert health["stale_running_task_count"] == 1
+    assert health["stale_running_tasks"][0]["task"] == "AgentTask/run-active-a"
+    assert health["stale_running_tasks"][0]["updated_age_s"] == 25200.0
     assert health["blocked_task_count"] == 1
     assert health["blocked_tasks"][0]["prerequisites"] == ["AgentTask/preflight"]
-    assert "Inspect 2 running AgentTask(s)" in health["next_actions"][0]
+    assert "stale-looking running AgentTask(s)" in health["next_actions"][0]
+    assert any("Inspect 2 running AgentTask(s)" in action for action in health["next_actions"])
 
 
 def test_main_dry_run_dispatches_selected_runpod_workers(monkeypatch, capsys, tmp_path) -> None:
