@@ -558,23 +558,54 @@ A reference-tool-balanced 4-step run then completed in
   This suggests balancing helps action family selection, but exact argument
   choice and broader data coverage are still limiting factors.
 
+A reference-tool-balanced 8-step diagnostic then completed in
+`/workspace/flat-disk-robot-code-train-20260614-grpo-toolbalanced8`, from
+commit `ea4d3fd`:
+
+- Result:
+  `sim/scratch/open_vocab_nav_research_loop/qwen_grpo_jobs/bathroom_cross_run_lora_8step_cap48_tool_balanced/qwen_grpo_training_result.json`
+- Status `complete`, return code `0`, duration `3212.117` seconds.
+- `completion_log_sample_count` was `64`.
+- `completion_log_metrics`: `64/64` parsed actions, `25/64` exact reference
+  actions, `36/64` same-tool matches, mean argument-match fraction `0.455729`,
+  `0` positive non-reference rewards, `0` markdown fences, `0` truncated texts,
+  and mean completion length `87.797` characters.
+- TRL metrics: train runtime about `2973` seconds, train loss `-0.01136`,
+  reward mean `-0.1544`, reward std `0.1401`, step time `366.6` seconds, and
+  `completions/clipped_ratio=0`.
+- The remote LoRA adapter saved successfully under
+  `adapter/adapter_model.safetensors`; the file is about 87 MB. The top-level
+  LoRA adapter files were copied back locally under the same job's `adapter/`
+  directory; the optimizer checkpoint was left on the pod.
+- Compared with the balanced 4-step run, exact rate only moved from `12/32`
+  (`0.375`) to `25/64` (`0.390625`), while same-tool rate dropped from `0.625`
+  to `0.5625` and mean argument match dropped from `0.489583` to `0.455729`.
+  This says longer training alone is not yet enough.
+- The main observed wrong-action pattern is now clear turn overuse. Expected
+  tools in the 64 logged samples were `visual_servo_object=20`,
+  `turn_by_angle=26`, and `check_object_grounding=18`; parsed tools were
+  `visual_servo_object=8`, `turn_by_angle=48`, and `check_object_grounding=8`.
+  Exact-by-tool was `visual_servo_object=4/20`, `turn_by_angle=15/26`, and
+  `check_object_grounding=6/18`.
+
 Resume status for a future continuation:
 
 - This is no longer a verification-only blocker. Runpod auth works when
   `RUNPOD_API_KEY` is loaded from the repo root `.env`, the A40 pod can run the
-  training stack, and both one-step and four-step LoRA adapters were saved
+  training stack, and one-step, four-step, and eight-step LoRA adapters were saved
   successfully.
 - No user action is currently required to start the next training attempt.
 - Use the pushed `codex/open-vocab-nav-research-loop` ref for a clean checkout;
   the original `/workspace/flat-disk-robot-code` directory on the pod is not a
   git repo.
-- The next useful experiment is action-choice data/evaluation scaling. The
-  JSON-format issue is no longer the main blocker, generic partial reward is in
-  place, and reference-tool balancing improves same-tool behavior; exact
-  reference action rate is still only `12/32` on the latest four-step
-  comparison. Useful next directions are training for more steps from the
-  balanced shaped-reward dataset, collecting more diverse grouped rollouts, and
-  adding more stop/arrival examples before treating stop behavior as learned.
+- The next useful experiment is action-choice learning signal and evaluation
+  scaling. The JSON-format issue is no longer the main blocker, generic partial
+  reward is in place, and reference-tool balancing improves early same-tool
+  behavior; the 8-step diagnostic still shows weak exact-action selection and
+  persistent `turn_by_angle` fallback. Useful next directions are adding a
+  generic exact-action bonus ablation for zero-reward tools, collecting more
+  diverse grouped rollouts with stop/arrival and ambiguous grounding examples,
+  and then running a 24-step balanced comparison or held-out completion eval.
   Keep `--max-completion-length` explicit so smoke and short training jobs
   cannot spend most of their time generating long completions.
 
