@@ -23,6 +23,7 @@ DEFAULT_QWEN_HOST = "127.0.0.1"
 DEFAULT_QWEN_PORT = 8000
 DEFAULT_QWEN_SERVER_LOG = "/workspace/qwen_vllm.log"
 DEFAULT_QWEN_VLLM_EXTRA_ARGS = "--max-model-len 16384"
+WARMHUB_AUTH_ENV_NAMES = ("WH_TOKEN", "WARMHUB_TOKEN", "WARMHUB_API_KEY")
 
 
 @dataclass(frozen=True)
@@ -167,6 +168,31 @@ if [[ "${PREPARE_OBJECT_DRIVE_ENV:-1}" == "1" ]]; then
   source scripts/runpod_prepare_object_drive_env.sh
 fi
 """
+    warmhub_auth_block = """
+if [[ -z "${WH_TOKEN:-}" ]]; then
+  if [[ -n "${WARMHUB_TOKEN:-}" ]]; then
+    export WH_TOKEN="$WARMHUB_TOKEN"
+  elif [[ -n "${WARMHUB_API_KEY:-}" ]]; then
+    export WH_TOKEN="$WARMHUB_API_KEY"
+  fi
+fi
+if [[ -z "${WH_TOKEN:-}" ]]; then
+  echo "[abort] missing WarmHub auth; pass --env WH_TOKEN=<pat> or an alias such as WARMHUB_TOKEN" >&2
+  exit 2
+fi
+"""
+    warmhub_smoke_block = """
+if ! wh auth status >/tmp/warmhub_auth_status.txt 2>&1; then
+  cat /tmp/warmhub_auth_status.txt >&2 || true
+  echo "[abort] WarmHub auth check failed; verify the WH_TOKEN passed to the pod" >&2
+  exit 2
+fi
+if ! wh repo describe "$WARMHUB_REPO" --json >/tmp/warmhub_repo_describe.json 2>/tmp/warmhub_repo_describe.err; then
+  cat /tmp/warmhub_repo_describe.err >&2 || true
+  echo "[abort] WarmHub repo check failed for ${WARMHUB_REPO}" >&2
+  exit 2
+fi
+"""
     task_command = f"""uv run --project sim flatdisk-sim-research-warmhub --repo "$WARMHUB_REPO" task-run-command \\
   --task "$TASK_ID" \\
   --agent "$AGENT_NAME" \\
@@ -208,7 +234,7 @@ if ! command -v wh >/dev/null 2>&1; then
   echo "[abort] wh CLI missing; use an image with wh or set WH_INSTALL_CMD" >&2
   exit 2
 fi
-{qwen_start_block}{object_drive_env_block}{task_command_block}
+{warmhub_auth_block}{warmhub_smoke_block}{qwen_start_block}{object_drive_env_block}{task_command_block}
 """
 
 
@@ -240,8 +266,27 @@ def worker_env(spec: RunpodLaunchSpec) -> dict[str, str]:
         )
         if spec.qwen_vllm_extra_args:
             env["QWEN_VLLM_EXTRA_ARGS"] = spec.qwen_vllm_extra_args
-    env.update(spec.env)
+    env.update(normalize_warmhub_auth_env(spec.env))
     return env
+
+
+def normalize_warmhub_auth_env(env: dict[str, str]) -> dict[str, str]:
+    normalized = dict(env)
+    if normalized.get("WH_TOKEN"):
+        return normalized
+    for alias in ("WARMHUB_TOKEN", "WARMHUB_API_KEY"):
+        if normalized.get(alias):
+            normalized["WH_TOKEN"] = normalized[alias]
+            break
+    return normalized
+
+
+def has_warmhub_auth_env(env: dict[str, str]) -> bool:
+    return any(bool(str(env.get(name) or "").strip()) for name in WARMHUB_AUTH_ENV_NAMES)
+
+
+def spec_has_warmhub_auth_env(spec: RunpodLaunchSpec) -> bool:
+    return has_warmhub_auth_env(spec.env)
 
 
 def redacted_command(command: list[str]) -> list[str]:
@@ -407,6 +452,11 @@ def main() -> int:
         qwen_vllm_package=args.qwen_vllm_package,
         qwen_vllm_extra_args=args.qwen_vllm_extra_args,
     )
+    if args.launch and not spec_has_warmhub_auth_env(spec):
+        raise SystemExit(
+            "refusing to launch Runpod pod because the remote worker lacks WarmHub auth; "
+            "pass --env WH_TOKEN=<pat> or an alias such as WARMHUB_TOKEN"
+        )
     command = build_runpodctl_command(spec)
     if not args.launch:
         print(

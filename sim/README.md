@@ -622,6 +622,7 @@ To generate a `runpodctl pod create` command from a planned Warmhub task:
 uv run flatdisk-sim-runpod-launch-task \
   --task qwen-topomap-memory-runpod-linux-v1-preflight \
   --agent agent-name \
+  --env WH_TOKEN="$WH_TOKEN" \
   --start-qwen-server \
   --terminate-after 4h
 ```
@@ -629,7 +630,13 @@ uv run flatdisk-sim-runpod-launch-task \
 The launcher is dry-run by default and redacts sensitive environment values in
 its output. `--start-qwen-server` injects the vLLM startup env, waits for the
 local `/v1/models` endpoint, and attaches `/workspace/qwen_vllm.log` as task
-evidence. Use `--launch` only after the worker code is committed and pushed,
+evidence. Pass a Warmhub PAT to fresh pods with `--env WH_TOKEN="$WH_TOKEN"` so
+the worker can claim tasks and commit results. `WARMHUB_TOKEN` and
+`WARMHUB_API_KEY` are accepted as compatibility aliases and normalized to
+`WH_TOKEN` in the pod. On `--launch`, the local launcher refuses to create a pod
+unless worker Warmhub auth is present; the remote worker then runs `wh auth
+status` and `wh repo describe "$WARMHUB_REPO" --json` before claiming or running
+the task. Use `--launch` only after the worker code is committed and pushed,
 `RUNPOD_API_KEY` is valid for pod management, and the pod can install or run the
 `wh` CLI.
 
@@ -641,12 +648,16 @@ uv run flatdisk-sim-runpod-dispatch \
   --name-prefix qwen-topomap-memory-runpod-linux-v1-run- \
   --tag trial-slice \
   --max-workers 2 \
+  --env WH_TOKEN="$WH_TOKEN" \
   --start-qwen-server \
   --terminate-after 4h
 ```
 
 The dispatcher is also dry-run by default, filters locally after querying
-planned `AgentTask` records, and emits one pod command per selected task.
+planned `AgentTask` records, and emits one pod command per selected task. On
+`--launch`, it verifies `RUNPOD_API_KEY` is usable and that selected workers
+will receive a Warmhub auth env before reserving any `AgentTask`; each remote
+worker also checks Warmhub auth and repo reachability before task execution.
 
 This path starts the same simulator bridge as the text-goal policy evaluator and
 connects the harness through `AgentTools`. The live policy receives only camera

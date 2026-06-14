@@ -203,6 +203,7 @@ def test_main_dry_run_dispatches_selected_runpod_workers(monkeypatch, capsys, tm
     assert env["START_QWEN_SERVER"] == "1"
     assert env["QWEN_VLLM_EXTRA_ARGS"] == "--max-model-len 8192"
     assert env["WARMHUB_API_KEY"] == "<redacted>"
+    assert env["WH_TOKEN"] == "<redacted>"
     assert "--no-claim" in command[command.index("--docker-args") + 1]
     assert payload["dispatch_manifest"] == str(tmp_path / "dispatch.json")
     manifest = json.loads((tmp_path / "dispatch.json").read_text(encoding="utf-8"))
@@ -214,6 +215,7 @@ def test_main_dry_run_dispatches_selected_runpod_workers(monkeypatch, capsys, tm
     manifest_command = manifest["workers"][0]["runpodctl_command"]
     manifest_env = json.loads(manifest_command[manifest_command.index("--env") + 1])
     assert manifest_env["WARMHUB_API_KEY"] == "<redacted>"
+    assert manifest_env["WH_TOKEN"] == "<redacted>"
     assert manifest["skipped_for_prerequisites"][0]["missing_prerequisites"] == ["AgentTask/plan-missing-preflight"]
 
 
@@ -314,6 +316,8 @@ def test_main_launch_reserves_before_creating_pods(monkeypatch, capsys, tmp_path
             "plan-",
             "--tag",
             "runpod",
+            "--env",
+            "WH_TOKEN=secret",
             "--max-workers",
             "1",
             "--launch",
@@ -326,6 +330,61 @@ def test_main_launch_reserves_before_creating_pods(monkeypatch, capsys, tmp_path
     assert payload["reserved_task_count"] == 1
     assert payload["reserved_tasks"] == ["AgentTask/plan-run-a"]
     assert payload["failed_launches"] == 0
+
+
+def test_main_launch_refuses_missing_worker_warmhub_auth_before_reserving(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    events = []
+    monkeypatch.setattr(runpod_dispatcher, "current_git_remote", lambda _cwd: "https://github.com/BenCaunt/flat-disk-robot-code.git")
+    monkeypatch.setattr(runpod_dispatcher, "current_git_ref", lambda _cwd: "abc123")
+    monkeypatch.setattr(runpod_dispatcher, "worktree_dirty", lambda _cwd: False)
+    monkeypatch.setattr(runpod_dispatcher, "query_completed_task_refs", lambda *_args, **_kwargs: {"AgentTask/plan-preflight"})
+    monkeypatch.setattr(
+        runpod_dispatcher,
+        "query_agent_tasks",
+        lambda *_args, **_kwargs: [
+            AgentTaskSummary(
+                wref="AgentTask/plan-run-a",
+                name="plan-run-a",
+                status="planned",
+                owner="unassigned",
+                objective="Run A",
+                tags=("trial-slice", "runpod", "qwen"),
+                prerequisites=("AgentTask/plan-preflight",),
+            )
+        ],
+    )
+
+    def fake_check_runpod_auth():  # noqa: ANN202
+        events.append("auth")
+
+    def fake_reserve(_repo, _specs):  # noqa: ANN001, ANN202
+        events.append("reserve")
+        return []
+
+    monkeypatch.setattr(runpod_dispatcher, "check_runpod_auth", fake_check_runpod_auth)
+    monkeypatch.setattr(runpod_dispatcher, "reserve_tasks_before_launch", fake_reserve)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "flatdisk-sim-runpod-dispatch",
+            "--name-prefix",
+            "plan-",
+            "--tag",
+            "runpod",
+            "--max-workers",
+            "1",
+            "--launch",
+        ],
+    )
+
+    try:
+        runpod_dispatcher.main()
+    except SystemExit as exc:
+        assert "lack remote WarmHub auth" in str(exc)
+    else:
+        raise AssertionError("expected SystemExit")
+    assert events == []
 
 
 def test_main_launch_refuses_missing_runpod_auth_before_reserving(monkeypatch, tmp_path) -> None:
@@ -374,6 +433,8 @@ def test_main_launch_refuses_missing_runpod_auth_before_reserving(monkeypatch, t
             "plan-",
             "--tag",
             "runpod",
+            "--env",
+            "WH_TOKEN=secret",
             "--max-workers",
             "1",
             "--launch",

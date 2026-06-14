@@ -101,6 +101,7 @@ def test_redacted_command_hides_sensitive_env_values() -> None:
     env = json.loads(command[command.index("--env") + 1])
 
     assert env["WARMHUB_API_KEY"] == "<redacted>"
+    assert env["WH_TOKEN"] == "<redacted>"
     assert env["NORMAL_VALUE"] == "visible"
 
 
@@ -126,6 +127,10 @@ def test_remote_worker_script_requires_wh_and_runs_selected_task_command() -> No
     script = remote_worker_script(spec)
 
     assert "command -v wh" in script
+    assert "missing WarmHub auth" in script
+    assert 'export WH_TOKEN="$WARMHUB_API_KEY"' in script
+    assert "wh auth status" in script
+    assert 'wh repo describe "$WARMHUB_REPO" --json' in script
     assert "source scripts/runpod_prepare_object_drive_env.sh" in script
     assert "--command-index \"$COMMAND_INDEX\"" in script
     assert "--evidence-artifact /workspace/outputs/open_vocab_nav_research_loop" in script
@@ -175,6 +180,7 @@ def test_main_dry_run_prints_runpodctl_command(monkeypatch, capsys, tmp_path) ->
     assert command[:3] == ["runpodctl", "pod", "create"]
     env = json.loads(command[command.index("--env") + 1])
     assert env["WARMHUB_API_KEY"] == "<redacted>"
+    assert env["WH_TOKEN"] == "<redacted>"
 
 
 def test_main_launch_refuses_dirty_worktree(monkeypatch, tmp_path) -> None:
@@ -200,3 +206,31 @@ def test_main_launch_refuses_dirty_worktree(monkeypatch, tmp_path) -> None:
         assert "dirty worktree" in str(exc)
     else:
         raise AssertionError("expected SystemExit")
+
+
+def test_main_launch_refuses_missing_worker_warmhub_auth(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    events = []
+    monkeypatch.setattr(runpod_launcher, "current_git_remote", lambda _cwd: "https://github.com/BenCaunt/flat-disk-robot-code.git")
+    monkeypatch.setattr(runpod_launcher, "current_git_ref", lambda _cwd: "abc123")
+    monkeypatch.setattr(runpod_launcher, "worktree_dirty", lambda _cwd: False)
+    monkeypatch.setattr(runpod_launcher, "launch_with_runpodctl", lambda _command: events.append("launch") or 0)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "flatdisk-sim-runpod-launch-task",
+            "--task",
+            "AgentTask/example",
+            "--agent",
+            "agent-a",
+            "--launch",
+        ],
+    )
+
+    try:
+        runpod_launcher.main()
+    except SystemExit as exc:
+        assert "remote worker lacks WarmHub auth" in str(exc)
+    else:
+        raise AssertionError("expected SystemExit")
+    assert events == []

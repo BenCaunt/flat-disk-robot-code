@@ -28,6 +28,7 @@ from .runpod_launcher import (
     compact_safe_id,
     current_git_ref,
     current_git_remote,
+    spec_has_warmhub_auth_env,
     launch_with_runpodctl,
     parse_env_assignments,
     redacted_command,
@@ -363,6 +364,18 @@ def check_runpod_auth() -> None:
     )
 
 
+def check_worker_warmhub_auth(specs: list[RunpodLaunchSpec]) -> None:
+    missing = [spec.task for spec in specs if not spec_has_warmhub_auth_env(spec)]
+    if not missing:
+        return
+    sample = ", ".join(missing[:3])
+    suffix = "" if len(missing) <= 3 else f", and {len(missing) - 3} more"
+    raise SystemExit(
+        "refusing to reserve WarmHub tasks or launch Runpod pods because selected worker(s) lack remote WarmHub auth; "
+        f"pass --env WH_TOKEN=<pat> for Runpod workers. Missing: {sample}{suffix}"
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", default=DEFAULT_WARMHUB_REPO, help="Warmhub repo.")
@@ -485,6 +498,7 @@ def main() -> int:
         return 0
 
     if specs:
+        check_worker_warmhub_auth(specs)
         check_runpod_auth()
 
     if not args.no_reserve_before_launch:
