@@ -309,6 +309,13 @@ def test_plan_qwen_grpo_training_uses_existing_manifest_and_writes_job(tmp_path:
     dataset_record = json.loads(dataset_path.read_text(encoding="utf-8").splitlines()[0])
     assert dataset_record["schema"] == "flatdisk.qwen_grpo_trl_prompt_sample.v1"
     assert dataset_record["prompt"] == dataset_record["prompt_messages"]
+    assert dataset_record["source_prompt_messages"]
+    assert "GRPO_RESPONSE_CONTRACT" in dataset_record["response_contract"]
+    assert "thought" in dataset_record["response_contract"]
+    assert "toilet" not in dataset_record["response_contract"].lower()
+    last_content = dataset_record["prompt_messages"][-1]["content"]
+    assert last_content[-1]["type"] == "text"
+    assert last_content[-1]["text"] == dataset_record["response_contract"]
     assert dataset_record["image_paths"]
     assert dataset_record["reference_action_json"]["tool"] == "drive_straight"
     assert dataset_record["reward_source"].startswith("offline evaluator reward sidecar")

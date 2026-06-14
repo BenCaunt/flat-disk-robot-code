@@ -20,6 +20,13 @@ from .qwen_tool_training import DEFAULT_FORBIDDEN_MODEL_TOKENS
 QWEN_GRPO_TRAINING_JOB_SCHEMA = "flatdisk.qwen_grpo_training_job.v1"
 QWEN_GRPO_TRAINING_RESULT_SCHEMA = "flatdisk.qwen_grpo_training_result.v1"
 QWEN_GRPO_TRL_SAMPLE_SCHEMA = "flatdisk.qwen_grpo_trl_prompt_sample.v1"
+GRPO_RESPONSE_CONTRACT = (
+    "GRPO_RESPONSE_CONTRACT\n"
+    "For this training action response, output only one compact JSON object and stop immediately after it. "
+    'Required form: {"action":{"tool":"<tool_name>","args":{...}}}. '
+    "Do not use markdown fences. Do not include thought, grounding_audit, memory_update, save_frames, commentary, "
+    "or extra keys."
+)
 
 
 def plan_qwen_grpo_training(
@@ -223,7 +230,8 @@ def _trl_dataset_records(ppo_step_records: list[dict[str, Any]]) -> list[dict[st
         reward = record.get("evaluator_reward") if isinstance(record.get("evaluator_reward"), dict) else {}
         target = record.get("assistant_target_json") if isinstance(record.get("assistant_target_json"), dict) else {}
         action = target.get("action") if isinstance(target.get("action"), dict) else {}
-        prompt_messages = record.get("prompt_messages", [])
+        source_prompt_messages = record.get("prompt_messages", [])
+        prompt_messages = _append_grpo_response_contract(source_prompt_messages)
         image_paths = [str(path) for path in record.get("image_paths", []) if str(path)]
         records.append(
             {
@@ -233,6 +241,8 @@ def _trl_dataset_records(ppo_step_records: list[dict[str, Any]]) -> list[dict[st
                 "terminal": bool(record.get("terminal")),
                 "prompt": prompt_messages,
                 "prompt_messages": prompt_messages,
+                "source_prompt_messages": source_prompt_messages,
+                "response_contract": GRPO_RESPONSE_CONTRACT,
                 "image_paths": image_paths,
                 "reference_assistant_json": target,
                 "reference_action_json": action,
@@ -243,6 +253,23 @@ def _trl_dataset_records(ppo_step_records: list[dict[str, Any]]) -> list[dict[st
             }
         )
     return records
+
+
+def _append_grpo_response_contract(messages: Any) -> list[dict[str, Any]]:
+    normalized = [dict(message) for message in messages] if isinstance(messages, list) else []
+    contract_item = {"type": "text", "text": GRPO_RESPONSE_CONTRACT}
+    if not normalized:
+        return [{"role": "user", "content": [contract_item]}]
+    last = dict(normalized[-1])
+    content = last.get("content")
+    if isinstance(content, list):
+        last["content"] = [*content, contract_item]
+    elif content:
+        last["content"] = [{"type": "text", "text": str(content)}, contract_item]
+    else:
+        last["content"] = [contract_item]
+    normalized[-1] = last
+    return normalized
 
 
 def _validate_grpo_job_inputs(
