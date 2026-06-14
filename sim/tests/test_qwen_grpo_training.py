@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import shlex
 import sys
+from time import gmtime, strftime
 
 from flatdisk_sim import qwen_grpo_job
 from flatdisk_sim.qwen_grpo_training import main, prepare_qwen_grpo_training
@@ -264,6 +266,22 @@ def _write_ready_grpo_handoff(tmp_path: Path) -> Path:
     return tmp_path / "run" / "qwen_grpo_training"
 
 
+def _generated_reward_namespace() -> dict:
+    script = qwen_grpo_job._TRAIN_SCRIPT
+    start = script.index("def canonical_json")
+    end = script.index("\ndef main")
+    namespace = {
+        "json": json,
+        "os": os,
+        "Path": Path,
+        "gmtime": gmtime,
+        "strftime": strftime,
+        "_COMPLETION_LOG_BATCH_INDEX": 0,
+    }
+    exec(script[start:end], namespace)
+    return namespace
+
+
 def test_reference_tool_balancer_duplicates_underrepresented_tools_generically() -> None:
     records = [
         {
@@ -327,6 +345,13 @@ def test_plan_qwen_grpo_training_uses_existing_manifest_and_writes_job(tmp_path:
     assert job["training_args"]["max_steps"] == 7
     assert job["training_args"]["num_generations"] == 3
     assert job["training_args"]["max_completion_length"] == 96
+    assert job["training_args"]["zero_reward_exact_action_bonus"] == 0.0
+    assert job["audit"]["exact_action_reward_shaping"] == {
+        "applies_only_when_candidate_step_reward_is_zero": True,
+        "enabled": False,
+        "requires_candidate_step_reward_present": True,
+        "zero_reward_exact_action_bonus": 0.0,
+    }
     assert job["adapter"]["method"] == "peft_lora"
     assert job["adapter"]["r"] == 8
     assert job["completion_log_jsonl"] == str(tmp_path / "grpo_job" / "adapter" / "completion_samples.jsonl")
@@ -356,6 +381,7 @@ def test_plan_qwen_grpo_training_uses_existing_manifest_and_writes_job(tmp_path:
     assert last_content[-1]["text"] == dataset_record["response_contract"]
     assert dataset_record["image_paths"]
     assert dataset_record["reference_action_json"]["tool"] == "drive_straight"
+    assert dataset_record["candidate_step_reward_present"] is True
     assert dataset_record["reward_source"].startswith("offline evaluator reward sidecar")
     script_text = train_script.read_text(encoding="utf-8")
     assert "GRPOTrainer" in script_text
@@ -366,14 +392,109 @@ def test_plan_qwen_grpo_training_uses_existing_manifest_and_writes_job(tmp_path:
     assert "FLATDISK_GRPO_COMPLETION_LOG" in script_text
     assert "log_completion_batch" in script_text
     assert "partial_action_reward" in script_text
+    assert "exact_action_reward" in script_text
     assert "arg_match_fraction" in script_text
     assert "expected_action" in script_text
+    assert "candidate_step_reward_present" in script_text
+    assert "zero_reward_exact_action_bonus" in script_text
     assert "base_reward - 0.05" in script_text
     assert "-0.02" in script_text
     assert "min(base_reward - 0.5, -0.5)" in script_text
     assert "conversational_text_messages" in script_text
     assert "record[\"prompt\"] = conversational_text_messages(messages)" in script_text
     assert "apply_chat_template" not in script_text
+
+
+def test_plan_qwen_grpo_training_wires_zero_reward_exact_action_bonus(tmp_path: Path) -> None:
+    grpo_dir = _write_ready_grpo_handoff(tmp_path)
+
+    job = qwen_grpo_job.plan_qwen_grpo_training(
+        grpo_dir,
+        output_dir=tmp_path / "grpo_job",
+        zero_reward_exact_action_bonus=0.05,
+    )
+
+    assert job["training_args"]["zero_reward_exact_action_bonus"] == 0.05
+    assert job["audit"]["exact_action_reward_shaping"] == {
+        "applies_only_when_candidate_step_reward_is_zero": True,
+        "enabled": True,
+        "requires_candidate_step_reward_present": True,
+        "zero_reward_exact_action_bonus": 0.05,
+    }
+    assert "--zero-reward-exact-action-bonus" in job["launch_argv"]
+    assert "0.05" in job["launch_argv"]
+    assert "--zero-reward-exact-action-bonus 0.05" in job["launch_command"]
+
+    dataset_path = tmp_path / "grpo_job" / "qwen_grpo_trl_dataset.jsonl"
+    dataset_record = json.loads(dataset_path.read_text(encoding="utf-8").splitlines()[0])
+    assert "zero_reward_exact_action_bonus" not in json.dumps(dataset_record["prompt_messages"])
+    assert "candidate_step_reward" not in json.dumps(dataset_record["prompt_messages"])
+    assert "reference_action_canonical" not in json.dumps(dataset_record["prompt_messages"])
+    assert "zero_reward_exact_action_bonus" not in dataset_record["response_contract"]
+    assert "candidate_step_reward" not in dataset_record["response_contract"]
+
+
+def test_plan_qwen_grpo_training_rejects_negative_zero_reward_exact_action_bonus(tmp_path: Path) -> None:
+    grpo_dir = _write_ready_grpo_handoff(tmp_path)
+
+    try:
+        qwen_grpo_job.plan_qwen_grpo_training(
+            grpo_dir,
+            output_dir=tmp_path / "grpo_job",
+            zero_reward_exact_action_bonus=-0.01,
+        )
+    except ValueError as exc:
+        assert "zero_reward_exact_action_bonus must be non-negative" in str(exc)
+    else:
+        raise AssertionError("expected negative zero_reward_exact_action_bonus to fail")
+
+
+def test_generated_navigation_reward_applies_exact_bonus_only_to_observed_zero_rewards(
+    tmp_path: Path, monkeypatch
+) -> None:
+    namespace = _generated_reward_namespace()
+    navigation_tool_reward = namespace["navigation_tool_reward"]
+    canonical_json = namespace["canonical_json"]
+    completion_log = tmp_path / "completion_samples.jsonl"
+    monkeypatch.setenv("FLATDISK_GRPO_COMPLETION_LOG", str(completion_log))
+
+    alpha = {"tool": "alpha_tool", "args": {"target": "left", "power": 1}}
+    alpha_wrong_args = {"tool": "alpha_tool", "args": {"target": "right", "power": 1}}
+    beta = {"tool": "beta_tool", "args": {}}
+
+    completions = [
+        json.dumps({"action": alpha}),
+        json.dumps({"action": alpha}),
+        json.dumps({"action": alpha}),
+        json.dumps({"action": alpha_wrong_args}),
+        json.dumps({"action": beta}),
+        "not json",
+        json.dumps({"action": alpha}),
+    ]
+    rewards = navigation_tool_reward(
+        completions,
+        reference_action_canonical=[canonical_json(alpha)] * len(completions),
+        candidate_step_reward=[0.0, 0.2, -0.2, 0.2, 0.2, 0.2, 0.0],
+        candidate_step_reward_present=[True, True, True, True, True, True, False],
+        reward_scale=[1.0] * len(completions),
+        zero_reward_exact_action_bonus=[0.05] * len(completions),
+        sample_id=[f"sample_{index}" for index in range(len(completions))],
+    )
+
+    assert rewards[0] == 0.05
+    assert rewards[1] == 0.2
+    assert rewards[2] == -0.2
+    assert rewards[3] <= 0.0
+    assert rewards[4] <= 0.0
+    assert rewards[5] <= 0.0
+    assert rewards[6] == 0.0
+    assert completion_log.exists()
+    rows = [json.loads(line) for line in completion_log.read_text(encoding="utf-8").splitlines()]
+    assert rows[0]["zero_reward_exact_action_bonus"] == 0.05
+    assert rows[0]["candidate_step_reward_present"] is True
+    assert rows[6]["candidate_step_reward_present"] is False
+    metrics = qwen_grpo_job._completion_log_metrics(completion_log)
+    assert metrics["positive_non_reference_reward_count"] == 0
 
 
 def test_plan_qwen_grpo_training_blocks_not_ready_manifest(tmp_path: Path) -> None:

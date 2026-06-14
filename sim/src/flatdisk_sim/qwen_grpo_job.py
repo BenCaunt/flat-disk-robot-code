@@ -43,10 +43,13 @@ def plan_qwen_grpo_training(
     num_generations: int = 2,
     max_completion_length: int = 96,
     reward_scale: float = 1.0,
+    zero_reward_exact_action_bonus: float = 0.0,
     balance_reference_tools: bool = False,
     max_balance_multiplier: int = 4,
     require_existing_images: bool = True,
 ) -> dict[str, Any]:
+    if zero_reward_exact_action_bonus < 0.0:
+        raise ValueError("zero_reward_exact_action_bonus must be non-negative")
     grpo_manifest_path = _resolve_qwen_grpo_manifest(input_path)
     manifest = json.loads(grpo_manifest_path.read_text(encoding="utf-8"))
     manifest["_manifest_path"] = str(grpo_manifest_path)
@@ -89,6 +92,7 @@ def plan_qwen_grpo_training(
         num_generations=num_generations,
         max_completion_length=max_completion_length,
         reward_scale=reward_scale,
+        zero_reward_exact_action_bonus=zero_reward_exact_action_bonus,
     )
     _write_train_script(train_script_path)
     job = {
@@ -128,6 +132,7 @@ def plan_qwen_grpo_training(
             "num_generations": num_generations,
             "max_completion_length": max_completion_length,
             "reward_scale": reward_scale,
+            "zero_reward_exact_action_bonus": zero_reward_exact_action_bonus,
             "remove_unused_columns": False,
         },
         "adapter": {
@@ -149,6 +154,12 @@ def plan_qwen_grpo_training(
             "require_existing_images": require_existing_images,
             "offline_replay_reward": True,
             "online_environment_reward": False,
+            "exact_action_reward_shaping": {
+                "enabled": zero_reward_exact_action_bonus > 0.0,
+                "zero_reward_exact_action_bonus": zero_reward_exact_action_bonus,
+                "applies_only_when_candidate_step_reward_is_zero": True,
+                "requires_candidate_step_reward_present": True,
+            },
             "reference_tool_balancing": {
                 "enabled": balance_reference_tools,
                 "max_multiplier": max_balance_multiplier if balance_reference_tools else 1,
@@ -332,6 +343,7 @@ def _trl_dataset_records(ppo_step_records: list[dict[str, Any]]) -> list[dict[st
                 "reference_action_json": action,
                 "reference_action_canonical": _canonical_json(action),
                 "candidate_step_reward": _optional_float(reward.get("candidate_step_reward")) or 0.0,
+                "candidate_step_reward_present": _optional_float(reward.get("candidate_step_reward")) is not None,
                 "candidate_episode_reward": _optional_float(reward.get("candidate_episode_reward")) or 0.0,
                 "reward_source": "offline evaluator reward sidecar; excluded from prompt and completion",
             }
@@ -655,6 +667,7 @@ def _launch_argv(
     num_generations: int,
     max_completion_length: int,
     reward_scale: float,
+    zero_reward_exact_action_bonus: float,
 ) -> list[str]:
     return [
         "accelerate",
@@ -680,6 +693,8 @@ def _launch_argv(
         str(max_completion_length),
         "--reward-scale",
         str(reward_scale),
+        "--zero-reward-exact-action-bonus",
+        str(zero_reward_exact_action_bonus),
     ]
 
 
@@ -960,7 +975,15 @@ def value_at(value, index: int):
     return value
 
 
-def log_completion_batch(completions, rewards, reference_action_canonical=None, candidate_step_reward=None, metadata=None) -> None:
+def log_completion_batch(
+    completions,
+    rewards,
+    reference_action_canonical=None,
+    candidate_step_reward=None,
+    candidate_step_reward_present=None,
+    zero_reward_exact_action_bonus=None,
+    metadata=None,
+) -> None:
     path_value = os.environ.get("FLATDISK_GRPO_COMPLETION_LOG")
     if not path_value:
         return
@@ -992,6 +1015,8 @@ def log_completion_batch(completions, rewards, reference_action_canonical=None, 
                 "source_rollout_id": value_at(metadata.get("source_rollout_id"), index),
                 "reward": value_at(rewards, index),
                 "candidate_step_reward": value_at(candidate_step_reward, index),
+                "candidate_step_reward_present": value_at(candidate_step_reward_present, index),
+                "zero_reward_exact_action_bonus": value_at(zero_reward_exact_action_bonus, index),
                 "reference_action_canonical": expected,
                 "expected_action": expected_action,
                 "parsed_action": parsed_action,
@@ -1003,22 +1028,54 @@ def log_completion_batch(completions, rewards, reference_action_canonical=None, 
             handle.write(json.dumps(record, sort_keys=True, default=str) + "\\n")
 
 
-def navigation_tool_reward(completions, reference_action_canonical=None, candidate_step_reward=None, reward_scale=None, **kwargs):
+def exact_action_reward(base_reward: float, reward_present: bool, zero_reward_exact_action_bonus: float) -> float:
+    if reward_present and zero_reward_exact_action_bonus > 0.0 and abs(base_reward) <= 1e-12:
+        return zero_reward_exact_action_bonus
+    return base_reward
+
+
+def navigation_tool_reward(
+    completions,
+    reference_action_canonical=None,
+    candidate_step_reward=None,
+    candidate_step_reward_present=None,
+    reward_scale=None,
+    zero_reward_exact_action_bonus=None,
+    **kwargs,
+):
     scale = float(reward_scale[0] if isinstance(reward_scale, list) and reward_scale else reward_scale or 1.0)
+    bonus = float(
+        zero_reward_exact_action_bonus[0]
+        if isinstance(zero_reward_exact_action_bonus, list) and zero_reward_exact_action_bonus
+        else zero_reward_exact_action_bonus or 0.0
+    )
     rewards = []
     for index, completion in enumerate(completions):
         expected = reference_action_canonical[index] if isinstance(reference_action_canonical, list) else reference_action_canonical
         step_reward = candidate_step_reward[index] if isinstance(candidate_step_reward, list) else candidate_step_reward
+        reward_present = (
+            candidate_step_reward_present[index]
+            if isinstance(candidate_step_reward_present, list)
+            else candidate_step_reward_present
+        )
         parsed = parse_action(completion_text(completion))
         base_reward = float(step_reward or 0.0)
         expected_action = parse_reference_action(expected)
         if canonical_json(parsed) == expected:
-            rewards.append(base_reward * scale)
+            rewards.append(exact_action_reward(base_reward, bool(reward_present), bonus) * scale)
         elif parsed:
             rewards.append(min(partial_action_reward(parsed, expected_action), base_reward - 0.05, -0.02) * scale)
         else:
             rewards.append(min(base_reward - 0.5, -0.5) * scale)
-    log_completion_batch(completions, rewards, reference_action_canonical, candidate_step_reward, kwargs)
+    log_completion_batch(
+        completions,
+        rewards,
+        reference_action_canonical,
+        candidate_step_reward,
+        candidate_step_reward_present,
+        zero_reward_exact_action_bonus,
+        kwargs,
+    )
     return rewards
 
 
@@ -1034,7 +1091,15 @@ def main() -> None:
     parser.add_argument("--num-generations", type=int, default=2)
     parser.add_argument("--max-completion-length", type=int, default=96)
     parser.add_argument("--reward-scale", type=float, default=1.0)
+    parser.add_argument(
+        "--zero-reward-exact-action-bonus",
+        type=float,
+        default=0.0,
+        help="Optional reward for exact reference actions whose candidate step reward is an observed zero.",
+    )
     args = parser.parse_args()
+    if args.zero_reward_exact_action_bonus < 0.0:
+        parser.error("--zero-reward-exact-action-bonus must be non-negative")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     default_completion_log = args.output_dir / "completion_samples.jsonl"
     if not os.environ.get("FLATDISK_GRPO_COMPLETION_LOG"):
@@ -1048,6 +1113,7 @@ def main() -> None:
         record["images"] = [load_image(path) for path in record.get("image_paths", [])]
         record["prompt"] = conversational_text_messages(messages)
         record["reward_scale"] = args.reward_scale
+        record["zero_reward_exact_action_bonus"] = args.zero_reward_exact_action_bonus
     dataset = Dataset.from_list(records)
     model = AutoModelForImageTextToText.from_pretrained(args.model_id, torch_dtype="auto", device_map="auto")
     if hasattr(model.config, "use_cache"):
@@ -1108,6 +1174,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-completion-length", type=int, default=96)
     parser.add_argument("--reward-scale", type=float, default=1.0)
     parser.add_argument(
+        "--zero-reward-exact-action-bonus",
+        type=float,
+        default=0.0,
+        help="Optional reward for exact reference actions whose candidate step reward is an observed zero.",
+    )
+    parser.add_argument(
         "--balance-reference-tools",
         action="store_true",
         help="Deterministically duplicate underrepresented reference-action tool families in the TRL dataset.",
@@ -1120,7 +1192,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--allow-missing-images", action="store_true")
     parser.add_argument("--fail-on-not-ready", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.zero_reward_exact_action_bonus < 0.0:
+        parser.error("--zero-reward-exact-action-bonus must be non-negative")
+    return args
 
 
 def main() -> int:
@@ -1137,6 +1212,7 @@ def main() -> int:
         num_generations=args.num_generations,
         max_completion_length=args.max_completion_length,
         reward_scale=args.reward_scale,
+        zero_reward_exact_action_bonus=args.zero_reward_exact_action_bonus,
         balance_reference_tools=args.balance_reference_tools,
         max_balance_multiplier=args.max_balance_multiplier,
         require_existing_images=not args.allow_missing_images,
@@ -1150,6 +1226,7 @@ def main() -> int:
                     "reference_action_tool_counts"
                 ],
                 "reference_tool_balancing": job["audit"]["reference_tool_balancing"],
+                "exact_action_reward_shaping": job["audit"]["exact_action_reward_shaping"],
                 "trainable_group_count": job["dataset"]["trainable_group_count"],
                 "missing_image_count": job["dataset"]["missing_image_count"],
                 "forbidden_model_token_hits": job["dataset"]["forbidden_model_token_hits"],
