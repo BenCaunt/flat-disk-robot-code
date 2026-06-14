@@ -260,17 +260,20 @@ def write_research_report(aggregate: dict[str, Any], output_root: Path) -> Path:
         "Policy input allowlist: " + ", ".join(POLICY_INPUT_ALLOWLIST),
         "Privileged evaluator data is used only for scoring/debugging.",
         "",
-        "| Trial | Variant | Episode | Runner | Success | Reason | Steps | Final distance (m) | Output |",
-        "|---|---|---|---|---:|---|---:|---:|---|",
+        "| Trial | Variant | Episode | Runner | Success | Reason | Steps | Best distance (m) | Final distance (m) | Final regression (m) | Output |",
+        "|---|---|---|---|---:|---|---:|---:|---:|---:|---|",
     ]
     for row in aggregate["summaries"]:
         lines.append(
             f"| {row['trial_id']} | {row['variant']} | {row['episode']} | {row['runner']} | "
             f"{row['success']} | {row['reason']} | {row['step_count']} | "
-            f"{_format_float(row.get('final_distance_m'))} | {row.get('run_dir') or ''} |"
+            f"{_format_float(row.get('best_distance_m'))} | "
+            f"{_format_float(row.get('final_distance_m'))} | "
+            f"{_format_float(row.get('final_to_best_regression_m'))} | "
+            f"{row.get('run_dir') or ''} |"
         )
     if not aggregate["summaries"]:
-        lines.append("| dry-run | - | - | - | - | no simulator execution | - | - | - |")
+        lines.append("| dry-run | - | - | - | - | no simulator execution | - | - | - | - | - |")
     lines.extend(
         [
             "",
@@ -369,6 +372,12 @@ def warmhub_shapes() -> dict[str, dict[str, Any]]:
                 "outputDir": "string",
                 "success": "boolean",
                 "finalDistanceM?": "number",
+                "bestDistanceM?": "number",
+                "bestDistanceStep?": "number",
+                "bestDistanceImprovementM?": "number",
+                "finalDistanceImprovementM?": "number",
+                "finalToBestRegressionM?": "number",
+                "reachedSuccessRadiusEver": "boolean",
                 "reason": "string",
                 "stepCount": "number",
                 "wallClockS": "number",
@@ -395,6 +404,12 @@ def warmhub_shapes() -> dict[str, dict[str, Any]]:
             "fields": {
                 "success": "boolean",
                 "finalDistanceM?": "number",
+                "bestDistanceM?": "number",
+                "bestDistanceStep?": "number",
+                "bestDistanceImprovementM?": "number",
+                "finalDistanceImprovementM?": "number",
+                "finalToBestRegressionM?": "number",
+                "reachedSuccessRadiusEver": "boolean",
                 "reason": "string",
                 "stepCount": "number",
                 "evaluator": "string",
@@ -558,7 +573,28 @@ def commit_warmhub_bundle(output_root: Path, *, repo: str, init_repo: bool) -> N
     shapes = json.loads((output_root / "warmhub_shapes.json").read_text(encoding="utf-8"))
     for shape_name, spec in shapes.items():
         view = subprocess.run(["wh", "shape", "view", shape_name, "--repo", repo, "--json"], text=True, capture_output=True, check=False)
+        fields_json = json.dumps(spec["fields"], sort_keys=True)
+        description = spec["description"]
         if view.returncode == 0:
+            current = _shape_view_data(view.stdout)
+            if current.get("fields") == spec["fields"] and current.get("description") == description:
+                continue
+            subprocess.run(
+                [
+                    "wh",
+                    "shape",
+                    "revise",
+                    shape_name,
+                    "--repo",
+                    repo,
+                    "--fields",
+                    fields_json,
+                    "--description",
+                    description,
+                ],
+                text=True,
+                check=True,
+            )
             continue
         subprocess.run(
             [
@@ -569,9 +605,9 @@ def commit_warmhub_bundle(output_root: Path, *, repo: str, init_repo: bool) -> N
                 "--repo",
                 repo,
                 "--fields",
-                json.dumps(spec["fields"], sort_keys=True),
+                fields_json,
                 "--description",
-                spec["description"],
+                description,
             ],
             text=True,
             check=True,
@@ -592,6 +628,20 @@ def commit_warmhub_bundle(output_root: Path, *, repo: str, init_repo: bool) -> N
         text=True,
         check=True,
     )
+
+
+def _shape_view_data(stdout: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    version = payload.get("version")
+    if isinstance(version, dict) and isinstance(version.get("data"), dict):
+        return version["data"]
+    data = payload.get("data")
+    return data if isinstance(data, dict) else {}
 
 
 def parse_args() -> argparse.Namespace:
@@ -883,6 +933,12 @@ def _failed_trial_summary(
         "topomap_memory_allow_semantic_terms": trial.variant.topomap_memory_allow_semantic_terms,
         "success": False,
         "final_distance_m": None,
+        "best_distance_m": None,
+        "best_distance_step": None,
+        "best_distance_improvement_m": None,
+        "final_distance_improvement_m": None,
+        "final_to_best_regression_m": None,
+        "reached_success_radius_ever": False,
         "reason": "trial_exception",
         "error": str(error),
         "step_count": 0,
@@ -931,7 +987,9 @@ def _aggregate(
         "failed_trials": failures,
     }
     distances = [float(summary["final_distance_m"]) for summary in summaries if summary.get("final_distance_m") is not None]
+    best_distances = [float(summary["best_distance_m"]) for summary in summaries if summary.get("best_distance_m") is not None]
     aggregate["mean_final_distance_m"] = round(sum(distances) / len(distances), 3) if distances else None
+    aggregate["mean_best_distance_m"] = round(sum(best_distances) / len(best_distances), 3) if best_distances else None
     (output_root / "research_loop_summary.json").write_text(json.dumps(aggregate, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return aggregate
 
@@ -995,6 +1053,12 @@ def _run_op(config: ResearchConfig, summary: dict[str, Any], experiment_ref: str
             "outputDir": summary.get("run_dir") or "",
             "success": bool(summary.get("success")),
             "finalDistanceM": summary.get("final_distance_m"),
+            "bestDistanceM": summary.get("best_distance_m"),
+            "bestDistanceStep": summary.get("best_distance_step"),
+            "bestDistanceImprovementM": summary.get("best_distance_improvement_m"),
+            "finalDistanceImprovementM": summary.get("final_distance_improvement_m"),
+            "finalToBestRegressionM": summary.get("final_to_best_regression_m"),
+            "reachedSuccessRadiusEver": bool(summary.get("reached_success_radius_ever")),
             "reason": summary.get("reason") or "",
             "stepCount": int(summary.get("step_count") or 0),
             "wallClockS": float(summary.get("wall_clock_s") or 0.0),
@@ -1060,6 +1124,12 @@ def _assessment_op(summary: dict[str, Any], run_ref: str) -> dict[str, Any]:
         "data": {
             "success": bool(summary.get("success")),
             "finalDistanceM": summary.get("final_distance_m"),
+            "bestDistanceM": summary.get("best_distance_m"),
+            "bestDistanceStep": summary.get("best_distance_step"),
+            "bestDistanceImprovementM": summary.get("best_distance_improvement_m"),
+            "finalDistanceImprovementM": summary.get("final_distance_improvement_m"),
+            "finalToBestRegressionM": summary.get("final_to_best_regression_m"),
+            "reachedSuccessRadiusEver": bool(summary.get("reached_success_radius_ever")),
             "reason": summary.get("reason") or "",
             "stepCount": int(summary.get("step_count") or 0),
             "evaluator": "ai2thor-hidden-distance",

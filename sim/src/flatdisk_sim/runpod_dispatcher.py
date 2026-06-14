@@ -11,7 +11,7 @@ import time
 from typing import Any
 
 from .research_loop import DEFAULT_WARMHUB_REPO
-from .research_warmhub import _normalize_task_ref, _parse_task_notes, _read_warmhub_json
+from .research_warmhub import commit_ops, make_task_claim_revision_op, _normalize_task_ref, _parse_task_notes, _read_warmhub_json
 from .runpod_launcher import (
     DEFAULT_GPU_ID,
     DEFAULT_IMAGE,
@@ -267,6 +267,20 @@ def write_dispatch_manifest(payload: dict[str, Any], path: Path) -> Path:
     return path
 
 
+def reserve_tasks_before_launch(repo: str, specs: list[RunpodLaunchSpec]) -> list[str]:
+    reserved: list[str] = []
+    for spec in specs:
+        op = make_task_claim_revision_op(
+            repo,
+            spec.task,
+            owner=spec.agent,
+            note="Reserved by flatdisk-sim-runpod-dispatch before Runpod pod launch; worker command runs with --no-claim.",
+        )
+        commit_ops(repo, [op], message=f"Reserve navigation research task {spec.task} for Runpod launch")
+        reserved.append(spec.task)
+    return reserved
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", default=DEFAULT_WARMHUB_REPO, help="Warmhub repo.")
@@ -316,6 +330,11 @@ def parse_args() -> argparse.Namespace:
         help="Write the redacted dispatch payload to this JSON file for review or Warmhub evidence.",
     )
     parser.add_argument("--launch", action="store_true", help="Actually create Runpod pods. Default is dry-run.")
+    parser.add_argument(
+        "--no-reserve-before-launch",
+        action="store_true",
+        help="Skip parent-side Warmhub AgentTask reservation before pod creation. Intended only for manual recovery.",
+    )
     parser.add_argument("--allow-dirty", action="store_true", help="Allow launch even if the local worktree is dirty.")
     return parser.parse_args()
 
@@ -367,6 +386,11 @@ def main() -> int:
     if not args.launch:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
+
+    if not args.no_reserve_before_launch:
+        reserved_tasks = reserve_tasks_before_launch(args.repo, specs)
+        payload["reserved_task_count"] = len(reserved_tasks)
+        payload["reserved_tasks"] = reserved_tasks
 
     failures = 0
     for spec in specs:

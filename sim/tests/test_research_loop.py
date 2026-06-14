@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 import sys
 
 import pytest
@@ -56,6 +57,8 @@ def test_research_loop_dry_run_writes_trial_matrix_and_warmhub_bundle(tmp_path) 
     shapes = json.loads((tmp_path / "out" / "warmhub_shapes.json").read_text(encoding="utf-8"))
     assert {"NavExperiment", "PromptVariant", "NavEvalRun", "FailureObservation"} <= set(shapes)
     assert shapes["PromptVariant"]["fields"]["noHardcodedLabelsOrColors"] == "boolean"
+    assert shapes["NavEvalRun"]["fields"]["bestDistanceM?"] == "number"
+    assert shapes["RunAssessment"]["fields"]["finalToBestRegressionM?"] == "number"
     ops = json.loads((tmp_path / "out" / "warmhub_ops.json").read_text(encoding="utf-8"))
     assert any(op["name"] == "NavExperiment/test_open_vocab" for op in ops)
     assert any(op["name"] == "PromptVariant/test_open_vocab_qwen_explore" for op in ops)
@@ -244,6 +247,12 @@ def test_warmhub_ops_record_failed_run_artifacts_and_failure_observation(tmp_pat
         "progress_contact_sheet": str(run_dir / "progress_contact_sheet.jpg"),
         "success": False,
         "final_distance_m": 1.23,
+        "best_distance_m": 0.42,
+        "best_distance_step": 7,
+        "best_distance_improvement_m": 0.81,
+        "final_distance_improvement_m": 0.4,
+        "final_to_best_regression_m": 0.81,
+        "reached_success_radius_ever": False,
         "reason": "max_steps_exhausted",
         "step_count": 18,
         "wall_clock_s": 12.0,
@@ -270,6 +279,10 @@ def test_warmhub_ops_record_failed_run_artifacts_and_failure_observation(tmp_pat
     assert "NavArtifact/trial_failed_topomap_memory_query_jsonl" in names
     assert "NavArtifact/trial_failed_topomap_memory_contact_sheets" in names
     assert "NavArtifact/trial_failed_policy_review_trace_json" in names
+    run = next(op for op in ops if op["name"] == "NavEvalRun/trial_failed")
+    assessment = next(op for op in ops if op["name"] == "RunAssessment/trial_failed")
+    assert run["data"]["bestDistanceM"] == 0.42
+    assert assessment["data"]["finalToBestRegressionM"] == 0.81
     failure = next(op for op in ops if op["name"] == "FailureObservation/trial_failed")
     assert str(policy_dir / "policy_review_trace.json") in failure["data"]["evidenceArtifacts"]
 
@@ -628,3 +641,33 @@ def test_main_can_override_warmhub_repo(tmp_path, monkeypatch) -> None:
     assert len(run_dirs) == 1
     manifest = json.loads((run_dirs[0] / "research_loop_manifest.json").read_text(encoding="utf-8"))
     assert manifest["warmhub_repo"] == "example-org/example-repo"
+
+
+def test_commit_warmhub_bundle_revises_existing_stale_shapes(tmp_path, monkeypatch) -> None:
+    output_root = tmp_path / "bundle"
+    output_root.mkdir()
+    (output_root / "warmhub_shapes.json").write_text(
+        json.dumps({"NavEvalRun": {"description": "new desc", "fields": {"bestDistanceM?": "number"}}}),
+        encoding="utf-8",
+    )
+    (output_root / "warmhub_ops.json").write_text("[]", encoding="utf-8")
+    calls = []
+
+    def fake_run(command, **_kwargs):  # noqa: ANN001
+        calls.append(command)
+        if command[:3] == ["wh", "shape", "view"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({"data": {"description": "old desc", "fields": {"finalDistanceM?": "number"}}}),
+            )
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr(research_loop.subprocess, "run", fake_run)
+
+    research_loop.commit_warmhub_bundle(output_root, repo="bencaunt-2/open-vocab-nav-research-loop", init_repo=False)
+
+    assert any(command[:3] == ["wh", "shape", "revise"] for command in calls)
+    assert not any(command[:3] == ["wh", "shape", "create"] for command in calls)
+    revise = next(command for command in calls if command[:3] == ["wh", "shape", "revise"])
+    assert revise[3] == "NavEvalRun"
+    assert json.loads(revise[revise.index("--fields") + 1]) == {"bestDistanceM?": "number"}

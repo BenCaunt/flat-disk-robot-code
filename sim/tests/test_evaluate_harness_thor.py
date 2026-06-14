@@ -38,6 +38,29 @@ def test_harness_thor_cli_defaults_to_model_based_qwen(monkeypatch) -> None:
     assert args.runner == "qwen"
 
 
+def test_evaluator_distance_metrics_keep_best_approach_and_regression() -> None:
+    from flatdisk_sim import evaluate_harness_thor as module
+
+    metrics = module._evaluator_distance_metrics(
+        initial_score={"success": False, "distance_m": 1.0},
+        steps=[
+            {"step": 0, "hidden_score_for_evaluator_only": {"success": False, "distance_m": 0.7}},
+            {"step": 1, "hidden_score_for_evaluator_only": {"success": False, "distance_m": 0.25}},
+            {"step": 2, "hidden_score_for_evaluator_only": {"success": False, "distance_m": 0.45}},
+        ],
+        final_score={"success": False, "distance_m": 0.5},
+        success_radius_m=0.1,
+    )
+
+    assert metrics["initial_distance_m"] == 1.0
+    assert metrics["best_distance_m"] == 0.25
+    assert metrics["best_distance_step"] == 1
+    assert metrics["best_distance_improvement_m"] == 0.75
+    assert metrics["final_distance_improvement_m"] == 0.5
+    assert metrics["final_to_best_regression_m"] == 0.25
+    assert metrics["reached_success_radius_ever"] is False
+
+
 class FakeProcess:
     def poll(self):
         return 0

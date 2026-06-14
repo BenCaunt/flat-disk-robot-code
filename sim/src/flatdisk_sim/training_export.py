@@ -323,6 +323,9 @@ def _step_records(summary: dict[str, Any], *, include_prompt_text: bool) -> list
                 "distance_delta_from_previous_step_m": distance_delta,
                 "episode_success": bool(summary.get("success")),
                 "final_distance_m": _optional_float(summary.get("final_distance_m")),
+                "best_distance_m": _optional_float(summary.get("best_distance_m")),
+                "best_distance_step": summary.get("best_distance_step"),
+                "final_to_best_regression_m": _optional_float(summary.get("final_to_best_regression_m")),
                 "candidate_step_reward": _candidate_step_reward(post_score, distance_delta),
                 "candidate_episode_reward": _candidate_episode_reward(summary),
                 "reward_source": "hidden evaluator distance/success; not included in policy_input",
@@ -359,9 +362,12 @@ def _episode_record(
         "evaluator_reward": {
             "privileged": True,
             "final_distance_m": _optional_float(summary.get("final_distance_m")),
+            "best_distance_m": _optional_float(summary.get("best_distance_m")),
+            "best_distance_step": summary.get("best_distance_step"),
+            "final_to_best_regression_m": _optional_float(summary.get("final_to_best_regression_m")),
             "success_radius_m": _optional_float(summary.get("success_radius_m")),
             "candidate_episode_reward": _candidate_episode_reward(summary),
-            "reward_source": "hidden evaluator final distance/success; not included in policy_input",
+            "reward_source": "hidden evaluator final/best distance and success; not included in policy_input",
         },
         "policy_input_allowlist": summary.get("policy_input_allowlist", []),
         "topomap_memory": {
@@ -749,6 +755,9 @@ def _evaluator_label_record(record: dict[str, Any], *, sample_id: str, group_id:
             "post_action_distance_m": post_action_score.get("distance_m"),
             "episode_success": bool(reward.get("episode_success")),
             "final_distance_m": reward.get("final_distance_m"),
+            "best_distance_m": reward.get("best_distance_m"),
+            "best_distance_step": reward.get("best_distance_step"),
+            "final_to_best_regression_m": reward.get("final_to_best_regression_m"),
         },
         "ppo": {
             "reward": step_reward,
@@ -798,6 +807,9 @@ def _rollout_training_view(record: dict[str, Any], *, rank: int) -> dict[str, An
             "privileged": True,
             "candidate_episode_reward": _episode_reward_value(record),
             "final_distance_m": reward.get("final_distance_m"),
+            "best_distance_m": reward.get("best_distance_m"),
+            "best_distance_step": reward.get("best_distance_step"),
+            "final_to_best_regression_m": reward.get("final_to_best_regression_m"),
             "success_radius_m": reward.get("success_radius_m"),
         },
     }
@@ -958,7 +970,9 @@ def _candidate_step_reward(post_score: dict[str, Any], distance_delta: float | N
 def _candidate_episode_reward(summary: dict[str, Any]) -> float:
     if summary.get("success"):
         return 1.0
-    distance = _optional_float(summary.get("final_distance_m"))
+    distance = _optional_float(summary.get("best_distance_m"))
+    if distance is None:
+        distance = _optional_float(summary.get("final_distance_m"))
     if distance is None:
         return -1.0
     return round(-min(max(distance, 0.0), 5.0) / 5.0, 6)

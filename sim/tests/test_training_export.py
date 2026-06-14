@@ -11,6 +11,7 @@ def _summary_fixture(
     trial_id: str,
     final_distance_m: float,
     success: bool = False,
+    best_distance_m: float | None = None,
 ) -> dict:
     run_dir = tmp_path / trial_id
     policy_dir = run_dir / "policy"
@@ -33,7 +34,7 @@ def _summary_fixture(
         + "\n",
         encoding="utf-8",
     )
-    return {
+    summary = {
         "trial_id": trial_id,
         "slot_id": "slot_001",
         "run_dir": str(run_dir),
@@ -46,6 +47,9 @@ def _summary_fixture(
         "success": success,
         "reason": "hidden_evaluator_goal_reached" if success else "max_steps_exhausted",
         "final_distance_m": final_distance_m,
+        "best_distance_m": best_distance_m,
+        "best_distance_step": 0 if best_distance_m is not None else None,
+        "final_to_best_regression_m": round(final_distance_m - best_distance_m, 6) if best_distance_m is not None else None,
         "success_radius_m": 0.1,
         "step_count": 1,
         "steps": [
@@ -76,6 +80,7 @@ def _summary_fixture(
             }
         ],
     }
+    return summary
 
 
 def test_training_export_writes_policy_steps_without_hidden_object_metadata(tmp_path) -> None:
@@ -138,6 +143,26 @@ def test_policy_dataset_splits_model_inputs_from_evaluator_labels(tmp_path) -> N
         assert token not in label_text
     assert label["reward"]["post_action_distance_m"] == 1.25
     assert label["grpo"]["eligible"] is False
+
+
+def test_training_export_uses_best_distance_for_episode_reward_when_available(tmp_path) -> None:
+    summary = _summary_fixture(tmp_path, trial_id="trial_close_then_overshot", final_distance_m=1.25, best_distance_m=0.25)
+
+    export_training_data_from_summaries(
+        [summary],
+        output_dir=tmp_path / "training",
+        experiment_id="exp",
+        run_id="run",
+    )
+
+    record = json.loads((tmp_path / "training" / "policy_steps.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    label = json.loads((tmp_path / "training" / "policy_dataset_v1" / "evaluator_labels.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert record["evaluator_reward"]["candidate_episode_reward"] == -0.05
+    assert record["evaluator_reward"]["final_distance_m"] == 1.25
+    assert record["evaluator_reward"]["best_distance_m"] == 0.25
+    assert record["evaluator_reward"]["final_to_best_regression_m"] == 1.0
+    assert label["reward"]["candidate_episode_reward"] == -0.05
+    assert label["reward"]["best_distance_m"] == 0.25
 
 
 def test_training_export_writes_policy_review_trace_for_agent_review(tmp_path) -> None:

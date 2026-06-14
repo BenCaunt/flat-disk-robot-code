@@ -95,6 +95,7 @@ def run_thor_harness_episode(
     steps: list[dict[str, Any]] = []
     hidden_snapshots: list[dict[str, Any]] = []
     progress_paths: list[Path] = []
+    initial_score: dict[str, Any] | None = None
     success = False
     reason = "max_steps_exhausted"
     started = time.perf_counter()
@@ -152,6 +153,8 @@ def run_thor_harness_episode(
         for step_index in range(spec.max_steps):
             hidden = _latest_hidden_pose(hidden_log_dir)
             pre_score = _score_hidden_distance(hidden, spec)
+            if initial_score is None:
+                initial_score = pre_score
             hidden_snapshots.append(hidden)
             if pre_score["success"]:
                 success = True
@@ -190,6 +193,12 @@ def run_thor_harness_episode(
     elapsed_s = time.perf_counter() - started
     final_hidden = _latest_hidden_pose(hidden_log_dir)
     final_score = _score_hidden_distance(final_hidden, spec)
+    distance_metrics = _evaluator_distance_metrics(
+        initial_score=initial_score,
+        steps=steps,
+        final_score=final_score,
+        success_radius_m=spec.success_radius_m,
+    )
     frame_paths = sorted((policy_dir / "frames").glob("*.jpg"))[-8:]
     contact_sheet = make_contact_sheet(frame_paths, policy_dir / "camera_contact_sheet.jpg") if frame_paths else None
     progress_sheet = make_contact_sheet(progress_paths[-8:], run_dir / "progress_contact_sheet.jpg") if progress_paths else None
@@ -215,6 +224,7 @@ def run_thor_harness_episode(
         "success": success,
         "reason": reason,
         "final_distance_m": final_score["distance_m"],
+        **distance_metrics,
         "nearest_target": final_score["nearest_target"],
         "step_count": len(steps),
         "wall_clock_s": round(elapsed_s, 3),
@@ -232,6 +242,63 @@ def run_thor_harness_episode(
     }
     (run_dir / "episode_summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return summary
+
+
+def _evaluator_distance_metrics(
+    *,
+    initial_score: dict[str, Any] | None,
+    steps: list[dict[str, Any]],
+    final_score: dict[str, Any],
+    success_radius_m: float,
+) -> dict[str, Any]:
+    """Summarize hidden evaluator distances without changing policy inputs."""
+
+    initial_distance = _score_distance(initial_score)
+    final_distance = _score_distance(final_score)
+    samples: list[tuple[int | None, float]] = []
+    if initial_distance is not None:
+        samples.append((None, initial_distance))
+    for step in steps:
+        post_score = step.get("hidden_score_for_evaluator_only")
+        distance = _score_distance(post_score if isinstance(post_score, dict) else None)
+        if distance is not None:
+            samples.append((int(step.get("step", len(samples))), distance))
+    if final_distance is not None:
+        samples.append((int(steps[-1]["step"]) if steps else None, final_distance))
+
+    if not samples:
+        return {
+            "initial_distance_m": None,
+            "best_distance_m": None,
+            "best_distance_step": None,
+            "best_distance_improvement_m": None,
+            "final_distance_improvement_m": None,
+            "final_to_best_regression_m": None,
+            "reached_success_radius_ever": False,
+        }
+
+    best_step, best_distance = min(samples, key=lambda item: item[1])
+    best_improvement = None if initial_distance is None else round(initial_distance - best_distance, 6)
+    final_improvement = None if initial_distance is None or final_distance is None else round(initial_distance - final_distance, 6)
+    final_regression = None if final_distance is None else round(max(0.0, final_distance - best_distance), 6)
+    return {
+        "initial_distance_m": initial_distance,
+        "best_distance_m": best_distance,
+        "best_distance_step": best_step,
+        "best_distance_improvement_m": best_improvement,
+        "final_distance_improvement_m": final_improvement,
+        "final_to_best_regression_m": final_regression,
+        "reached_success_radius_ever": best_distance <= success_radius_m,
+    }
+
+
+def _score_distance(score: dict[str, Any] | None) -> float | None:
+    if not isinstance(score, dict):
+        return None
+    value = score.get("distance_m")
+    if value is None:
+        return None
+    return round(float(value), 6)
 
 
 def _build_actor(

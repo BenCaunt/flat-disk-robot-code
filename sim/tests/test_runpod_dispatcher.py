@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 from flatdisk_sim import runpod_dispatcher
 from flatdisk_sim.runpod_dispatcher import AgentTaskSummary, filter_tasks
@@ -176,3 +177,87 @@ def test_main_launch_refuses_dirty_worktree(monkeypatch, tmp_path) -> None:
         assert "dirty worktree" in str(exc)
     else:
         raise AssertionError("expected SystemExit")
+
+
+def test_reserve_tasks_before_launch_claims_each_task(monkeypatch) -> None:
+    claim_calls = []
+    commit_calls = []
+
+    def fake_claim(repo, task, *, owner, note):  # noqa: ANN001
+        claim_calls.append((repo, task, owner, note))
+        return {"operation": "revise", "name": task}
+
+    def fake_commit(repo, ops, *, message):  # noqa: ANN001
+        commit_calls.append((repo, ops, message))
+
+    monkeypatch.setattr(runpod_dispatcher, "make_task_claim_revision_op", fake_claim)
+    monkeypatch.setattr(runpod_dispatcher, "commit_ops", fake_commit)
+
+    reserved = runpod_dispatcher.reserve_tasks_before_launch(
+        "bencaunt-2/open-vocab-nav-research-loop",
+        [
+            SimpleNamespace(task="AgentTask/plan-run-a", agent="agent-a"),
+            SimpleNamespace(task="AgentTask/plan-run-b", agent="agent-b"),
+        ],
+    )
+
+    assert reserved == ["AgentTask/plan-run-a", "AgentTask/plan-run-b"]
+    assert claim_calls[0][:3] == ("bencaunt-2/open-vocab-nav-research-loop", "AgentTask/plan-run-a", "agent-a")
+    assert "before Runpod pod launch" in claim_calls[0][3]
+    assert len(commit_calls) == 2
+    assert commit_calls[1][1] == [{"operation": "revise", "name": "AgentTask/plan-run-b"}]
+
+
+def test_main_launch_reserves_before_creating_pods(monkeypatch, capsys, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    events = []
+    monkeypatch.setattr(runpod_dispatcher, "current_git_remote", lambda _cwd: "https://github.com/BenCaunt/flat-disk-robot-code.git")
+    monkeypatch.setattr(runpod_dispatcher, "current_git_ref", lambda _cwd: "abc123")
+    monkeypatch.setattr(runpod_dispatcher, "worktree_dirty", lambda _cwd: False)
+    monkeypatch.setattr(runpod_dispatcher, "query_completed_task_refs", lambda *_args, **_kwargs: {"AgentTask/plan-preflight"})
+    monkeypatch.setattr(
+        runpod_dispatcher,
+        "query_agent_tasks",
+        lambda *_args, **_kwargs: [
+            AgentTaskSummary(
+                wref="AgentTask/plan-run-a",
+                name="plan-run-a",
+                status="planned",
+                owner="unassigned",
+                objective="Run A",
+                tags=("trial-slice", "runpod", "qwen"),
+                prerequisites=("AgentTask/plan-preflight",),
+            )
+        ],
+    )
+
+    def fake_reserve(_repo, specs):  # noqa: ANN001
+        events.append("reserve")
+        return [spec.task for spec in specs]
+
+    def fake_launch(_command):  # noqa: ANN001
+        events.append("launch")
+        return 0
+
+    monkeypatch.setattr(runpod_dispatcher, "reserve_tasks_before_launch", fake_reserve)
+    monkeypatch.setattr(runpod_dispatcher, "launch_with_runpodctl", fake_launch)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "flatdisk-sim-runpod-dispatch",
+            "--name-prefix",
+            "plan-",
+            "--tag",
+            "runpod",
+            "--max-workers",
+            "1",
+            "--launch",
+        ],
+    )
+
+    assert runpod_dispatcher.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert events == ["reserve", "launch"]
+    assert payload["reserved_task_count"] == 1
+    assert payload["reserved_tasks"] == ["AgentTask/plan-run-a"]
+    assert payload["failed_launches"] == 0
