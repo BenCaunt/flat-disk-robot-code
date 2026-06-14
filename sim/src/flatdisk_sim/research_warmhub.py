@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from datetime import datetime, timezone
 import json
 import os
@@ -173,6 +174,52 @@ def make_task_start_ops(
     ]
 
 
+def _filtered_research_config(
+    config: ResearchConfig,
+    *,
+    variant_filters: list[str] | None,
+    episode_filters: list[str] | None,
+) -> ResearchConfig:
+    variant_names = [str(name).strip() for name in variant_filters or [] if str(name).strip()]
+    episode_names = [str(name).strip() for name in episode_filters or [] if str(name).strip()]
+    variants = config.variants
+    episodes = config.episodes
+    if variant_names:
+        allowed = set(variant_names)
+        variants = tuple(variant for variant in config.variants if variant.name in allowed)
+        missing = sorted(allowed - {variant.name for variant in variants})
+        if missing:
+            available = ", ".join(variant.name for variant in config.variants)
+            raise ValueError(f"unknown variant filter(s): {', '.join(missing)}; available variants: {available}")
+    if episode_names:
+        allowed_episodes = set(episode_names)
+        episodes = tuple(episode for episode in config.episodes if episode in allowed_episodes)
+        missing = sorted(allowed_episodes - set(episodes))
+        if missing:
+            available = ", ".join(config.episodes)
+            raise ValueError(f"unknown episode filter(s): {', '.join(missing)}; available episodes: {available}")
+    if not variants:
+        raise ValueError("task plan filters selected zero variants")
+    if not episodes:
+        raise ValueError("task plan filters selected zero episodes")
+    if variants == config.variants and episodes == config.episodes:
+        return config
+    return replace(config, variants=variants, episodes=episodes)
+
+
+def _research_scope_args(
+    *,
+    variant_filters: list[str] | None,
+    episode_filters: list[str] | None,
+) -> list[str]:
+    args: list[str] = []
+    for variant in [str(name).strip() for name in variant_filters or [] if str(name).strip()]:
+        args.extend(["--variant", variant])
+    for episode in [str(name).strip() for name in episode_filters or [] if str(name).strip()]:
+        args.extend(["--episode", episode])
+    return args
+
+
 def make_task_plan_ops(
     *,
     config_path: Path,
@@ -183,8 +230,15 @@ def make_task_plan_ops(
     related_experiment: str | None,
     tags: list[str],
     include_slice_tasks: bool,
+    variant_filters: list[str] | None = None,
+    episode_filters: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    config = load_config(config_path)
+    config = _filtered_research_config(
+        load_config(config_path),
+        variant_filters=variant_filters,
+        episode_filters=episode_filters,
+    )
+    research_scope_args = _research_scope_args(variant_filters=variant_filters, episode_filters=episode_filters)
     plan_name = _safe_id(plan_id or f"{config.experiment_id}-plan-{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}")
     experiment_ref = related_experiment or f"NavExperiment/{config.experiment_id}"
     ops: list[dict[str, Any]] = []
@@ -245,11 +299,11 @@ def make_task_plan_ops(
                 "config_path": str(config_path),
                 "commands": [
                     _with_topomap_ensure_commands(
-                        _research_loop_command(
-                            config_path=config_path,
-                            output_dir=output_dir,
-                            extra_args=["--preflight-only"],
-                        ),
+                            _research_loop_command(
+                                config_path=config_path,
+                                output_dir=output_dir,
+                                extra_args=[*research_scope_args, "--preflight-only"],
+                            ),
                         _topomap_ensure_commands(config),
                     )
                 ],
@@ -327,7 +381,12 @@ def make_task_plan_ops(
                             _research_loop_command(
                                 config_path=config_path,
                                 output_dir=output_dir,
-                                extra_args=["--preflight-endpoints", "--parallelism", str(config.parallelism)],
+                                extra_args=[
+                                    *research_scope_args,
+                                    "--preflight-endpoints",
+                                    "--parallelism",
+                                    str(config.parallelism),
+                                ],
                             ),
                             _topomap_ensure_commands(config),
                         )
@@ -1318,6 +1377,8 @@ def parse_args() -> argparse.Namespace:
     plan.add_argument("--priority", default="normal")
     plan.add_argument("--related-experiment", default=None)
     plan.add_argument("--tag", action="append", default=[])
+    plan.add_argument("--variant", action="append", default=[], help="Only plan tasks for this variant name; repeatable.")
+    plan.add_argument("--episode", action="append", default=[], help="Only plan tasks for this episode name; repeatable.")
     plan.add_argument("--include-slice-tasks", action="store_true", help="Create one planned task per variant/episode slice.")
     plan.add_argument("--dry-run", action="store_true")
 
@@ -1416,6 +1477,8 @@ def main() -> int:
             related_experiment=args.related_experiment,
             tags=args.tag,
             include_slice_tasks=args.include_slice_tasks,
+            variant_filters=args.variant,
+            episode_filters=args.episode,
         )
         return _maybe_commit(args.repo, ops, dry_run=args.dry_run, message="Plan navigation research agent tasks")
     if args.command == "task-claim":

@@ -87,6 +87,19 @@ Add `--launch` only after the generated `runpodctl pod create` command is
 reviewed, the current git ref is pushed, and Runpod credentials plus `wh` CLI
 availability are confirmed.
 
+Local Codex shells do not automatically load the root `.env`. This repo's
+`.env` may contain `RUNPOD_API_KEY`; before any `runpodctl` command, load only
+that variable and do not print it:
+
+```bash
+export RUNPOD_API_KEY="$(grep -m1 '^RUNPOD_API_KEY=' .env | cut -d= -f2- | sed 's/^"//;s/"$//')"
+runpodctl user
+```
+
+If `runpodctl user` reports account JSON, Runpod auth is available for launch.
+If it says `api key not configured`, the variable was not loaded into that
+shell.
+
 Runpod dispatch dry-run for multiple planned trial slices:
 
 ```bash
@@ -133,6 +146,20 @@ a second Qwen pass can reject a repeated `visual_servo_object` prompt when the
 actor's own prior grounding audit said the prompt should change. This keeps the
 policy model-based and scene-general while directly testing the dominant
 bathroom cross-run failure pattern.
+
+To queue only that pressure test without duplicating the full sweep, use the
+task planner's variant and episode filters:
+
+```bash
+uv run --project sim flatdisk-sim-research-warmhub task-plan-config \
+  --config experiments/2026-06-13-open-vocab-nav-research-loop/qwen_strategy_sweep_runpod_linux.json \
+  --plan-id qwen-grounding-audit-critic-v1 \
+  --owner unassigned \
+  --tag qwen --tag runpod --tag targeted --tag grounding-audit-critic \
+  --variant qwen_grounding_audit_critic \
+  --episode living_room_sofa --episode bedroom_bed --episode bathroom_toilet \
+  --include-slice-tasks
+```
 
 The `qwen_grounding_dino_recovery` variant is derived from detector-doctor
 evidence on the bathroom failure case: Florence returned no boxes on a saved

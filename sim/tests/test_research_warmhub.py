@@ -321,6 +321,90 @@ def test_task_plan_config_creates_planned_slice_tasks(tmp_path) -> None:
     assert any("required training packages" in check for check in grpo_train_notes["checks"])
 
 
+def test_task_plan_config_filters_variants_and_episodes(tmp_path) -> None:
+    config_path = tmp_path / "research.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "experiment_id": "test_open_vocab",
+                "objective": "task planning",
+                "episodes": ["living_room_sofa", "bathroom_toilet"],
+                "variants": [
+                    {"name": "qwen_baseline", "runner": "qwen"},
+                    {"name": "qwen_grounding_audit_critic", "runner": "qwen", "critic_mode": "same-model"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    ops = make_task_plan_ops(
+        config_path=config_path,
+        output_dir=Path("sim/scratch/open_vocab_nav_research_loop"),
+        plan_id="critic-only",
+        owner="unassigned",
+        priority="normal",
+        related_experiment=None,
+        tags=["qwen"],
+        include_slice_tasks=True,
+        variant_filters=["qwen_grounding_audit_critic"],
+        episode_filters=["bathroom_toilet"],
+    )
+
+    names = {op["name"] for op in ops}
+    assert "AgentTask/critic-only-run-qwen_grounding_audit_critic-bathroom_toilet" in names
+    assert not any("qwen_baseline" in name for name in names)
+    assert not any("living_room_sofa" in name for name in names)
+    preflight = next(op for op in ops if op["name"] == "AgentTask/critic-only-preflight")
+    preflight_notes = json.loads(preflight["data"]["notes"])
+    assert "--variant qwen_grounding_audit_critic" in preflight_notes["commands"][0]
+    assert "--episode bathroom_toilet" in preflight_notes["commands"][0]
+    assert preflight_notes["commands"][0].endswith("--preflight-only")
+    run_task = next(op for op in ops if op["name"] == "AgentTask/critic-only-run-qwen_grounding_audit_critic-bathroom_toilet")
+    notes = json.loads(run_task["data"]["notes"])
+    assert "--variant qwen_grounding_audit_critic" in notes["commands"][0]
+    assert "--episode bathroom_toilet" in notes["commands"][0]
+    training_review = next(op for op in ops if op["name"] == "AgentTask/critic-only-training-review")
+    training_notes = json.loads(training_review["data"]["notes"])
+    assert training_notes["prerequisites"] == ["AgentTask/critic-only-run-qwen_grounding_audit_critic-bathroom_toilet"]
+    failure_analysis = next(op for op in ops if op["name"] == "AgentTask/critic-only-failure-analysis")
+    analysis_notes = json.loads(failure_analysis["data"]["notes"])
+    assert analysis_notes["prerequisites"] == ["AgentTask/critic-only-run-qwen_grounding_audit_critic-bathroom_toilet"]
+
+
+def test_task_plan_config_rejects_unknown_filter(tmp_path) -> None:
+    config_path = tmp_path / "research.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "experiment_id": "test_open_vocab",
+                "objective": "task planning",
+                "episodes": ["living_room_sofa"],
+                "variants": [{"name": "qwen_baseline", "runner": "qwen"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    try:
+        make_task_plan_ops(
+            config_path=config_path,
+            output_dir=Path("sim/scratch/open_vocab_nav_research_loop"),
+            plan_id="bad-filter",
+            owner="unassigned",
+            priority="normal",
+            related_experiment=None,
+            tags=["qwen"],
+            include_slice_tasks=True,
+            variant_filters=["missing_variant"],
+        )
+    except ValueError as exc:
+        assert "unknown variant filter" in str(exc)
+        assert "qwen_baseline" in str(exc)
+    else:
+        raise AssertionError("expected unknown variant filter to fail")
+
+
 def test_task_finish_ops_write_subagent_result() -> None:
     ops = make_task_finish_ops(
         task="run-qwen-sweep",
