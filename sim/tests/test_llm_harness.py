@@ -16,6 +16,7 @@ from flatdisk_sim.llm_harness import (
     OpenAICompatibleVisionRunner,
     SafetyCriticRunner,
     ScriptedOpenVocabRunner,
+    TOOL_CONTRACT,
     build_actor_prompt,
     build_critic_prompt,
     parse_critic_decision,
@@ -224,6 +225,9 @@ def test_actor_prompt_declares_camera_image_authoritative_and_strips_legacy_dete
     assert "cannot discover a hidden goal object by itself" in prompt
     assert "visible waypoint" in prompt
     assert "not proof of semantic identity" in prompt
+    assert "treat that as arrival evidence" in prompt
+    assert "same-goal visual_servo_object returns no_detection" in prompt
+    assert "memory_update.arrival_evidence" in prompt
     assert "visual_servo_object reports moved=false or failure_reason" in prompt
     assert "fill grounding_audit before choosing an action" in prompt
     assert "Only repeat the same visual_servo_object prompt" in prompt
@@ -235,6 +239,13 @@ def test_actor_prompt_declares_camera_image_authoritative_and_strips_legacy_dete
     assert "previous_check_box_matches_intended_object" in prompt
     assert "detections" not in prompt
     assert "toilet" not in prompt
+
+
+def test_stop_tool_contract_is_model_observed_completion_assertion() -> None:
+    effect = TOOL_CONTRACT["stop"]["effect"]
+
+    assert "assert model-observed completion or safety" in effect
+    assert "evaluator/operator decides true success" in effect
 
 
 def test_critic_prompt_declares_camera_image_authoritative_and_stop_requires_repeated_evidence() -> None:

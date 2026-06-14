@@ -90,7 +90,7 @@ TOOL_CONTRACT: dict[str, Any] = {
     },
     "stop": {
         "args": {},
-        "effect": "Stop all motion. Use when the goal is reached or safety requires it.",
+        "effect": "Stop all motion and assert model-observed completion or safety; evaluator/operator decides true success.",
     },
     "wait": {
         "args": {"duration_s": "float 0.05..1.0"},
@@ -1152,6 +1152,8 @@ def build_actor_prompt(
         "A previous visual_servo_object prompt is control history, not proof that the named object was truly visible; verify the current RGB frame yourself before repeating it.",
         "query_topomap_memory is a non-motion lookup; use it when route/image memory could help choose where to explore next, then inspect its returned contact sheet on the next step.",
         "Treat topomap route hints as memory evidence, not ground-truth completion; prefer the live camera when topomap memory disagrees with the current RGB frame.",
+        "If the latest RGB frame or previous motion strip shows the described goal object or goal region very close in the foreground, dominating the frame, or cropped by the bottom/side edge, treat that as arrival evidence.",
+        "If a same-goal visual_servo_object returns no_detection after close foreground or cropped goal evidence, choose stop and write memory_update.arrival_evidence instead of turning solely to reacquire the detector box.",
         "If visual_servo_object reports moved=false or failure_reason, switch strategy with a bounded turn or drive instead of waiting.",
         "The harness already captures a fresh observation before each actor call; do not request another observation as your action.",
         "Prefer short bounded movements; turn to search or center the target, drive only briefly when the path or target evidence is plausible.",

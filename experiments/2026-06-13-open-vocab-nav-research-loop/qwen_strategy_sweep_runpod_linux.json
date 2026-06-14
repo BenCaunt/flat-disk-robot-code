@@ -134,6 +134,7 @@
         "If check_object_grounding reports ready_for_visual_servo=false, grounding_geometry_warning, an edge-clipped box, or an overlay on the wrong region, change viewpoint or choose a different visible phrase instead of servoing.",
         "Prefer compact visible phrases for the configured phrase-grounding backend; if no_detection repeats, change viewpoint instead of adding more descriptors.",
         "After every visual_servo_object call, audit the paired raw/detector strip before deciding whether to trust the movement.",
+        "If close foreground or edge-cropped live evidence suggests arrival and the same-goal servo then returns no_detection, choose stop with memory_update.arrival_evidence instead of turning solely to reacquire the detector box.",
         "If the detector box is absent or on the wrong region twice from similar views, choose a viewpoint-changing tool or query_topomap_memory before another servo attempt.",
         "Record detector_backend_grounding_failures in memory_update with the prompt and viewpoint so the next step does not repeat them blindly."
       ],
