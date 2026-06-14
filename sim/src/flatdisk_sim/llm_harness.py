@@ -1139,6 +1139,8 @@ def build_actor_prompt(
         "For visual_servo_object in clutter, prefer a precise visible phrase that identifies the intended instance by category plus color/material, part, or image location, not a bare category prompt.",
         "If a grounding audit or overlay shows the detector box on a nearby wrong object, do not repeat the same prompt; change viewpoint or use a more specific visible phrase selected from the latest RGB frame.",
         "Use action_history_summary as compact control evidence; if it says same_prompt_repeat_is_contradicted_by_prior_audit, do not output visual_servo_object with that same prompt.",
+        "Do not treat sparse_detection_coverage alone as a mandatory turn/check; if the raw motion strip shows controlled progress toward the same visible instance, a short follow-up servo or stop may be valid.",
+        "If action_history_summary says recent_turn_oscillation, do not continue alternating small turns; choose a different information-gathering or progress action.",
         "check_object_grounding is non-motion; use it when the latest RGB frame has a plausible visible candidate but the previous visual servo grounding was sparse, absent, or on the wrong region.",
         "Treat check_object_grounding ready_for_visual_servo=true as detector-box existence only, not proof that the box is on the intended object.",
         "If check_object_grounding returns ready_for_visual_servo=false, grounding_geometry_warning, an edge-clipped box, or an overlay on the wrong region, change viewpoint or prompt before visual_servo_object.",
@@ -1478,6 +1480,9 @@ def action_history_summary(records: list[dict[str, Any]], limit: int = PROMPT_ME
 
     if recent_actions:
         summary["recent_actions"] = recent_actions[-6:]
+        turn_oscillation = _recent_turn_oscillation(recent_actions)
+        if turn_oscillation:
+            summary["recent_turn_oscillation"] = turn_oscillation
     if latest_audit:
         summary["latest_grounding_audit"] = latest_audit
     if close_evidence_steps:
@@ -1497,15 +1502,16 @@ def action_history_summary(records: list[dict[str, Any]], limit: int = PROMPT_ME
         summary["same_prompt_visual_servo_attempt_count"] = len(same_prompt_attempts)
         if weak_attempts:
             summary["same_prompt_weak_or_failed_attempts"] = weak_attempts[-4:]
-        if latest_audit.get("next_prompt_should_change") is True and last_prompt:
+        last_attempt_failed = last_attempt.get("servo_status") == "no_detection" or bool(last_attempt.get("failure_reason"))
+        if latest_audit.get("next_prompt_should_change") is True and last_prompt and last_attempt_failed:
             summary["same_prompt_repeat_is_contradicted_by_prior_audit"] = {
                 "prompt": last_prompt,
-                "reason": "latest grounding_audit.next_prompt_should_change=true",
+                "reason": "latest grounding_audit.next_prompt_should_change=true and the last same-prompt servo failed or returned no_detection",
             }
         if (
             last_prompt
             and close_evidence_steps
-            and (last_attempt.get("servo_status") == "no_detection" or last_attempt.get("failure_reason") == "no_detection")
+            and last_attempt_failed
         ):
             summary["stop_is_valid_after_close_no_detection"] = {
                 "prompt": last_prompt,
@@ -1531,6 +1537,34 @@ def _record_has_close_arrival_evidence(record: dict[str, Any]) -> bool:
         token in text
         for token in ("arrival", "foreground", "very close", "close foreground", "close in the foreground", "cropped", "dominating")
     )
+
+
+def _recent_turn_oscillation(recent_actions: list[dict[str, Any]]) -> dict[str, Any]:
+    tail: list[float] = []
+    for action in recent_actions[-5:]:
+        if action.get("tool") != "turn_by_angle":
+            continue
+        args = action.get("args")
+        if not isinstance(args, dict):
+            continue
+        try:
+            degrees = float(args.get("degrees"))
+        except (TypeError, ValueError):
+            continue
+        if abs(degrees) <= 15.0:
+            tail.append(degrees)
+    if len(tail) < 3:
+        return {}
+    signs = [1 if degrees > 0 else -1 if degrees < 0 else 0 for degrees in tail[-4:]]
+    if 0 in signs:
+        return {}
+    alternating_pairs = sum(1 for left, right in zip(signs, signs[1:]) if left != right)
+    if alternating_pairs < 2:
+        return {}
+    return {
+        "recent_small_turn_degrees": tail[-4:],
+        "reason": "recent bounded turns alternate direction without an intervening progress action",
+    }
 
 
 def compact_prompt_record(record: dict[str, Any]) -> dict[str, Any]:

@@ -228,6 +228,8 @@ def test_actor_prompt_declares_camera_image_authoritative_and_strips_legacy_dete
     assert "not proof of semantic identity" in prompt
     assert "Use action_history_summary as compact control evidence" in prompt
     assert "The JSON action is the only command executed" in prompt
+    assert "sparse_detection_coverage alone" in prompt
+    assert "recent_turn_oscillation" in prompt
     assert "treat that as arrival evidence" in prompt
     assert "same-goal visual_servo_object returns no_detection" in prompt
     assert "memory_update.arrival_evidence" in prompt
@@ -407,6 +409,40 @@ def test_action_history_summary_surfaces_audit_conflict_and_arrival_stop_cue() -
     assert summary["same_prompt_repeat_is_contradicted_by_prior_audit"]["prompt"] == "goal object"
     assert summary["stop_is_valid_after_close_no_detection"]["prompt"] == "goal object"
     assert summary["latest_grounding_audit"]["next_prompt_should_change"] is True
+
+
+def test_action_history_summary_allows_sparse_moved_servo_without_hard_repeat_block() -> None:
+    summary = action_history_summary(
+        [
+            {
+                "step": 2,
+                "executed_action": {"tool": "visual_servo_object", "args": {"prompt": "visible fixture"}},
+                "actor_grounding_audit": {"next_prompt_should_change": True},
+                "tool_result": {
+                    "moved": True,
+                    "servo_status": "moved",
+                    "grounding_stability": "sparse_detection_coverage",
+                    "detection_coverage_fraction": 0.12,
+                },
+            }
+        ]
+    )
+
+    assert summary["same_prompt_visual_servo_attempt_count"] == 1
+    assert "same_prompt_repeat_is_contradicted_by_prior_audit" not in summary
+    assert summary["same_prompt_weak_or_failed_attempts"][0]["servo_status"] == "moved"
+
+
+def test_action_history_summary_flags_small_turn_oscillation() -> None:
+    summary = action_history_summary(
+        [
+            {"step": 1, "executed_action": {"tool": "turn_by_angle", "args": {"degrees": 10}}},
+            {"step": 2, "executed_action": {"tool": "turn_by_angle", "args": {"degrees": -10}}},
+            {"step": 3, "executed_action": {"tool": "turn_by_angle", "args": {"degrees": 10}}},
+        ]
+    )
+
+    assert summary["recent_turn_oscillation"]["recent_small_turn_degrees"] == [10.0, -10.0, 10.0]
 
 
 def test_actor_action_parser_accepts_tool_schema_and_clamps() -> None:
