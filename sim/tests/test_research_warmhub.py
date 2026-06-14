@@ -692,6 +692,31 @@ def test_warmhub_status_snapshot_summarizes_queue_runs_and_next_actions(monkeypa
                     }
                 ]
             }
+        if command[:3] == ["wh", "thing", "query"] and "NavArtifact" in command:
+            return {
+                "items": [
+                    {
+                        "wref": "NavArtifact/run-a-camera-contact-sheet",
+                        "name": "run-a-camera-contact-sheet",
+                        "data": {
+                            "run": "NavEvalRun/run-a@v1",
+                            "artifactType": "camera_contact_sheet",
+                            "path": "/workspace/outputs/run-a/policy/camera_contact_sheet.jpg",
+                            "privileged": False,
+                        },
+                    },
+                    {
+                        "wref": "NavArtifact/other-run-camera-contact-sheet",
+                        "name": "other-run-camera-contact-sheet",
+                        "data": {
+                            "run": "NavEvalRun/other-run@v1",
+                            "artifactType": "camera_contact_sheet",
+                            "path": "/workspace/outputs/other/policy/camera_contact_sheet.jpg",
+                            "privileged": False,
+                        },
+                    },
+                ]
+            }
         if command[:3] == ["wh", "assertion", "list"] and "FailureObservation" in command:
             return {
                 "items": [
@@ -756,6 +781,10 @@ def test_warmhub_status_snapshot_summarizes_queue_runs_and_next_actions(monkeypa
     assert snapshot["recent_runs"][0]["model"] == "gpt-5.5"
     assert snapshot["recent_runs"][0]["actor_model"] == "Qwen/Qwen3-VL-8B-Instruct"
     assert snapshot["recent_runs"][0]["qwen_model"] == "Qwen/Qwen3-VL-8B-Instruct"
+    assert len(snapshot["recent_artifacts"]) == 1
+    assert snapshot["recent_artifacts"][0]["artifact_type"] == "camera_contact_sheet"
+    assert snapshot["recent_artifacts"][0]["availability_status"] == "remote_workspace_path"
+    assert snapshot["recent_artifacts"][0]["remote_workspace_path"] is True
     assert snapshot["recent_failures"][0]["summary"] == "stalled near doorway"
     assert snapshot["recent_failures"][0]["category"] == "navigation_failure"
     assert snapshot["recent_failures"][0]["severity"] == "medium"
@@ -812,6 +841,8 @@ def test_warmhub_status_snapshot_prioritizes_ready_promotion_gate(monkeypatch) -
                 }
             return {"items": []}
         if command[:3] == ["wh", "thing", "query"] and "NavEvalRun" in command:
+            return {"items": []}
+        if command[:3] == ["wh", "thing", "query"] and "NavArtifact" in command:
             return {"items": []}
         if command[:3] == ["wh", "assertion", "list"]:
             return {"items": []}
@@ -873,6 +904,17 @@ def test_warmhub_status_text_includes_failure_diagnostics() -> None:
                     "next_action": "review artifacts",
                 }
             ],
+            "recent_artifacts": [
+                {
+                    "run": "NavEvalRun/run-a@v1",
+                    "artifact_type": "camera_contact_sheet",
+                    "availability_status": "remote_workspace_path",
+                    "path_kind": "file",
+                    "privileged": False,
+                    "remote_workspace_path": True,
+                    "path": "/workspace/outputs/run-a/policy/camera_contact_sheet.jpg",
+                }
+            ],
             "recent_promotion_decisions": [],
             "recent_training_readiness": [],
             "next_actions": [],
@@ -887,6 +929,8 @@ def test_warmhub_status_text_includes_failure_diagnostics() -> None:
     assert "next: try waypoint-assisted exploration" in text
     assert "Recent subagent results:" in text
     assert "AgentTask/run-active: complete by agent-a | Finished a bounded run and recorded artifacts. | next: review artifacts" in text
+    assert "Recent artifacts:" in text
+    assert "camera_contact_sheet | remote_workspace_path | file | privileged=False | remote workspace path" in text
 
 
 def test_warmhub_status_cli_prints_json(monkeypatch, capsys) -> None:

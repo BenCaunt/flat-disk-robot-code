@@ -740,6 +740,12 @@ def warmhub_status_snapshot(
         [_run_item_summary(item) for item in run_payload.get("items", [])],
         related_experiment=related_experiment,
     )
+    artifact_payload = _query_things(repo, shape="NavArtifact", limit=max(limit * 5, limit))
+    artifacts = _filter_artifacts_for_runs(
+        [_artifact_item_summary(item) for item in artifact_payload.get("items", [])],
+        runs=runs,
+        related_experiment=related_experiment,
+    )
     failure_payload = _query_assertions(repo, shape="FailureObservation", limit=limit)
     failures = [_assertion_item_summary(item) for item in failure_payload.get("items", [])]
     result_payload = _query_assertions(repo, shape="SubAgentResult", limit=limit)
@@ -765,6 +771,7 @@ def warmhub_status_snapshot(
             "success": sum(1 for run in runs if run.get("success") is True),
             "failed": sum(1 for run in runs if run.get("success") is False),
         },
+        "recent_artifacts": artifacts[: max(1, limit)],
         "recent_failures": failures,
         "recent_subagent_results": results,
         "recent_promotion_decisions": promotion_decisions,
@@ -835,6 +842,33 @@ def _run_item_summary(item: dict[str, Any]) -> dict[str, Any]:
         "reason": data.get("reason"),
         "step_count": data.get("stepCount"),
         "output_dir": data.get("outputDir"),
+    }
+
+
+def _artifact_item_summary(item: dict[str, Any]) -> dict[str, Any]:
+    data = item.get("data") if isinstance(item.get("data"), dict) else {}
+    path = str(data.get("path") or "")
+    remote_workspace = path.startswith("/workspace/")
+    availability = data.get("availabilityStatus")
+    if not availability:
+        availability = "remote_workspace_path" if remote_workspace else "legacy_no_availability_metadata"
+    return {
+        "wref": item.get("wref") or f"NavArtifact/{item.get('name', '')}",
+        "name": item.get("name"),
+        "run": data.get("run"),
+        "artifact_type": data.get("artifactType"),
+        "path": path,
+        "path_kind": data.get("pathKind") or ("unknown"),
+        "availability_status": availability,
+        "sha256": data.get("sha256"),
+        "size_bytes": data.get("sizeBytes"),
+        "directory_file_count": data.get("directoryFileCount"),
+        "directory_total_bytes": data.get("directoryTotalBytes"),
+        "directory_manifest_sha256": data.get("directoryManifestSha256"),
+        "privileged": data.get("privileged"),
+        "description": data.get("description"),
+        "retrieval_hint": data.get("retrievalHint"),
+        "remote_workspace_path": remote_workspace,
     }
 
 
@@ -914,6 +948,18 @@ def _filter_assertions_about_experiment(items: list[dict[str, Any]], *, related_
     experiment_ref = related_experiment if related_experiment.startswith("NavExperiment/") else f"NavExperiment/{related_experiment}"
     versionless = experiment_ref.split("@", 1)[0]
     return [item for item in items if str(item.get("about") or "").split("@", 1)[0] == versionless]
+
+
+def _filter_artifacts_for_runs(
+    items: list[dict[str, Any]],
+    *,
+    runs: list[dict[str, Any]],
+    related_experiment: str | None,
+) -> list[dict[str, Any]]:
+    if not related_experiment:
+        return items
+    run_refs = {_normalize_wref(str(run.get("wref") or ""), "NavEvalRun") for run in runs}
+    return [item for item in items if _normalize_wref(str(item.get("run") or ""), "NavEvalRun") in run_refs]
 
 
 def _status_next_actions(tasks_by_status: dict[str, list[dict[str, Any]]], runs: list[dict[str, Any]], failures: list[dict[str, Any]]) -> list[str]:
@@ -1649,6 +1695,23 @@ def _format_status_text(snapshot: dict[str, Any]) -> str:
             if result.get("next_action"):
                 line += f" | next: {result.get('next_action')}"
             lines.append(line)
+    if snapshot.get("recent_artifacts"):
+        lines.append("")
+        lines.append("Recent artifacts:")
+        for artifact in snapshot["recent_artifacts"][:5]:
+            line = (
+                f"  - {artifact.get('run') or artifact.get('wref')}: "
+                f"{artifact.get('artifact_type')} | {artifact.get('availability_status')}"
+            )
+            if artifact.get("path_kind") and artifact.get("path_kind") != "unknown":
+                line += f" | {artifact.get('path_kind')}"
+            if artifact.get("privileged") is not None:
+                line += f" | privileged={artifact.get('privileged')}"
+            if artifact.get("remote_workspace_path"):
+                line += " | remote workspace path"
+            if artifact.get("path"):
+                line += f" | {_status_text_snippet(str(artifact.get('path')), limit=120)}"
+            lines.append(line)
     if snapshot.get("recent_promotion_decisions"):
         lines.append("")
         lines.append("Recent promotion decisions:")
@@ -1734,6 +1797,17 @@ def _normalize_task_ref(task: str) -> str:
     if "@" in text:
         text = text.split("@", 1)[0]
     return _task_wref(text.replace("AgentTask/", "", 1)) if text.startswith("AgentTask/") else _task_wref(text)
+
+
+def _normalize_wref(ref: str, shape: str) -> str:
+    text = str(ref).strip()
+    if not text:
+        return ""
+    text = text.split("@", 1)[0]
+    prefix = f"{shape}/"
+    if text.startswith(prefix):
+        return text
+    return f"{prefix}{text}"
 
 
 def _now() -> str:
