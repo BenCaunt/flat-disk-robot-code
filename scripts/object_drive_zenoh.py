@@ -338,11 +338,7 @@ class FlorenceTransformersDetector:
         self.dtype = dtype
         try:
             self.processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_path,
-                torch_dtype=dtype,
-                trust_remote_code=True,
-            ).to(self.device)
+            self.model = _load_florence_transformers_model(AutoModelForCausalLM, model_path, dtype).to(self.device)
         except AttributeError as exc:
             if not _is_florence_transformers_compat_error(exc):
                 raise
@@ -350,11 +346,7 @@ class FlorenceTransformersDetector:
             if patched == 0:
                 raise
             self.processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_path,
-                torch_dtype=dtype,
-                trust_remote_code=True,
-            ).to(self.device)
+            self.model = _load_florence_transformers_model(AutoModelForCausalLM, model_path, dtype).to(self.device)
         self.model.eval()
         self.max_tokens = max_tokens
 
@@ -545,6 +537,24 @@ def _patch_transformers_tokenizer_additional_special_tokens() -> int:
 
 def _patch_florence_transformers_compat() -> int:
     return _patch_florence_forced_bos_token_id() + _patch_transformers_tokenizer_additional_special_tokens()
+
+
+def _load_florence_transformers_model(auto_model: Any, model_path: str, dtype: Any) -> Any:
+    try:
+        return auto_model.from_pretrained(
+            model_path,
+            torch_dtype=dtype,
+            trust_remote_code=True,
+            attn_implementation="eager",
+        )
+    except TypeError as exc:
+        if "attn_implementation" not in str(exc):
+            raise
+        return auto_model.from_pretrained(
+            model_path,
+            torch_dtype=dtype,
+            trust_remote_code=True,
+        )
 
 
 def _is_florence_transformers_compat_error(exc: AttributeError) -> bool:

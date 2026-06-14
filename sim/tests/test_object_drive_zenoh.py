@@ -21,6 +21,7 @@ from object_drive_zenoh import (  # noqa: E402
     TargetBearingKalman,
     _detections_from_parsed,
     _image_gray,
+    _load_florence_transformers_model,
     _patch_florence_forced_bos_token_id,
     _patch_transformers_tokenizer_additional_special_tokens,
     bbox_center_x_from_bearing_rad,
@@ -133,6 +134,39 @@ def test_transformers_tokenizer_additional_special_tokens_patch(monkeypatch) -> 
 
     assert patched == 1
     assert PreTrainedTokenizerBase().additional_special_tokens == ["<loc_0>", "<loc_1>"]
+
+
+def test_florence_transformers_model_loader_requests_eager_attention() -> None:
+    calls: list[dict[str, object]] = []
+
+    class AutoModel:
+        @staticmethod
+        def from_pretrained(_model_path: str, **kwargs: object) -> object:
+            calls.append(kwargs)
+            return object()
+
+    _load_florence_transformers_model(AutoModel, "model", "dtype")
+
+    assert calls == [{"torch_dtype": "dtype", "trust_remote_code": True, "attn_implementation": "eager"}]
+
+
+def test_florence_transformers_model_loader_falls_back_without_attention_kwarg() -> None:
+    calls: list[dict[str, object]] = []
+
+    class AutoModel:
+        @staticmethod
+        def from_pretrained(_model_path: str, **kwargs: object) -> object:
+            calls.append(kwargs)
+            if "attn_implementation" in kwargs:
+                raise TypeError("got an unexpected keyword argument 'attn_implementation'")
+            return object()
+
+    _load_florence_transformers_model(AutoModel, "model", "dtype")
+
+    assert calls == [
+        {"torch_dtype": "dtype", "trust_remote_code": True, "attn_implementation": "eager"},
+        {"torch_dtype": "dtype", "trust_remote_code": True},
+    ]
 
 
 def test_klt_tracker_replays_late_detection_to_current_frame() -> None:
