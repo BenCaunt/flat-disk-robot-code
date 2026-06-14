@@ -124,6 +124,12 @@ grounding-audit result to the next action: after mismatched or unstable visual
 servo grounding, it should avoid repeating the same servo prompt and instead
 change viewpoint, query image memory, or use a distinct visible waypoint.
 
+The `qwen_grounding_dino_recovery` variant is derived from detector-doctor
+evidence on the bathroom failure case: Florence returned no boxes on a saved
+frame where the target fixture was plainly visible, while GroundingDINO selected
+the visible fixture. This variant keeps the Qwen/tool loop general and changes
+only the open-vocabulary grounding backend.
+
 Executed sweeps write `training_export/policy_steps.jsonl`,
 `training_export/policy_review_traces.jsonl`,
 `training_export/episode_rollouts.jsonl`, `training_export/rollout_groups.jsonl`,

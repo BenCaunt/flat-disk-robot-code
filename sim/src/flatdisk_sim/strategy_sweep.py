@@ -19,6 +19,7 @@ class StrategyTemplate:
     actor_rules: tuple[str, ...]
     critic_rules: tuple[str, ...] = ()
     topomap_memory: bool = False
+    object_drive_detector: str | None = None
 
 
 STRATEGY_TEMPLATES: tuple[StrategyTemplate, ...] = (
@@ -91,6 +92,24 @@ STRATEGY_TEMPLATES: tuple[StrategyTemplate, ...] = (
         ),
     ),
     StrategyTemplate(
+        name="grounding_dino_recovery",
+        description="Detector-backend recovery strategy that uses GroundingDINO phrase grounding while keeping the same Qwen tool loop.",
+        prompt_profile="grounding-dino-recovery-v1",
+        actor_rules=(
+            "Use visual_servo_object only for an object instance that is currently visible in the latest RGB frame.",
+            "Prefer compact visible phrases for the configured phrase-grounding backend; if no_detection repeats, change viewpoint instead of adding more descriptors.",
+            "After every visual_servo_object call, audit the paired raw/detector strip before deciding whether to trust the movement.",
+            "If the detector box is absent or on the wrong region twice from similar views, choose a viewpoint-changing tool or query_topomap_memory before another servo attempt.",
+            "Record detector_backend_grounding_failures in memory_update with the prompt and viewpoint so the next step does not repeat them blindly.",
+        ),
+        critic_rules=(
+            "Reject repeated visual_servo_object calls from the same viewpoint after two no_detection tool results.",
+            "Warn when descriptor refinement substitutes for viewpoint change after the detector produced no usable box.",
+            "Approve using the configured open-vocabulary detector backend when the latest RGB frame contains a visible candidate instance.",
+        ),
+        object_drive_detector="grounding-dino",
+    ),
+    StrategyTemplate(
         name="topomap_memory",
         description="Memory-first strategy that uses CLIP-backed topomap image memory as a non-motion route hint when live evidence is weak.",
         prompt_profile="topomap-memory-v2",
@@ -135,7 +154,7 @@ def generate_strategy_config(
             "qwen_model": qwen_model or inherited.get("qwen_model"),
             "qwen_temperature": inherited.get("qwen_temperature", 0.0),
             "qwen_max_tokens": inherited.get("qwen_max_tokens", 512),
-            "object_drive_detector": object_drive_detector or inherited.get("object_drive_detector"),
+            "object_drive_detector": object_drive_detector or template.object_drive_detector or inherited.get("object_drive_detector"),
             "actor_rules": list(template.actor_rules),
             "critic_rules": list(template.critic_rules),
             "critic_mode": "none",
