@@ -61,6 +61,8 @@ def test_research_loop_dry_run_writes_trial_matrix_and_warmhub_bundle(tmp_path) 
     assert any(op["name"] == "PromptVariant/test_open_vocab_qwen_explore" for op in ops)
     variant_op = next(op for op in ops if op["name"] == "PromptVariant/test_open_vocab_qwen_explore")
     assert variant_op["data"]["criticMode"] == "none"
+    assert variant_op["data"]["topomapMemoryUseClip"] is False
+    assert variant_op["data"]["topomapMemoryAllowSemanticTerms"] is False
     assert (tmp_path / "out" / "AGENTS.warmhub.md").exists()
 
 

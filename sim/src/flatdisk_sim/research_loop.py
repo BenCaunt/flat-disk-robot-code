@@ -680,13 +680,13 @@ def _prompt_variant_data(variant: PromptVariant) -> dict[str, Any]:
         "qwenModel": variant.qwen_model,
         "objectDriveDetector": variant.object_drive_detector,
         "noHardcodedLabelsOrColors": _variant_no_hardcoded_labels_or_colors(variant),
+        "topomapMemoryUseClip": variant.topomap_memory_use_clip,
+        "topomapMemoryAllowSemanticTerms": variant.topomap_memory_allow_semantic_terms,
     }
     if variant.topomap_memory_map_dir or variant.topomap_memory_use_clip or variant.topomap_memory_allow_semantic_terms:
         data.update(
             {
                 "topomapMemoryMapDir": variant.topomap_memory_map_dir,
-                "topomapMemoryUseClip": variant.topomap_memory_use_clip,
-                "topomapMemoryAllowSemanticTerms": variant.topomap_memory_allow_semantic_terms,
             }
         )
     return data

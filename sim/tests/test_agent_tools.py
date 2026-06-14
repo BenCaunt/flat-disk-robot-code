@@ -94,6 +94,7 @@ def test_transformers_object_drive_command_runs_with_optional_detector_deps() ->
     assert "torch" in cmd
     assert "transformers" in cmd
     assert "timm" in cmd
+    assert "einops" in cmd
     assert cmd[-2] == "python"
     assert cmd[-1].endswith("object_drive_zenoh.py")
 

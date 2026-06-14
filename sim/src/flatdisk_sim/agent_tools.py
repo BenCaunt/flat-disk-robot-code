@@ -30,7 +30,7 @@ from flatdisk_robot_client import DEFAULT_CONNECT, FlatDiskRobotClient, MotionRe
 
 OBJECT_DRIVE_SCRIPT = SCRIPTS_DIR / "object_drive_zenoh.py"
 TRANSFORMERS_OBJECT_DRIVE_DETECTORS = {"florence-transformers", "grounding-dino"}
-TRANSFORMERS_OBJECT_DRIVE_EXTRAS = ("torch", "transformers", "timm")
+TRANSFORMERS_OBJECT_DRIVE_EXTRAS = ("torch", "transformers", "timm", "einops")
 DEFAULT_OBJECT_DRIVE_TIMEOUT_S = 300.0
 
 
