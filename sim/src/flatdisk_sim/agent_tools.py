@@ -315,6 +315,13 @@ class AgentTools:
             "selected_label": selected.get("label") if selected else None,
             "selected_score": selected.get("score") if selected else None,
             "selected_bbox_xyxy": selected.get("bbox_xyxy") if selected else None,
+            "selected_bbox_area_fraction": selected.get("bbox_area_fraction") if selected else None,
+            "selected_bbox_center_xy_norm": selected.get("bbox_center_xy_norm") if selected else None,
+            "selected_bbox_width_fraction": selected.get("bbox_width_fraction") if selected else None,
+            "selected_bbox_height_fraction": selected.get("bbox_height_fraction") if selected else None,
+            "selected_bbox_touches_image_edge": selected.get("bbox_touches_image_edge") if selected else None,
+            "selected_bbox_edge_contact": selected.get("bbox_edge_contact") if selected else None,
+            "grounding_geometry_warning": _grounding_geometry_warning(selected),
             "overlay_path": str(check.get("overlay")) if isinstance(check, dict) and check.get("overlay") else None,
             "report_path": str(report_path) if report_path.exists() else None,
             "markdown_path": str(output_dir / "detector_doctor.md") if (output_dir / "detector_doctor.md").exists() else None,
@@ -547,6 +554,35 @@ def _detector_doctor_timeout_s() -> float:
 
 def _safe_filename(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_.-]+", "_", value.strip())[:64].strip("_") or "item"
+
+
+def _grounding_geometry_warning(selected: dict[str, Any] | None) -> str | None:
+    if not selected:
+        return None
+    warnings: list[str] = []
+    if selected.get("bbox_touches_image_edge"):
+        edge_contact = selected.get("bbox_edge_contact")
+        edge_text = ",".join(str(item) for item in edge_contact) if isinstance(edge_contact, list) else "image_edge"
+        warnings.append(f"selected_box_touches_{edge_text}")
+    area_fraction = _float_or_none(selected.get("bbox_area_fraction"))
+    if area_fraction is not None and area_fraction > 0.55:
+        warnings.append("selected_box_covers_large_image_fraction")
+    width_fraction = _float_or_none(selected.get("bbox_width_fraction"))
+    height_fraction = _float_or_none(selected.get("bbox_height_fraction"))
+    if width_fraction is not None and height_fraction is not None:
+        aspect = width_fraction / max(0.001, height_fraction)
+        if aspect < 0.12 or aspect > 8.0:
+            warnings.append("selected_box_has_extreme_aspect_ratio")
+    if not warnings:
+        return None
+    return "; ".join(warnings) + "; inspect overlay before trusting detector semantics"
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _parse_object_drive_status_fields(line: str) -> dict[str, str]:

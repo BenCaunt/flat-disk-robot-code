@@ -218,6 +218,9 @@ def test_actor_prompt_declares_camera_image_authoritative_and_strips_legacy_dete
     assert "grounding_stability is sparse_detection_coverage" in prompt
     assert "check_object_grounding is non-motion" in prompt
     assert "ready_for_visual_servo=false" in prompt
+    assert "ready_for_visual_servo=true as detector-box existence only" in prompt
+    assert "grounding_geometry_warning" in prompt
+    assert "previous_check_box_matches_intended_object" in prompt
     assert "detections" not in prompt
     assert "toilet" not in prompt
 
@@ -239,6 +242,7 @@ def test_critic_prompt_declares_camera_image_authoritative_and_stop_requires_rep
     assert "did not audit the previous detector box" in prompt
     assert "grounding_stability is not status_track_present" in prompt
     assert "Approve check_object_grounding" in prompt
+    assert "ready_for_visual_servo=true as semantic proof" in prompt
     assert "Reject stop unless repeated observations show" in prompt
 
 
@@ -522,6 +526,8 @@ def test_session_can_execute_grounding_check_without_motion_and_attach_overlay(t
     assert first["tool_result"]["action"] == "check_object_grounding"
     assert first["tool_result"]["ready_for_visual_servo"] is True
     assert first["tool_result"]["selected_label"] == "white toilet"
+    assert first["tool_result"]["selected_bbox_touches_image_edge"] is False
+    assert first["tool_result"]["grounding_geometry_warning"] is None
     assert tools.motion_seq == 0
     assert len(actor.image_paths_by_call[0]) == 1
     assert len(actor.image_paths_by_call[1]) == 2

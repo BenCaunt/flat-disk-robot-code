@@ -52,6 +52,7 @@ def test_generate_strategy_config_produces_qwen_variants_without_semantic_terms(
     assert dino.prompt_profile == "grounding-dino-recovery-v1"
     assert dino.object_drive_detector == "grounding-dino"
     assert any("check_object_grounding" in rule for rule in dino.actor_rules)
+    assert any("grounding_geometry_warning" in rule for rule in dino.actor_rules)
 
 
 def test_generated_strategy_prompts_pass_static_generality_audit(tmp_path) -> None:

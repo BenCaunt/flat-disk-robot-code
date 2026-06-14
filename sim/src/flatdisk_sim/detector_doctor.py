@@ -163,8 +163,8 @@ def _run_one_check(
         "elapsed_s": round(elapsed_s, 3),
         "error": error,
         "detection_count": len(detections),
-        "detections": [_detection_data(det) for det in detections],
-        "selected_detection": None if selected is None else _detection_data(selected),
+        "detections": [_detection_data(det, image_size=image.size) for det in detections],
+        "selected_detection": None if selected is None else _detection_data(selected, image_size=image.size),
         "overlay": str(overlay_path),
     }
 
@@ -184,18 +184,55 @@ def _save_detection_overlay(path: Path, image: Image.Image, detections: tuple[De
     canvas.save(path, format="JPEG", quality=90)
 
 
-def _detection_data(detection: Detection) -> dict[str, Any]:
-    return {
+def _detection_data(detection: Detection, *, image_size: tuple[int, int] | None = None) -> dict[str, Any]:
+    data: dict[str, Any] = {
         "bbox_xyxy": [round(value, 3) for value in detection.bbox_xyxy],
         "label": detection.label,
         "score": round(float(detection.score), 4),
         "source": detection.source,
         "raw": detection.raw[:300],
     }
+    if image_size is not None:
+        data.update(_bbox_geometry(detection.bbox_xyxy, image_size=image_size))
+    return data
+
+
+def _bbox_geometry(bbox_xyxy: tuple[float, float, float, float], *, image_size: tuple[int, int]) -> dict[str, Any]:
+    width, height = image_size
+    x0, y0, x1, y1 = bbox_xyxy
+    box_width = max(0.0, x1 - x0)
+    box_height = max(0.0, y1 - y0)
+    edge_tolerance_px = 1.0
+    edge_contact = []
+    if x0 <= edge_tolerance_px:
+        edge_contact.append("left")
+    if y0 <= edge_tolerance_px:
+        edge_contact.append("top")
+    if x1 >= width - edge_tolerance_px:
+        edge_contact.append("right")
+    if y1 >= height - edge_tolerance_px:
+        edge_contact.append("bottom")
+    return {
+        "bbox_area_fraction": round((box_width * box_height) / max(1.0, float(width * height)), 4),
+        "bbox_center_xy_norm": [
+            round(((x0 + x1) / 2.0) / max(1.0, float(width)), 4),
+            round(((y0 + y1) / 2.0) / max(1.0, float(height)), 4),
+        ],
+        "bbox_width_fraction": round(box_width / max(1.0, float(width)), 4),
+        "bbox_height_fraction": round(box_height / max(1.0, float(height)), 4),
+        "bbox_touches_image_edge": bool(edge_contact),
+        "bbox_edge_contact": edge_contact,
+    }
 
 
 def _recommendation(checks: list[dict[str, Any]]) -> str:
-    if any(item["selected_detection"] is not None for item in checks):
+    selected = [item["selected_detection"] for item in checks if item["selected_detection"] is not None]
+    if any(item.get("bbox_touches_image_edge") for item in selected):
+        return (
+            "Detector produced a selected box that touches the image edge; treat it as a partial grounding hypothesis "
+            "and inspect the overlay before visual-servo use."
+        )
+    if selected:
         return "Detector produced at least one selected box; inspect overlays before enabling long visual-servo rollouts."
     if any(item["error"] for item in checks):
         return "Detector failed on saved frames; fix dependency/model loading before launching visual-servo rollouts."
@@ -219,6 +256,8 @@ def _markdown_report(report: dict[str, Any]) -> str:
         selected_text = ""
         if selected is not None:
             selected_text = f"{selected['label']} {selected['score']:.2f}"
+            if selected.get("bbox_touches_image_edge"):
+                selected_text += f" edge={','.join(selected.get('bbox_edge_contact') or [])}"
         lines.append(
             "| "
             + " | ".join(

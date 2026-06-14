@@ -98,7 +98,8 @@ STRATEGY_TEMPLATES: tuple[StrategyTemplate, ...] = (
         actor_rules=(
             "Use visual_servo_object only for an object instance that is currently visible in the latest RGB frame.",
             "When a plausible candidate is visible but previous detector grounding was sparse or suspicious, call check_object_grounding on a compact phrase before visual_servo_object.",
-            "If check_object_grounding reports ready_for_visual_servo=false or its overlay is on the wrong region, change viewpoint or choose a different visible phrase instead of servoing.",
+            "Treat check_object_grounding ready_for_visual_servo=true as only a detector-box hypothesis; inspect the overlay and any grounding_geometry_warning before servoing.",
+            "If check_object_grounding reports ready_for_visual_servo=false, grounding_geometry_warning, an edge-clipped box, or an overlay on the wrong region, change viewpoint or choose a different visible phrase instead of servoing.",
             "Prefer compact visible phrases for the configured phrase-grounding backend; if no_detection repeats, change viewpoint instead of adding more descriptors.",
             "After every visual_servo_object call, audit the paired raw/detector strip before deciding whether to trust the movement.",
             "If the detector box is absent or on the wrong region twice from similar views, choose a viewpoint-changing tool or query_topomap_memory before another servo attempt.",

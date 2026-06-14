@@ -6,6 +6,7 @@ import sys
 from flatdisk_sim.agent_tools import (
     _detector_doctor_command,
     _detector_doctor_timeout_s,
+    _grounding_geometry_warning,
     _object_drive_command,
     _object_drive_timeout_s,
     _parse_object_drive_status,
@@ -131,6 +132,37 @@ def test_detector_doctor_command_override(monkeypatch) -> None:
     monkeypatch.setenv("FLATDISK_DETECTOR_DOCTOR_COMMAND", "/tmp/doctor --flag")
 
     assert _detector_doctor_command(detector="grounding-dino") == ["/tmp/doctor", "--flag"]
+
+
+def test_grounding_geometry_warning_flags_edge_touching_boxes() -> None:
+    warning = _grounding_geometry_warning(
+        {
+            "bbox_touches_image_edge": True,
+            "bbox_edge_contact": ["left", "top"],
+            "bbox_area_fraction": 0.14,
+            "bbox_width_fraction": 0.2,
+            "bbox_height_fraction": 0.6,
+        }
+    )
+
+    assert warning is not None
+    assert "selected_box_touches_left,top" in warning
+    assert "inspect overlay" in warning
+
+
+def test_grounding_geometry_warning_allows_centered_boxes() -> None:
+    assert (
+        _grounding_geometry_warning(
+            {
+                "bbox_touches_image_edge": False,
+                "bbox_edge_contact": [],
+                "bbox_area_fraction": 0.14,
+                "bbox_width_fraction": 0.4,
+                "bbox_height_fraction": 0.35,
+            }
+        )
+        is None
+    )
 
 
 def test_transformers_object_drive_command_uses_prepared_python(monkeypatch) -> None:
