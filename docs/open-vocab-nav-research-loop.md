@@ -317,6 +317,18 @@ or `WH_INSTALL_CMD` installs it. By default, real launch is refused from a dirty
 worktree because the pod clones `origin` and would otherwise miss local worker
 changes.
 
+Local Codex shells do not automatically load the repo root `.env`. If `.env`
+contains `RUNPOD_API_KEY`, load only that variable before Runpod commands and do
+not print it:
+
+```bash
+export RUNPOD_API_KEY="$(grep -m1 '^RUNPOD_API_KEY=' .env | cut -d= -f2- | sed 's/^"//;s/"$//')"
+runpodctl user
+```
+
+`runpodctl user` returning account JSON means Runpod auth is available. If it
+says `api key not configured`, the variable was not loaded into that shell.
+
 With `--start-qwen-server`, the generated worker claims the Warmhub task, starts
 `Qwen/Qwen3-VL-8B-Instruct` through vLLM, waits for `/v1/models`, and then runs
 the planned command with `--no-claim`. The Qwen server log is attached as task

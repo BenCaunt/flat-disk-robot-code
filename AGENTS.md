@@ -104,6 +104,18 @@ uv run --project sim flatdisk-sim-runpod-launch-task \
 
 Real launches require `runpodctl`, `RUNPOD_API_KEY`, a pushed git ref containing
 the worker code, and a pod image or `WH_INSTALL_CMD` that provides the `wh` CLI.
+Codex shells do not automatically load the repo root `.env`; if `.env` contains
+`RUNPOD_API_KEY`, load only that variable before Runpod commands and do not print
+it:
+
+```bash
+export RUNPOD_API_KEY="$(grep -m1 '^RUNPOD_API_KEY=' .env | cut -d= -f2- | sed 's/^"//;s/"$//')"
+runpodctl user
+```
+
+`runpodctl user` returning account JSON means Runpod auth is available. An
+`api key not configured` error means the variable was not loaded into that
+shell, not necessarily that the key is invalid.
 
 To fan out several planned trial-slice tasks, use the dispatcher. It is also
 dry-run by default and skips incomplete prerequisites unless
