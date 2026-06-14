@@ -208,8 +208,8 @@ class AgentTools:
             cwd=REPO_ROOT,
         )
         elapsed_s = time.perf_counter() - started
-        frame_paths = tuple(sorted(raw_dir.glob("*.jpg"))[-5:])
-        debug_overlay_paths = tuple(sorted(overlay_dir.glob("*.jpg"))[-5:])
+        frame_paths = tuple(_sample_evenly(sorted(raw_dir.glob("*.jpg")), count=5))
+        debug_overlay_paths = tuple(_sample_evenly(sorted(overlay_dir.glob("*.jpg")), count=5))
         contact_sheet = None
         debug_overlay_sheet = None
         grounding_audit_sheet = None
@@ -335,6 +335,14 @@ def make_visual_servo_grounding_audit_sheet(raw_paths: list[Path], overlay_paths
     output_path.parent.mkdir(parents=True, exist_ok=True)
     sheet.save(output_path, format="JPEG", quality=90)
     return output_path
+
+
+def _sample_evenly(paths: list[Path], *, count: int) -> list[Path]:
+    if count <= 0 or len(paths) <= count:
+        return list(paths)
+    last_index = len(paths) - 1
+    indices = [round(index * last_index / (count - 1)) for index in range(count)]
+    return [paths[index] for index in indices]
 
 
 def _tail_text(text: str, *, max_chars: int = 1600) -> str:

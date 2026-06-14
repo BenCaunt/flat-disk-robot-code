@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from pathlib import Path
 import sys
 
-from flatdisk_sim.agent_tools import _object_drive_command, _object_drive_timeout_s, _parse_object_drive_status
+from flatdisk_sim.agent_tools import _object_drive_command, _object_drive_timeout_s, _parse_object_drive_status, _sample_evenly
 
 
 def test_parse_object_drive_status_no_detection() -> None:
@@ -91,6 +92,18 @@ def test_mlx_object_drive_command_keeps_current_python() -> None:
 
 def test_object_drive_timeout_allows_cold_model_load() -> None:
     assert _object_drive_timeout_s(2.0) >= 300.0
+
+
+def test_sample_evenly_keeps_first_middle_and_last_paths() -> None:
+    paths = [Path(f"frame_{index}") for index in range(10)]
+
+    assert _sample_evenly(paths, count=5) == [
+        Path("frame_0"),
+        Path("frame_2"),
+        Path("frame_4"),
+        Path("frame_7"),
+        Path("frame_9"),
+    ]
 
 
 def test_object_drive_timeout_env_override_is_bounded(monkeypatch) -> None:
