@@ -22,6 +22,7 @@ DEFAULT_QWEN_MODEL = "Qwen/Qwen3-VL-8B-Instruct"
 DEFAULT_QWEN_HOST = "127.0.0.1"
 DEFAULT_QWEN_PORT = 8000
 DEFAULT_QWEN_SERVER_LOG = "/workspace/qwen_vllm.log"
+DEFAULT_QWEN_VLLM_EXTRA_ARGS = "--max-model-len 16384"
 
 
 @dataclass(frozen=True)
@@ -59,7 +60,7 @@ class RunpodLaunchSpec:
     qwen_server_log: str = DEFAULT_QWEN_SERVER_LOG
     qwen_server_timeout_s: int = 900
     qwen_vllm_package: str = "vllm"
-    qwen_vllm_extra_args: str = ""
+    qwen_vllm_extra_args: str = DEFAULT_QWEN_VLLM_EXTRA_ARGS
 
 
 def build_runpodctl_command(spec: RunpodLaunchSpec) -> list[str]:
@@ -355,7 +356,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--qwen-server-log", default=DEFAULT_QWEN_SERVER_LOG)
     parser.add_argument("--qwen-server-timeout-s", type=int, default=900)
     parser.add_argument("--qwen-vllm-package", default="vllm")
-    parser.add_argument("--qwen-vllm-extra-args", default="")
+    parser.add_argument("--qwen-vllm-extra-args", default=DEFAULT_QWEN_VLLM_EXTRA_ARGS)
     parser.add_argument("--launch", action="store_true", help="Actually run runpodctl pod create. Default is dry-run.")
     parser.add_argument("--allow-dirty", action="store_true", help="Allow launch even if the local worktree is dirty.")
     return parser.parse_args()

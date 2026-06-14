@@ -21,6 +21,7 @@ from .runpod_launcher import (
     DEFAULT_QWEN_MODEL,
     DEFAULT_QWEN_PORT,
     DEFAULT_QWEN_SERVER_LOG,
+    DEFAULT_QWEN_VLLM_EXTRA_ARGS,
     RunpodLaunchSpec,
     build_runpodctl_command,
     compact_safe_id,
@@ -307,7 +308,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--qwen-server-log", default=DEFAULT_QWEN_SERVER_LOG)
     parser.add_argument("--qwen-server-timeout-s", type=int, default=900)
     parser.add_argument("--qwen-vllm-package", default="vllm")
-    parser.add_argument("--qwen-vllm-extra-args", default="")
+    parser.add_argument("--qwen-vllm-extra-args", default=DEFAULT_QWEN_VLLM_EXTRA_ARGS)
     parser.add_argument(
         "--dispatch-manifest",
         type=Path,

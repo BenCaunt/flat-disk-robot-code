@@ -75,6 +75,20 @@ def test_start_qwen_server_adds_endpoint_env_and_bootstrap_script() -> None:
     assert "--evidence-artifact /workspace/qwen_vllm.log" in docker_args
 
 
+def test_start_qwen_server_defaults_to_larger_context() -> None:
+    spec = RunpodLaunchSpec(
+        task="AgentTask/qwen-topomap-memory-runpod-linux-v1-preflight",
+        agent="agent-a",
+        git_url="https://github.com/BenCaunt/flat-disk-robot-code.git",
+        start_qwen_server=True,
+    )
+
+    command = build_runpodctl_command(spec)
+    env = json.loads(command[command.index("--env") + 1])
+
+    assert env["QWEN_VLLM_EXTRA_ARGS"] == "--max-model-len 16384"
+
+
 def test_redacted_command_hides_sensitive_env_values() -> None:
     spec = RunpodLaunchSpec(
         task="AgentTask/example",
