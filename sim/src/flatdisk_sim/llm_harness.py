@@ -27,7 +27,15 @@ from .text_goal_policy_core import clamp_float, parse_json_object
 
 HARNESS_MODES = ("idle", "auto", "paused", "teleop", "complete", "error")
 ALLOWED_OBSERVATION_KEYS = {"path", "yaw_deg", "frame_seq", "brightness_center"}
-ALLOWED_ACTIONS = {"turn_by_angle", "drive_straight", "visual_servo_object", "query_topomap_memory", "stop", "wait"}
+ALLOWED_ACTIONS = {
+    "turn_by_angle",
+    "drive_straight",
+    "visual_servo_object",
+    "check_object_grounding",
+    "query_topomap_memory",
+    "stop",
+    "wait",
+}
 FORBIDDEN_PRIVILEGED_KEYS = {
     "distance_m",
     "hidden",
@@ -56,11 +64,21 @@ TOOL_CONTRACT: dict[str, Any] = {
             "prompt": "short phrase for a currently visible object, landmark, passage, or region chosen from the latest RGB frame",
             "duration_s": "float 0.5..4.0",
             "forward_power": "float 8..24 optional",
-            "detector": "optional detector name; default uses the configured Florence detector",
+            "detector": "optional detector name; default uses the configured object-drive detector",
         },
         "effect": (
             "Run a bounded phrase-grounded visual servo toward the named visible object/landmark. "
             "This is not a search action and does not verify that the object is the final goal."
+        ),
+    },
+    "check_object_grounding": {
+        "args": {
+            "prompt": "short phrase for a candidate object, landmark, passage, or region in the latest RGB frame",
+            "detector": "optional detector name; default uses the configured object-drive detector",
+        },
+        "effect": (
+            "Non-motion phrase-grounding check on the latest RGB frame. "
+            "Returns whether the detector produced a usable selected box and writes a detector overlay for inspection."
         ),
     },
     "query_topomap_memory": {
@@ -85,6 +103,7 @@ POLICY_INPUT_ALLOWLIST = [
     "camera-derived summary",
     "imu yaw",
     "bounded tool results",
+    "non-motion phrase-grounding check result",
     "topomap image-memory tool result",
     "relative memory log",
     "previous motion strip",
@@ -100,6 +119,7 @@ PROMPT_TOOL_RESULT_KEYS = {
     "debug_overlay_contact_sheet",
     "detector",
     "detection_coverage_fraction",
+    "detection_count",
     "detection_status_count",
     "duration_s",
     "elapsed_s",
@@ -112,20 +132,30 @@ PROMPT_TOOL_RESULT_KEYS = {
     "goal_query",
     "grounding_audit_contact_sheet",
     "heading_error_deg",
+    "image_path",
     "last_command",
+    "markdown_path",
     "map_summary",
     "matching_mode",
     "motion_contact_sheet",
     "motor_commands_sent",
     "moved",
     "ok",
+    "overlay_path",
     "planner_note",
     "prompt",
     "reason",
+    "ready_for_visual_servo",
+    "recommendation",
+    "report_path",
     "route_length",
     "route_node_ids",
     "route_truncated",
     "routes",
+    "selected_bbox_xyxy",
+    "selected_detection_count",
+    "selected_label",
+    "selected_score",
     "semantic_identity",
     "servo_status",
     "started_yaw_deg",
@@ -237,6 +267,9 @@ class RobotTools(Protocol):
         detector: str | None = None,
         forward_power: float = 18.0,
     ) -> Any:
+        ...
+
+    def check_object_grounding(self, *, image_path: Path, prompt: str, detector: str | None = None) -> Any:
         ...
 
     def query_topomap_memory(self, *, image_path: Path, goal_query: str) -> Any:
@@ -860,6 +893,23 @@ class HarnessSession:
                 forward_power=action.args.get("forward_power", 18.0),
             )
             return motion_result_summary(result)
+        if action.tool == "check_object_grounding":
+            with self._lock:
+                observation = dict(self._status.last_observation or {})
+            image_path_text = observation.get("path")
+            if not image_path_text:
+                return {
+                    "action": "check_object_grounding",
+                    "ok": False,
+                    "reason": "no_latest_observation_frame",
+                    "prompt": action.args["prompt"],
+                }
+            result = self.tools.check_object_grounding(
+                image_path=Path(str(image_path_text)),
+                prompt=action.args["prompt"],
+                detector=action.args.get("detector"),
+            )
+            return motion_result_summary(result)
         if action.tool == "query_topomap_memory":
             with self._lock:
                 observation = dict(self._status.last_observation or {})
@@ -1043,7 +1093,7 @@ def build_actor_prompt(
     rules = [
         "Use only the provided camera/IMU observation, memory, and tool results.",
         "When an image is attached, treat it as the authoritative latest RGB camera frame.",
-        "Image attachments are ordered as: latest RGB frame; previous raw/detector paired grounding audit strip if present; previous raw motion strip if present; previous detector debug overlay strip if present; topomap contact sheet if present.",
+        "Image attachments are ordered as: latest RGB frame; previous check_object_grounding detector overlay if present; previous raw/detector paired grounding audit strip if present; previous raw motion strip if present; previous detector debug overlay strip if present; topomap contact sheet if present.",
         "When a previous raw/detector paired grounding audit strip is attached, read columns left-to-right; each column shows the same moment as raw camera above and detector overlay below.",
         "When a previous raw motion strip is attached, read it left-to-right as evenly spaced frames from the last tool call.",
         "When a previous detector debug overlay strip is attached, inspect the boxes/labels yourself; if the box is on the wrong object, treat moved=true as a detector grounding failure and switch strategy or use a more precise visible phrase.",
@@ -1053,6 +1103,8 @@ def build_actor_prompt(
         "If the detector box is on a nearby surface, cabinet, wall, or other object instead of the intended instance, set next_prompt_should_change=true and choose a different bounded action or a more specific visible phrase.",
         "For visual_servo_object in clutter, prefer a precise visible phrase that identifies the intended instance by category plus color/material, part, or image location, not a bare category prompt.",
         "If a grounding audit or overlay shows the detector box on a nearby wrong object, do not repeat the same prompt; change viewpoint or use a more specific visible phrase selected from the latest RGB frame.",
+        "check_object_grounding is non-motion; use it when the latest RGB frame has a plausible visible candidate but the previous visual servo grounding was sparse, absent, or on the wrong region.",
+        "If check_object_grounding returns ready_for_visual_servo=false or its overlay is on the wrong region, change viewpoint or prompt before visual_servo_object.",
         "Treat brightness_center as a low-level camera summary that may be wrong or incomplete.",
         "Do not assume access to map coordinates, object metadata, target distance, wheel encoders, or simulator state.",
         "Use the image, IMU yaw, and recent motion history to choose exactly one bounded action.",
@@ -1080,7 +1132,7 @@ def build_actor_prompt(
         "tool_contract": TOOL_CONTRACT,
         "output_schema": {
             "thought": "short private control rationale",
-            "action": {"tool": "one of turn_by_angle, drive_straight, visual_servo_object, query_topomap_memory, stop, wait", "args": "object"},
+            "action": {"tool": "one of turn_by_angle, drive_straight, visual_servo_object, check_object_grounding, query_topomap_memory, stop, wait", "args": "object"},
             "grounding_audit": "required after visual_servo_object history; object with previous_visual_servo_box_matches_intended_object, evidence, next_prompt_should_change",
             "memory_update": "optional object with observation_note, beliefs, next_strategy, or other non-privileged scratchpad facts",
             "save_frames": "optional list of {id, source, frame_index, note} requests",
@@ -1118,7 +1170,7 @@ def build_critic_prompt(
     rules = [
         "Approve only bounded actions that make sense from camera/IMU and memory.",
         "When an image is attached, evaluate it as the authoritative latest RGB camera frame.",
-        "Image attachments are ordered as: latest RGB frame; previous raw/detector paired grounding audit strip if present; previous raw motion strip if present; previous detector debug overlay strip if present; topomap contact sheet if present.",
+        "Image attachments are ordered as: latest RGB frame; previous check_object_grounding detector overlay if present; previous raw/detector paired grounding audit strip if present; previous raw motion strip if present; previous detector debug overlay strip if present; topomap contact sheet if present.",
         "When a previous raw/detector paired grounding audit strip is attached, compare each raw frame with its detector overlay before trusting moved=true or last_detection.",
         "When a previous detector debug overlay strip is attached, check whether the detector box is actually on the named object before trusting moved=true or last_detection.",
         "Warn or reject claims of consistent tracking when grounding_stability is not status_track_present.",
@@ -1127,6 +1179,7 @@ def build_critic_prompt(
         "Reject unsafe, looping, ungrounded, or impossible commands.",
         "Reject visual_servo_object with the final-goal phrase when the actor is using it merely to search and the latest image lacks clear final-goal evidence.",
         "Approve visual_servo_object toward a non-goal visible landmark when it is a bounded waypoint move intended to improve viewpoint.",
+        "Approve check_object_grounding when it tests a plausible visible phrase before a risky or repeated visual_servo_object call.",
         "Approve query_topomap_memory when route/image memory could guide exploration; it is non-motion and should not be treated as goal completion.",
         "Reject stop unless repeated observations show the described goal object is reached or very close.",
         "Do not request or use privileged simulator state.",
@@ -1316,6 +1369,14 @@ def validate_harness_action(action: HarnessAction) -> HarnessAction:
             "duration_s": clamp_float(args.get("duration_s", 2.0), 0.5, 4.0),
             "forward_power": clamp_float(args.get("forward_power", args.get("power_percent", 18.0)), 8.0, 24.0),
         }
+        if detector is not None:
+            args["detector"] = detector
+    elif tool == "check_object_grounding":
+        prompt = str(args.get("prompt", "")).strip()[:160]
+        if not prompt:
+            return HarnessAction("wait", {"duration_s": 0.2}, "check_object_grounding missing prompt")
+        detector = str(args.get("detector") or "").strip()[:80] or None
+        args = {"prompt": prompt}
         if detector is not None:
             args["detector"] = detector
     elif tool == "query_topomap_memory":
@@ -1590,6 +1651,9 @@ def _observation_image_paths(observation: dict[str, Any]) -> list[Path]:
 
 def _actor_image_paths(observation: dict[str, Any], recent_memory: list[dict[str, Any]], *, root: Path) -> list[Path]:
     paths = _observation_image_paths(observation)
+    grounding_check_overlay = _latest_grounding_check_overlay_path(recent_memory, root=root)
+    if grounding_check_overlay is not None and grounding_check_overlay.exists() and grounding_check_overlay not in paths:
+        paths.append(grounding_check_overlay)
     grounding_audit_strip = _latest_grounding_audit_contact_sheet(recent_memory, root=root)
     if grounding_audit_strip is not None and grounding_audit_strip.exists():
         paths.append(grounding_audit_strip)
@@ -1661,6 +1725,19 @@ def _latest_debug_overlay_contact_sheet(recent_memory: list[dict[str, Any]], *, 
         if not isinstance(result, dict):
             continue
         path_text = result.get("debug_overlay_contact_sheet")
+        if path_text:
+            return _resolve_model_path(str(path_text), root=root)
+    return None
+
+
+def _latest_grounding_check_overlay_path(recent_memory: list[dict[str, Any]], *, root: Path) -> Path | None:
+    for record in reversed(recent_memory):
+        if not isinstance(record, dict):
+            continue
+        result = record.get("tool_result")
+        if not isinstance(result, dict) or result.get("action") != "check_object_grounding":
+            continue
+        path_text = result.get("overlay_path")
         if path_text:
             return _resolve_model_path(str(path_text), root=root)
     return None

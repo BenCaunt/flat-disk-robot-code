@@ -3,7 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 
-from flatdisk_sim.agent_tools import _object_drive_command, _object_drive_timeout_s, _parse_object_drive_status, _sample_evenly
+from flatdisk_sim.agent_tools import (
+    _detector_doctor_command,
+    _detector_doctor_timeout_s,
+    _object_drive_command,
+    _object_drive_timeout_s,
+    _parse_object_drive_status,
+    _sample_evenly,
+)
 
 
 def test_parse_object_drive_status_no_detection() -> None:
@@ -110,6 +117,22 @@ def test_grounding_dino_object_drive_command_includes_torchvision() -> None:
     assert cmd[-1].endswith("object_drive_zenoh.py")
 
 
+def test_grounding_dino_detector_doctor_command_includes_torchvision() -> None:
+    cmd = _detector_doctor_command(detector="grounding-dino")
+
+    assert cmd[:4] == ["uv", "run", "--project", "sim"]
+    assert "torch" in cmd
+    assert "torchvision" in cmd
+    assert "transformers" in cmd
+    assert cmd[-1] == "flatdisk-sim-detector-doctor"
+
+
+def test_detector_doctor_command_override(monkeypatch) -> None:
+    monkeypatch.setenv("FLATDISK_DETECTOR_DOCTOR_COMMAND", "/tmp/doctor --flag")
+
+    assert _detector_doctor_command(detector="grounding-dino") == ["/tmp/doctor", "--flag"]
+
+
 def test_transformers_object_drive_command_uses_prepared_python(monkeypatch) -> None:
     monkeypatch.setenv("FLATDISK_OBJECT_DRIVE_PYTHON", "/tmp/object-drive/bin/python")
 
@@ -131,6 +154,10 @@ def test_object_drive_timeout_allows_cold_model_load() -> None:
     assert _object_drive_timeout_s(2.0) >= 300.0
 
 
+def test_detector_doctor_timeout_allows_cold_model_load() -> None:
+    assert _detector_doctor_timeout_s() >= 420.0
+
+
 def test_sample_evenly_keeps_first_middle_and_last_paths() -> None:
     paths = [Path(f"frame_{index}") for index in range(10)]
 
@@ -147,3 +174,9 @@ def test_object_drive_timeout_env_override_is_bounded(monkeypatch) -> None:
     monkeypatch.setenv("FLATDISK_OBJECT_DRIVE_TIMEOUT_S", "30")
 
     assert _object_drive_timeout_s(40.0) == 45.0
+
+
+def test_detector_doctor_timeout_env_override_is_bounded(monkeypatch) -> None:
+    monkeypatch.setenv("FLATDISK_DETECTOR_DOCTOR_TIMEOUT_S", "2")
+
+    assert _detector_doctor_timeout_s() == 5.0

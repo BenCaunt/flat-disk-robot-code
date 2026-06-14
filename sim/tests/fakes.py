@@ -115,6 +115,28 @@ class FakeHarnessTools:
             "topomap_contact_sheet": None,
         }
 
+    def check_object_grounding(self, *, image_path: Path, prompt: str, detector: str | None = None) -> dict[str, Any]:
+        detector_name = detector or "fake-open-vocab"
+        overlay_path = self.motion_frames_dir / f"{self.motion_seq + 1:04d}_grounding_check_overlay.jpg"
+        Image.open(image_path).save(overlay_path, format="JPEG", quality=90)
+        return {
+            "action": "check_object_grounding",
+            "ok": True,
+            "prompt": prompt,
+            "detector": detector_name,
+            "image_path": str(image_path),
+            "ready_for_visual_servo": True,
+            "detection_count": 1,
+            "selected_detection_count": 1,
+            "selected_label": prompt,
+            "selected_score": 0.91,
+            "selected_bbox_xyxy": [80, 60, 240, 180],
+            "overlay_path": str(overlay_path),
+            "report_path": None,
+            "markdown_path": None,
+            "recommendation": "usable grounding on fake frame",
+        }
+
     def stop(self) -> FakeMotionResult:
         return FakeMotionResult(command="stop")
 

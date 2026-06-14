@@ -35,6 +35,7 @@ TRANSFORMERS_OBJECT_DRIVE_EXTRAS = {
     "grounding-dino": ("torch", "torchvision", "transformers", "timm", "einops"),
 }
 DEFAULT_OBJECT_DRIVE_TIMEOUT_S = 300.0
+DEFAULT_DETECTOR_DOCTOR_TIMEOUT_S = 420.0
 
 
 @dataclass(frozen=True)
@@ -89,12 +90,15 @@ class AgentTools:
         self.frames_dir.mkdir(parents=True, exist_ok=True)
         self.motion_frames_dir = run_dir / "motion_frames"
         self.motion_frames_dir.mkdir(parents=True, exist_ok=True)
+        self.grounding_checks_dir = run_dir / "grounding_checks"
+        self.grounding_checks_dir.mkdir(parents=True, exist_ok=True)
         self.topomap_memory_dir = run_dir / "topomap_memory"
         self.events_path = run_dir / "events.jsonl"
         self.client = FlatDiskRobotClient(namespace=namespace, connect=connect, reverse_yaw=reverse_yaw)
         self.client.open()
         self._observation_count = 0
         self._motion_count = 0
+        self._grounding_check_count = 0
         if topomap_memory_map_dir is not None:
             self.topomap_memory = TopomapMemoryTool(
                 TopomapMemoryConfig(
@@ -250,6 +254,75 @@ class AgentTools:
             "stderr_tail": _tail_text(completed.stderr),
         }
         self.log("visual_servo_object", summary)
+        return summary
+
+    def check_object_grounding(
+        self,
+        *,
+        image_path: Path,
+        prompt: str,
+        detector: str | None = None,
+    ) -> dict[str, Any]:
+        """Run the configured phrase-grounding detector on a saved camera frame without motion."""
+
+        detector_name = detector or self.object_drive_detector
+        self._grounding_check_count += 1
+        output_dir = self.grounding_checks_dir / f"{self._grounding_check_count:04d}_{_safe_filename(prompt)}_{_safe_filename(detector_name)}"
+        cmd = _detector_doctor_command(detector=detector_name) + [
+            "--image",
+            str(image_path),
+            "--prompt",
+            prompt,
+            "--detector",
+            detector_name,
+            "--output-dir",
+            str(output_dir),
+        ]
+        started = time.perf_counter()
+        timeout_s = _detector_doctor_timeout_s()
+        completed = subprocess.run(
+            cmd,
+            text=True,
+            capture_output=True,
+            timeout=timeout_s,
+            check=False,
+            cwd=REPO_ROOT,
+        )
+        elapsed_s = time.perf_counter() - started
+        report_path = output_dir / "detector_doctor.json"
+        report: dict[str, Any] = {}
+        if report_path.exists():
+            try:
+                report = json.loads(report_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                report = {}
+        check = (report.get("checks") or [{}])[0] if isinstance(report.get("checks"), list) else {}
+        selected = check.get("selected_detection") if isinstance(check, dict) else None
+        if not isinstance(selected, dict):
+            selected = None
+        summary = {
+            "action": "check_object_grounding",
+            "prompt": prompt,
+            "detector": detector_name,
+            "image_path": str(image_path),
+            "timeout_s": timeout_s,
+            "elapsed_s": elapsed_s,
+            "returncode": completed.returncode,
+            "ok": completed.returncode == 0,
+            "ready_for_visual_servo": bool(report.get("ready_for_visual_servo", False)),
+            "detection_count": int(report.get("detection_count") or 0),
+            "selected_detection_count": int(report.get("selected_detection_count") or 0),
+            "selected_label": selected.get("label") if selected else None,
+            "selected_score": selected.get("score") if selected else None,
+            "selected_bbox_xyxy": selected.get("bbox_xyxy") if selected else None,
+            "overlay_path": str(check.get("overlay")) if isinstance(check, dict) and check.get("overlay") else None,
+            "report_path": str(report_path) if report_path.exists() else None,
+            "markdown_path": str(output_dir / "detector_doctor.md") if (output_dir / "detector_doctor.md").exists() else None,
+            "recommendation": report.get("recommendation") or "detector doctor did not produce a report",
+            "stdout_tail": _tail_text(completed.stdout),
+            "stderr_tail": _tail_text(completed.stderr),
+        }
+        self.log("check_object_grounding", summary)
         return summary
 
     def query_topomap_memory(self, *, image_path: Path, goal_query: str) -> dict[str, Any]:
@@ -439,6 +512,19 @@ def _object_drive_command(*, detector: str) -> list[str]:
     return [sys.executable, str(OBJECT_DRIVE_SCRIPT)]
 
 
+def _detector_doctor_command(*, detector: str) -> list[str]:
+    override = os.environ.get("FLATDISK_DETECTOR_DOCTOR_COMMAND", "").strip()
+    if override:
+        return shlex.split(override)
+    if detector in TRANSFORMERS_OBJECT_DRIVE_DETECTORS:
+        cmd = ["uv", "run", "--project", "sim"]
+        for package in TRANSFORMERS_OBJECT_DRIVE_EXTRAS.get(detector, ("torch", "transformers")):
+            cmd.extend(["--with", package])
+        cmd.append("flatdisk-sim-detector-doctor")
+        return cmd
+    return [sys.executable, "-m", "flatdisk_sim.detector_doctor"]
+
+
 def _object_drive_timeout_s(duration_s: float) -> float:
     override = os.environ.get("FLATDISK_OBJECT_DRIVE_TIMEOUT_S", "").strip()
     if override:
@@ -447,6 +533,20 @@ def _object_drive_timeout_s(duration_s: float) -> float:
         except ValueError:
             pass
     return max(DEFAULT_OBJECT_DRIVE_TIMEOUT_S, float(duration_s) + DEFAULT_OBJECT_DRIVE_TIMEOUT_S)
+
+
+def _detector_doctor_timeout_s() -> float:
+    override = os.environ.get("FLATDISK_DETECTOR_DOCTOR_TIMEOUT_S", "").strip()
+    if override:
+        try:
+            return max(5.0, float(override))
+        except ValueError:
+            pass
+    return DEFAULT_DETECTOR_DOCTOR_TIMEOUT_S
+
+
+def _safe_filename(value: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_.-]+", "_", value.strip())[:64].strip("_") or "item"
 
 
 def _parse_object_drive_status_fields(line: str) -> dict[str, str]:

@@ -105,6 +105,25 @@ class _ServoAuditActor:
         return json.dumps({"thought": "audit previous overlay", "action": {"tool": "wait", "args": {"duration_s": 0.2}}})
 
 
+class _GroundingCheckActor:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.image_paths_by_call: list[list] = []
+
+    def run(self, prompt: str, *, role: str, image_paths=None) -> str:  # noqa: ANN001
+        del prompt, role
+        self.image_paths_by_call.append(list(image_paths or []))
+        self.calls += 1
+        if self.calls == 1:
+            return json.dumps(
+                {
+                    "thought": "verify phrase on the latest image before servo",
+                    "action": {"tool": "check_object_grounding", "args": {"prompt": "white toilet", "detector": "grounding-dino"}},
+                }
+            )
+        return json.dumps({"thought": "inspect grounding overlay", "action": {"tool": "wait", "args": {"duration_s": 0.2}}})
+
+
 class _MalformedActor:
     def run(self, prompt: str, *, role: str, image_paths=None) -> str:  # noqa: ANN001
         del prompt, role, image_paths
@@ -197,6 +216,8 @@ def test_actor_prompt_declares_camera_image_authoritative_and_strips_legacy_dete
     assert "fill grounding_audit before choosing an action" in prompt
     assert "Only repeat the same visual_servo_object prompt" in prompt
     assert "grounding_stability is sparse_detection_coverage" in prompt
+    assert "check_object_grounding is non-motion" in prompt
+    assert "ready_for_visual_servo=false" in prompt
     assert "detections" not in prompt
     assert "toilet" not in prompt
 
@@ -217,6 +238,7 @@ def test_critic_prompt_declares_camera_image_authoritative_and_stop_requires_rep
     assert "non-goal visible landmark" in prompt
     assert "did not audit the previous detector box" in prompt
     assert "grounding_stability is not status_track_present" in prompt
+    assert "Approve check_object_grounding" in prompt
     assert "Reject stop unless repeated observations show" in prompt
 
 
@@ -380,6 +402,20 @@ def test_actor_action_parser_accepts_topomap_memory_tool() -> None:
     assert action.args == {"goal_query": "sofa"}
 
 
+def test_actor_action_parser_accepts_grounding_check_tool() -> None:
+    action = parse_actor_action(
+        json.dumps(
+            {
+                "thought": "verify visible candidate before moving",
+                "action": {"tool": "check_object_grounding", "args": {"prompt": "white toilet", "detector": "grounding-dino"}},
+            }
+        )
+    )
+
+    assert action.tool == "check_object_grounding"
+    assert action.args == {"prompt": "white toilet", "detector": "grounding-dino"}
+
+
 def test_actor_side_effect_parser_sanitizes_memory_and_frame_requests() -> None:
     side_effects = parse_actor_side_effects(
         json.dumps(
@@ -466,6 +502,32 @@ def test_session_can_execute_topomap_memory_lookup_without_motion(tmp_path) -> N
     assert record["tool_result"]["reason"] == "topomap_memory_not_configured"
 
 
+def test_session_can_execute_grounding_check_without_motion_and_attach_overlay(tmp_path) -> None:
+    actor = _GroundingCheckActor()
+    tools = FakeHarnessTools(run_dir=tmp_path, environment="bathroom")
+    session = HarnessSession(
+        config=HarnessConfig(run_dir=tmp_path, max_steps=2),
+        tools=tools,
+        actor=actor,
+        critic=_AlwaysApproveCritic(),
+    )
+
+    session.start_goal("Drive to the toilet.")
+    first = session.run_auto_step()
+    second = session.run_auto_step()
+    session.close()
+
+    assert first is not None and second is not None
+    assert first["executed_action"]["tool"] == "check_object_grounding"
+    assert first["tool_result"]["action"] == "check_object_grounding"
+    assert first["tool_result"]["ready_for_visual_servo"] is True
+    assert first["tool_result"]["selected_label"] == "white toilet"
+    assert tools.motion_seq == 0
+    assert len(actor.image_paths_by_call[0]) == 1
+    assert len(actor.image_paths_by_call[1]) == 2
+    assert actor.image_paths_by_call[1][1].name.endswith("_grounding_check_overlay.jpg")
+
+
 def test_codex_exec_runner_uses_supported_low_reasoning_config_and_images(tmp_path) -> None:
     image = tmp_path / "frame.jpg"
     image.write_bytes(b"fake")
@@ -485,8 +547,9 @@ def test_codex_exec_runner_uses_supported_low_reasoning_config_and_images(tmp_pa
     actor_schema_json = json.loads(actor_schema)
     assert '"required": [' in actor_schema
     assert "grounding_audit" in actor_schema_json["required"]
+    assert "check_object_grounding" in actor_schema_json["properties"]["action"]["properties"]["tool"]["enum"]
     arg_properties = actor_schema_json["properties"]["action"]["properties"]["args"]["properties"]
-    assert {"degrees", "power_percent", "duration_s", "goal_query"} <= set(arg_properties)
+    assert {"degrees", "power_percent", "duration_s", "prompt", "goal_query", "detector"} <= set(arg_properties)
     assert ["--image", str(image)] == command[command.index("--image") : command.index("--image") + 2]
     assert command[-1] == "-"
 
@@ -643,7 +706,15 @@ def test_session_logs_llm_outputs_to_rerun_sink(tmp_path) -> None:
     actor_payload = rerun.llm_calls[0][2]
     critic_payload = rerun.llm_calls[1][2]
     assert actor_payload["prompt_path"] == "prompts/000_actor.txt"
-    assert actor_payload["parsed_action"]["tool"] in {"turn_by_angle", "drive_straight", "visual_servo_object", "query_topomap_memory", "stop", "wait"}
+    assert actor_payload["parsed_action"]["tool"] in {
+        "turn_by_angle",
+        "drive_straight",
+        "visual_servo_object",
+        "check_object_grounding",
+        "query_topomap_memory",
+        "stop",
+        "wait",
+    }
     assert not any(str(path).startswith("/") for path in actor_payload["image_paths"])
     assert "output" in actor_payload
     assert critic_payload["prompt_path"] == "prompts/000_critic.txt"
