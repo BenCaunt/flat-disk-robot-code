@@ -260,12 +260,12 @@ def write_research_report(aggregate: dict[str, Any], output_root: Path) -> Path:
         "Policy input allowlist: " + ", ".join(POLICY_INPUT_ALLOWLIST),
         "Privileged evaluator data is used only for scoring/debugging.",
         "",
-        "| Trial | Variant | Episode | Runner | Success | Reason | Steps | Best distance (m) | Final distance (m) | Final regression (m) | Output |",
-        "|---|---|---|---|---:|---|---:|---:|---:|---:|---|",
+        "| Trial | Variant | Episode | Runner | Actor model | Success | Reason | Steps | Best distance (m) | Final distance (m) | Final regression (m) | Output |",
+        "|---|---|---|---|---|---:|---|---:|---:|---:|---:|---|",
     ]
     for row in aggregate["summaries"]:
         lines.append(
-            f"| {row['trial_id']} | {row['variant']} | {row['episode']} | {row['runner']} | "
+            f"| {row['trial_id']} | {row['variant']} | {row['episode']} | {row['runner']} | {_summary_actor_model(row)} | "
             f"{row['success']} | {row['reason']} | {row['step_count']} | "
             f"{_format_float(row.get('best_distance_m'))} | "
             f"{_format_float(row.get('final_distance_m'))} | "
@@ -273,7 +273,7 @@ def write_research_report(aggregate: dict[str, Any], output_root: Path) -> Path:
             f"{row.get('run_dir') or ''} |"
         )
     if not aggregate["summaries"]:
-        lines.append("| dry-run | - | - | - | - | no simulator execution | - | - | - | - | - |")
+        lines.append("| dry-run | - | - | - | - | - | no simulator execution | - | - | - | - | - |")
     lines.extend(
         [
             "",
@@ -367,6 +367,9 @@ def warmhub_shapes() -> dict[str, dict[str, Any]]:
                 "trialId": "string",
                 "runner": "string",
                 "model": "string",
+                "actorModel": "string",
+                "qwenModel?": "string",
+                "qwenEndpoint?": "string",
                 "criticMode": "string",
                 "gitCommit?": "string",
                 "outputDir": "string",
@@ -792,6 +795,12 @@ def _prompt_variant_data(variant: PromptVariant) -> dict[str, Any]:
     return data
 
 
+def _variant_actor_model(variant: PromptVariant) -> str:
+    if variant.runner == "qwen":
+        return variant.qwen_model
+    return variant.model
+
+
 def _execute_trials(
     config: ResearchConfig,
     trials: list[TrialSpec],
@@ -946,6 +955,9 @@ def _run_one_trial(
             "variant": trial.variant.name,
             "variant_description": trial.variant.description,
             "repetition_index": trial.repetition_index,
+            "actor_model": _variant_actor_model(trial.variant),
+            "qwen_model": trial.variant.qwen_model if trial.variant.runner == "qwen" else None,
+            "qwen_endpoint": trial.variant.qwen_endpoint if trial.variant.runner == "qwen" else None,
             "topomap_memory_map_dir": topomap_map_dir,
             "topomap_memory_use_clip": trial.variant.topomap_memory_use_clip,
             "topomap_memory_allow_semantic_terms": trial.variant.topomap_memory_allow_semantic_terms,
@@ -976,7 +988,9 @@ def _failed_trial_summary(
         "repetition_index": trial.repetition_index,
         "runner": trial.variant.runner,
         "model": trial.variant.model,
+        "actor_model": _variant_actor_model(trial.variant),
         "qwen_model": trial.variant.qwen_model,
+        "qwen_endpoint": trial.variant.qwen_endpoint if trial.variant.runner == "qwen" else None,
         "object_drive_detector": trial.variant.object_drive_detector,
         "topomap_memory_map_dir": topomap_map_dir,
         "topomap_memory_use_clip": trial.variant.topomap_memory_use_clip,
@@ -1098,6 +1112,9 @@ def _run_op(config: ResearchConfig, summary: dict[str, Any], experiment_ref: str
             "trialId": summary["trial_id"],
             "runner": summary["runner"],
             "model": summary["model"],
+            "actorModel": _summary_actor_model(summary),
+            "qwenModel": summary.get("qwen_model"),
+            "qwenEndpoint": summary.get("qwen_endpoint"),
             "criticMode": summary.get("critic_mode") or summary.get("configured_critic_mode") or "",
             "gitCommit": summary.get("git_commit"),
             "outputDir": summary.get("run_dir") or "",
@@ -1119,6 +1136,15 @@ def _run_op(config: ResearchConfig, summary: dict[str, Any], experiment_ref: str
             "noHardcodedLabelsOrColors": bool(summary.get("no_hardcoded_labels_or_colors")),
         },
     }
+
+
+def _summary_actor_model(summary: dict[str, Any]) -> str:
+    actor_model = str(summary.get("actor_model") or "").strip()
+    if actor_model:
+        return actor_model
+    if str(summary.get("runner") or "") == "qwen":
+        return str(summary.get("qwen_model") or summary.get("model") or "")
+    return str(summary.get("model") or "")
 
 
 def _artifact_ops(summary: dict[str, Any], run_ref: str) -> list[dict[str, Any]]:

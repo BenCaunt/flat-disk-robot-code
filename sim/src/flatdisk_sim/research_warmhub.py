@@ -828,6 +828,8 @@ def _run_item_summary(item: dict[str, Any]) -> dict[str, Any]:
         "trial_id": data.get("trialId"),
         "runner": data.get("runner"),
         "model": data.get("model"),
+        "actor_model": data.get("actorModel"),
+        "qwen_model": data.get("qwenModel"),
         "success": data.get("success"),
         "final_distance_m": data.get("finalDistanceM"),
         "reason": data.get("reason"),
@@ -1595,6 +1597,7 @@ def _format_status_text(snapshot: dict[str, Any]) -> str:
                 for part in [
                     run.get("trial_id") or run.get("wref"),
                     run.get("variant"),
+                    run.get("actor_model") or run.get("model"),
                     run.get("success"),
                     run.get("reason"),
                     run.get("final_distance_m"),

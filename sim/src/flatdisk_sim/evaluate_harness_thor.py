@@ -211,6 +211,9 @@ def run_thor_harness_episode(
         "target_types": spec.target_types,
         "success_radius_m": spec.success_radius_m,
         "model": model,
+        "actor_model": _actor_model_for_runner(runner="codex" if live_codex else runner, model=model, qwen_model=qwen_model),
+        "qwen_model": qwen_model if (runner == "qwen" and not live_codex) else None,
+        "qwen_endpoint": qwen_endpoint if (runner == "qwen" and not live_codex) else None,
         "reasoning_effort": reasoning_effort,
         "runner": "codex" if live_codex else runner,
         "live_codex": live_codex,
@@ -242,6 +245,12 @@ def run_thor_harness_episode(
     }
     (run_dir / "episode_summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return summary
+
+
+def _actor_model_for_runner(*, runner: str, model: str, qwen_model: str) -> str:
+    if runner == "qwen":
+        return qwen_model
+    return model
 
 
 def _evaluator_distance_metrics(

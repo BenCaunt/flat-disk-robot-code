@@ -58,6 +58,8 @@ def test_research_loop_dry_run_writes_trial_matrix_and_warmhub_bundle(tmp_path) 
     assert {"NavExperiment", "PromptVariant", "NavEvalRun", "FailureObservation"} <= set(shapes)
     assert shapes["PromptVariant"]["fields"]["noHardcodedLabelsOrColors"] == "boolean"
     assert shapes["NavEvalRun"]["fields"]["bestDistanceM?"] == "number"
+    assert shapes["NavEvalRun"]["fields"]["actorModel"] == "string"
+    assert shapes["NavEvalRun"]["fields"]["qwenModel?"] == "string"
     assert shapes["RunAssessment"]["fields"]["finalToBestRegressionM?"] == "number"
     assert shapes["PromotionDecision"]["fields"]["status"]["enum"] == ["promote", "reject"]
     assert shapes["TrainingReadiness"]["fields"]["grpoReady"] == "boolean"
@@ -241,6 +243,8 @@ def test_warmhub_ops_record_failed_run_artifacts_and_failure_observation(tmp_pat
         "episode": "living_room_sofa",
         "runner": "qwen",
         "model": "gpt-5.5",
+        "qwen_model": "Qwen/Qwen3-VL-8B-Instruct",
+        "qwen_endpoint": "http://127.0.0.1:8000/v1/chat/completions",
         "run_dir": str(run_dir),
         "policy_dir": str(policy_dir),
         "evaluator_only_dir": str(evaluator_dir),
@@ -283,6 +287,10 @@ def test_warmhub_ops_record_failed_run_artifacts_and_failure_observation(tmp_pat
     assert "NavArtifact/trial_failed_policy_review_trace_json" in names
     run = next(op for op in ops if op["name"] == "NavEvalRun/trial_failed")
     assessment = next(op for op in ops if op["name"] == "RunAssessment/trial_failed")
+    assert run["data"]["model"] == "gpt-5.5"
+    assert run["data"]["actorModel"] == "Qwen/Qwen3-VL-8B-Instruct"
+    assert run["data"]["qwenModel"] == "Qwen/Qwen3-VL-8B-Instruct"
+    assert run["data"]["qwenEndpoint"] == "http://127.0.0.1:8000/v1/chat/completions"
     assert run["data"]["bestDistanceM"] == 0.42
     assert assessment["data"]["finalToBestRegressionM"] == 0.81
     failure = next(op for op in ops if op["name"] == "FailureObservation/trial_failed")

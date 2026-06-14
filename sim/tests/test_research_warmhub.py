@@ -681,6 +681,10 @@ def test_warmhub_status_snapshot_summarizes_queue_runs_and_next_actions(monkeypa
                             "experiment": "NavExperiment/exp@v1",
                             "trialId": "trial-a",
                             "variant": "PromptVariant/variant-a",
+                            "runner": "qwen",
+                            "model": "gpt-5.5",
+                            "actorModel": "Qwen/Qwen3-VL-8B-Instruct",
+                            "qwenModel": "Qwen/Qwen3-VL-8B-Instruct",
                             "success": False,
                             "reason": "max_steps_exhausted",
                             "finalDistanceM": 1.4,
@@ -749,6 +753,9 @@ def test_warmhub_status_snapshot_summarizes_queue_runs_and_next_actions(monkeypa
 
     assert snapshot["task_counts"]["planned"] == 2
     assert snapshot["run_counts"] == {"total": 1, "success": 0, "failed": 1}
+    assert snapshot["recent_runs"][0]["model"] == "gpt-5.5"
+    assert snapshot["recent_runs"][0]["actor_model"] == "Qwen/Qwen3-VL-8B-Instruct"
+    assert snapshot["recent_runs"][0]["qwen_model"] == "Qwen/Qwen3-VL-8B-Instruct"
     assert snapshot["recent_failures"][0]["summary"] == "stalled near doorway"
     assert snapshot["recent_failures"][0]["category"] == "navigation_failure"
     assert snapshot["recent_failures"][0]["severity"] == "medium"

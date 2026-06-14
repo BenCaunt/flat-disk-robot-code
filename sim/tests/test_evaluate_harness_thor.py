@@ -133,6 +133,9 @@ def test_thor_harness_eval_keeps_hidden_logs_outside_policy_dir(tmp_path, monkey
     assert hidden_dir.name == "evaluator_hidden"
     assert hidden_dir.parent == policy_dir.parent
     assert not (policy_dir / "evaluator_hidden").exists()
+    assert summary["model"] == "gpt-5.5"
+    assert summary["actor_model"] == "gpt-5.5"
+    assert summary["qwen_model"] is None
     assert summary["success"] is True
     assert summary["prompt_audit"]["forbidden_tokens_found"] == []
     assert summary["camera_contact_sheet"]
