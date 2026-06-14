@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter, defaultdict
 import hashlib
 import importlib.util
 import json
@@ -42,6 +43,8 @@ def plan_qwen_grpo_training(
     num_generations: int = 2,
     max_completion_length: int = 96,
     reward_scale: float = 1.0,
+    balance_reference_tools: bool = False,
+    max_balance_multiplier: int = 4,
     require_existing_images: bool = True,
 ) -> dict[str, Any]:
     grpo_manifest_path = _resolve_qwen_grpo_manifest(input_path)
@@ -58,7 +61,12 @@ def plan_qwen_grpo_training(
     train_script_path = output_dir / "train_qwen_grpo_trl.py"
     job_path = output_dir / "qwen_grpo_training_job.json"
     completion_log_path = adapter_output_dir / "completion_samples.jsonl"
-    dataset_records = _trl_dataset_records(ppo_step_records)
+    raw_dataset_records = _trl_dataset_records(ppo_step_records)
+    dataset_records = (
+        _balance_dataset_records_by_reference_tool(raw_dataset_records, max_multiplier=max_balance_multiplier)
+        if balance_reference_tools
+        else raw_dataset_records
+    )
     _write_jsonl(dataset_path, dataset_records)
     validation = _validate_grpo_job_inputs(
         manifest,
@@ -130,6 +138,10 @@ def plan_qwen_grpo_training(
             "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
         },
         "dataset": validation["dataset"],
+        "dataset_action_audit": {
+            "before_balancing": _grpo_dataset_action_summary(raw_dataset_records),
+            "after_balancing": _grpo_dataset_action_summary(dataset_records),
+        },
         "audit": {
             "prompt_only_dataset": True,
             "reward_labels_excluded_from_messages": True,
@@ -137,6 +149,12 @@ def plan_qwen_grpo_training(
             "require_existing_images": require_existing_images,
             "offline_replay_reward": True,
             "online_environment_reward": False,
+            "reference_tool_balancing": {
+                "enabled": balance_reference_tools,
+                "max_multiplier": max_balance_multiplier if balance_reference_tools else 1,
+                "sample_count_before": len(raw_dataset_records),
+                "sample_count_after": len(dataset_records),
+            },
         },
     }
     job_path.write_text(json.dumps(job, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -319,6 +337,99 @@ def _trl_dataset_records(ppo_step_records: list[dict[str, Any]]) -> list[dict[st
             }
         )
     return records
+
+
+def _balance_dataset_records_by_reference_tool(
+    records: list[dict[str, Any]], *, max_multiplier: int
+) -> list[dict[str, Any]]:
+    if not records:
+        return []
+    multiplier = max(1, int(max_multiplier or 1))
+    if multiplier <= 1:
+        return list(records)
+
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for record in records:
+        groups[_reference_tool(record)].append(record)
+    if len(groups) <= 1:
+        return list(records)
+
+    target_count = max(len(group) for group in groups.values())
+    desired_counts = {
+        tool: min(target_count, len(tool_records) * multiplier) for tool, tool_records in groups.items()
+    }
+    if all(desired_counts[tool] == len(tool_records) for tool, tool_records in groups.items()):
+        return list(records)
+
+    balanced: list[dict[str, Any]] = []
+    for offset in range(max(desired_counts.values())):
+        for tool in sorted(groups):
+            tool_records = groups[tool]
+            if offset >= desired_counts[tool]:
+                continue
+            source = tool_records[offset % len(tool_records)]
+            if offset < len(tool_records):
+                balanced.append(source)
+                continue
+            duplicate = dict(source)
+            original_sample_id = str(source.get("sample_id") or f"{tool}_{offset % len(tool_records)}")
+            duplicate["balance_original_sample_id"] = original_sample_id
+            duplicate["balance_copy_index"] = offset // len(tool_records)
+            duplicate["sample_id"] = f"{original_sample_id}_balance_copy{duplicate['balance_copy_index']:02d}"
+            balanced.append(duplicate)
+    return balanced
+
+
+def _grpo_dataset_action_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
+    tool_counts = Counter(_reference_tool(record) for record in records)
+    arg_key_counts: dict[str, Counter[str]] = defaultdict(Counter)
+    rewards_by_tool: dict[str, list[float]] = defaultdict(list)
+    for record in records:
+        tool = _reference_tool(record)
+        action = record.get("reference_action_json") if isinstance(record.get("reference_action_json"), dict) else {}
+        args = action.get("args") if isinstance(action.get("args"), dict) else {}
+        arg_key_counts[tool].update(str(key) for key in args)
+        rewards_by_tool[tool].append(float(_optional_float(record.get("candidate_step_reward")) or 0.0))
+    return {
+        "sample_count": len(records),
+        "reference_action_tool_counts": dict(sorted(tool_counts.items())),
+        "reference_action_arg_key_counts": {
+            tool: dict(sorted(counts.items())) for tool, counts in sorted(arg_key_counts.items())
+        },
+        "candidate_step_reward_by_tool": {
+            tool: _reward_summary(values) for tool, values in sorted(rewards_by_tool.items())
+        },
+        "terminal_count": sum(bool(record.get("terminal")) for record in records),
+        "balanced_copy_count": sum(1 for record in records if "balance_original_sample_id" in record),
+    }
+
+
+def _reference_tool(record: dict[str, Any]) -> str:
+    action = record.get("reference_action_json") if isinstance(record.get("reference_action_json"), dict) else {}
+    tool = action.get("tool")
+    return str(tool) if tool else "unknown"
+
+
+def _reward_summary(values: list[float]) -> dict[str, Any]:
+    if not values:
+        return {
+            "count": 0,
+            "min": 0.0,
+            "mean": 0.0,
+            "max": 0.0,
+            "negative_count": 0,
+            "zero_count": 0,
+            "positive_count": 0,
+        }
+    return {
+        "count": len(values),
+        "min": round(min(values), 6),
+        "mean": round(sum(values) / len(values), 6),
+        "max": round(max(values), 6),
+        "negative_count": sum(value < 0 for value in values),
+        "zero_count": sum(value == 0 for value in values),
+        "positive_count": sum(value > 0 for value in values),
+    }
 
 
 def _append_grpo_response_contract(messages: Any) -> list[dict[str, Any]]:
@@ -996,6 +1107,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-generations", type=int, default=2)
     parser.add_argument("--max-completion-length", type=int, default=96)
     parser.add_argument("--reward-scale", type=float, default=1.0)
+    parser.add_argument(
+        "--balance-reference-tools",
+        action="store_true",
+        help="Deterministically duplicate underrepresented reference-action tool families in the TRL dataset.",
+    )
+    parser.add_argument(
+        "--max-balance-multiplier",
+        type=int,
+        default=4,
+        help="Maximum per-sample duplication multiplier when --balance-reference-tools is enabled.",
+    )
     parser.add_argument("--allow-missing-images", action="store_true")
     parser.add_argument("--fail-on-not-ready", action="store_true")
     return parser.parse_args()
@@ -1015,6 +1137,8 @@ def main() -> int:
         num_generations=args.num_generations,
         max_completion_length=args.max_completion_length,
         reward_scale=args.reward_scale,
+        balance_reference_tools=args.balance_reference_tools,
+        max_balance_multiplier=args.max_balance_multiplier,
         require_existing_images=not args.allow_missing_images,
     )
     print(
@@ -1022,6 +1146,10 @@ def main() -> int:
             {
                 "status": job["status"],
                 "sample_count": job["dataset"]["sample_count"],
+                "reference_action_tool_counts": job["dataset_action_audit"]["after_balancing"][
+                    "reference_action_tool_counts"
+                ],
+                "reference_tool_balancing": job["audit"]["reference_tool_balancing"],
                 "trainable_group_count": job["dataset"]["trainable_group_count"],
                 "missing_image_count": job["dataset"]["missing_image_count"],
                 "forbidden_model_token_hits": job["dataset"]["forbidden_model_token_hits"],

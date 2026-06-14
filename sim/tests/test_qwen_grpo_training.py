@@ -264,6 +264,36 @@ def _write_ready_grpo_handoff(tmp_path: Path) -> Path:
     return tmp_path / "run" / "qwen_grpo_training"
 
 
+def test_reference_tool_balancer_duplicates_underrepresented_tools_generically() -> None:
+    records = [
+        {
+            "sample_id": "a",
+            "reference_action_json": {"tool": "alpha_tool", "args": {"x": 1}},
+            "candidate_step_reward": 0.2,
+        },
+        {
+            "sample_id": "b",
+            "reference_action_json": {"tool": "beta_tool", "args": {"y": 1}},
+            "candidate_step_reward": 0.0,
+        },
+        {
+            "sample_id": "c",
+            "reference_action_json": {"tool": "beta_tool", "args": {"y": 2}},
+            "candidate_step_reward": -0.1,
+        },
+    ]
+
+    balanced = qwen_grpo_job._balance_dataset_records_by_reference_tool(records, max_multiplier=4)
+    summary = qwen_grpo_job._grpo_dataset_action_summary(balanced)
+
+    assert len(balanced) == 4
+    assert summary["reference_action_tool_counts"] == {"alpha_tool": 2, "beta_tool": 2}
+    assert summary["balanced_copy_count"] == 1
+    duplicate = next(record for record in balanced if record.get("balance_original_sample_id"))
+    assert duplicate["balance_original_sample_id"] == "a"
+    assert duplicate["sample_id"] == "a_balance_copy01"
+
+
 def test_plan_qwen_grpo_training_uses_existing_manifest_and_writes_job(tmp_path: Path) -> None:
     grpo_dir = _write_ready_grpo_handoff(tmp_path)
 
@@ -286,6 +316,14 @@ def test_plan_qwen_grpo_training_uses_existing_manifest_and_writes_job(tmp_path:
     assert job["dataset"]["image_reference_count"] == 2
     assert job["dataset"]["missing_image_count"] == 0
     assert job["dataset"]["forbidden_model_token_hits"] == []
+    assert job["dataset_action_audit"]["before_balancing"]["reference_action_tool_counts"] == {"drive_straight": 2}
+    assert job["dataset_action_audit"]["after_balancing"]["reference_action_tool_counts"] == {"drive_straight": 2}
+    assert job["audit"]["reference_tool_balancing"] == {
+        "enabled": False,
+        "max_multiplier": 1,
+        "sample_count_after": 2,
+        "sample_count_before": 2,
+    }
     assert job["training_args"]["max_steps"] == 7
     assert job["training_args"]["num_generations"] == 3
     assert job["training_args"]["max_completion_length"] == 96
