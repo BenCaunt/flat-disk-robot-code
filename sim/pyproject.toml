@@ -67,6 +67,7 @@ flatdisk-sim-convert-topological-graph = "flatdisk_sim.topological_graph_adapter
 flatdisk-sim-export-nav-training = "flatdisk_sim.training_export:main"
 flatdisk-sim-prepare-qwen-tool-training = "flatdisk_sim.qwen_tool_training:main"
 flatdisk-sim-analyze-nav-failures = "flatdisk_sim.failure_analysis:main"
+flatdisk-sim-nav-promotion-gate = "flatdisk_sim.promotion_gate:main"
 flatdisk-sim-detector-doctor = "flatdisk_sim.detector_doctor:main"
 
 [build-system]
