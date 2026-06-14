@@ -823,7 +823,29 @@ def test_warmhub_status_text_includes_failure_diagnostics() -> None:
             "repo": "repo/example",
             "related_experiment": None,
             "task_counts": {"planned": 0, "running": 0, "complete": 0, "failed": 0, "blocked": 0},
-            "tasks": {"planned": [], "running": [], "complete": [], "failed": [], "blocked": []},
+            "tasks": {
+                "planned": [],
+                "running": [
+                    {
+                        "wref": "AgentTask/run-active",
+                        "owner": "agent-a",
+                        "updated_at": "2026-06-14T08:11:13Z",
+                        "tags": ["trial-slice", "qwen", "runpod"],
+                        "objective": "Run active trial slice.",
+                    }
+                ],
+                "complete": [],
+                "failed": [],
+                "blocked": [
+                    {
+                        "wref": "AgentTask/run-blocked",
+                        "owner": "unassigned",
+                        "updated_at": "2026-06-14T02:37:43Z",
+                        "tags": ["trial-slice", "qwen"],
+                        "objective": "Blocked on prerequisite.",
+                    }
+                ],
+            },
             "recent_runs": [],
             "run_counts": {"total": 0, "success": 0, "failed": 0},
             "recent_failures": [
@@ -835,15 +857,29 @@ def test_warmhub_status_text_includes_failure_diagnostics() -> None:
                     "next_action": "try waypoint-assisted exploration",
                 }
             ],
-            "recent_subagent_results": [],
+            "recent_subagent_results": [
+                {
+                    "about": "AgentTask/run-active",
+                    "status": "complete",
+                    "agent": "agent-a",
+                    "summary": "Finished a bounded run and recorded artifacts.",
+                    "next_action": "review artifacts",
+                }
+            ],
             "recent_promotion_decisions": [],
             "recent_training_readiness": [],
             "next_actions": [],
         }
     )
 
+    assert "Running tasks:" in text
+    assert "AgentTask/run-active | owner=agent-a | updated=2026-06-14T08:11:13Z" in text
+    assert "Blocked tasks:" in text
+    assert "AgentTask/run-blocked | owner=unassigned | updated=2026-06-14T02:37:43Z" in text
     assert "navigation_failure | medium | stalled near doorway" in text
     assert "next: try waypoint-assisted exploration" in text
+    assert "Recent subagent results:" in text
+    assert "AgentTask/run-active: complete by agent-a | Finished a bounded run and recorded artifacts. | next: review artifacts" in text
 
 
 def test_warmhub_status_cli_prints_json(monkeypatch, capsys) -> None:

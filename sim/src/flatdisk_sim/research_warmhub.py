@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import time
 from typing import Any
@@ -1569,10 +1570,21 @@ def _format_status_text(snapshot: dict[str, Any]) -> str:
                 f"{status}={counts.get(status, 0)}"
                 for status in TASK_STATUSES
             ),
-            "",
-            "Recent runs:",
         ]
     )
+    running_tasks = snapshot.get("tasks", {}).get("running", [])
+    if running_tasks:
+        lines.append("")
+        lines.append("Running tasks:")
+        for task in running_tasks[:5]:
+            lines.append("  - " + _format_status_task_line(task))
+    blocked_tasks = snapshot.get("tasks", {}).get("blocked", [])
+    if blocked_tasks:
+        lines.append("")
+        lines.append("Blocked tasks:")
+        for task in blocked_tasks[:5]:
+            lines.append("  - " + _format_status_task_line(task))
+    lines.extend(["", "Recent runs:"])
     run_counts = snapshot.get("run_counts", {})
     lines.append(f"  total={run_counts.get('total', 0)}, success={run_counts.get('success', 0)}, failed={run_counts.get('failed', 0)}")
     for run in snapshot.get("recent_runs", [])[:5]:
@@ -1619,6 +1631,21 @@ def _format_status_text(snapshot: dict[str, Any]) -> str:
             if failure.get("next_action"):
                 line += f" | next: {failure.get('next_action')}"
             lines.append(line)
+    if snapshot.get("recent_subagent_results"):
+        lines.append("")
+        lines.append("Recent subagent results:")
+        for result in snapshot["recent_subagent_results"][:5]:
+            line = (
+                f"  - {result.get('about') or result.get('wref')}: "
+                f"{result.get('status') or 'unknown'}"
+            )
+            if result.get("agent"):
+                line += f" by {result.get('agent')}"
+            if result.get("summary"):
+                line += f" | {_status_text_snippet(str(result.get('summary')))}"
+            if result.get("next_action"):
+                line += f" | next: {result.get('next_action')}"
+            lines.append(line)
     if snapshot.get("recent_promotion_decisions"):
         lines.append("")
         lines.append("Recent promotion decisions:")
@@ -1639,6 +1666,27 @@ def _format_status_text(snapshot: dict[str, Any]) -> str:
     for action in snapshot.get("next_actions", []):
         lines.append(f"  - {action}")
     return "\n".join(lines)
+
+
+def _format_status_task_line(task: dict[str, Any]) -> str:
+    parts = [str(task.get("wref") or task.get("name") or "")]
+    if task.get("owner"):
+        parts.append(f"owner={task.get('owner')}")
+    if task.get("updated_at"):
+        parts.append(f"updated={task.get('updated_at')}")
+    tags = task.get("tags")
+    if isinstance(tags, list) and tags:
+        parts.append("tags=" + ",".join(str(tag) for tag in tags[:4]))
+    if task.get("objective"):
+        parts.append(_status_text_snippet(str(task.get("objective"))))
+    return " | ".join(part for part in parts if part)
+
+
+def _status_text_snippet(text: str, *, limit: int = 220) -> str:
+    compact = re.sub(r"\s+", " ", text).strip()
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3].rstrip() + "..."
 
 
 def _read_warmhub_json(command: list[str]) -> dict[str, Any]:
