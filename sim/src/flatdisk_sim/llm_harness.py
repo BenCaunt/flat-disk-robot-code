@@ -1156,7 +1156,8 @@ def build_actor_prompt(
         "query_topomap_memory is a non-motion lookup; use it when route/image memory could help choose where to explore next, then inspect its returned contact sheet on the next step.",
         "Treat topomap route hints as memory evidence, not ground-truth completion; prefer the live camera when topomap memory disagrees with the current RGB frame.",
         "If the latest RGB frame or previous motion strip shows the described goal object or goal region very close in the foreground, dominating the frame, or cropped by the bottom/side edge, treat that as arrival evidence.",
-        "If a same-goal visual_servo_object returns no_detection after close foreground or cropped goal evidence, choose stop and write memory_update.arrival_evidence instead of turning solely to reacquire the detector box.",
+        "If a same-goal visual_servo_object returns no_detection after close foreground or cropped goal evidence, stop only when the latest RGB frame independently still shows clear arrival; otherwise re-check the view or change prompt/viewpoint.",
+        "When choosing stop for completion, write memory_update.arrival_evidence with the latest RGB evidence supporting the completion assertion.",
         "The JSON action is the only command executed. Before returning, verify action.tool and action.args agree with thought, grounding_audit, and action_history_summary.",
         "If visual_servo_object reports moved=false or failure_reason, switch strategy with a bounded turn or drive instead of waiting.",
         "The harness already captures a fresh observation before each actor call; do not request another observation as your action.",
@@ -1513,9 +1514,9 @@ def action_history_summary(records: list[dict[str, Any]], limit: int = PROMPT_ME
             and close_evidence_steps
             and last_attempt_failed
         ):
-            summary["stop_is_valid_after_close_no_detection"] = {
+            summary["close_no_detection_requires_latest_visual_confirmation"] = {
                 "prompt": last_prompt,
-                "reason": "recent model-visible memory recorded close/foreground/cropped/arrival evidence and the same-prompt servo returned no_detection",
+                "reason": "recent model-visible memory recorded close/foreground/cropped/arrival evidence and the same-prompt servo returned no_detection; stop only if the latest RGB independently confirms arrival",
             }
     return compact_prompt_value(summary)
 

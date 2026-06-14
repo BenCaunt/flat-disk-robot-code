@@ -232,6 +232,7 @@ def test_actor_prompt_declares_camera_image_authoritative_and_strips_legacy_dete
     assert "recent_turn_oscillation" in prompt
     assert "treat that as arrival evidence" in prompt
     assert "same-goal visual_servo_object returns no_detection" in prompt
+    assert "latest RGB frame independently still shows clear arrival" in prompt
     assert "memory_update.arrival_evidence" in prompt
     assert "visual_servo_object reports moved=false or failure_reason" in prompt
     assert "fill grounding_audit before choosing an action" in prompt
@@ -407,7 +408,7 @@ def test_action_history_summary_surfaces_audit_conflict_and_arrival_stop_cue() -
 
     assert summary["same_prompt_visual_servo_attempt_count"] == 2
     assert summary["same_prompt_repeat_is_contradicted_by_prior_audit"]["prompt"] == "goal object"
-    assert summary["stop_is_valid_after_close_no_detection"]["prompt"] == "goal object"
+    assert summary["close_no_detection_requires_latest_visual_confirmation"]["prompt"] == "goal object"
     assert summary["latest_grounding_audit"]["next_prompt_should_change"] is True
 
 
