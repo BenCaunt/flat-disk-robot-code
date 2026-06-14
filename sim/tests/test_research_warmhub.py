@@ -231,6 +231,12 @@ def test_task_plan_config_creates_planned_slice_tasks(tmp_path) -> None:
     assert analysis_notes["commands"][0].startswith("uv run --project sim flatdisk-sim-analyze-nav-failures")
     assert "--input sim/scratch/open_vocab_nav_research_loop" in analysis_notes["commands"][0]
     assert "--commit-warmhub" in analysis_notes["commands"][0]
+    training_review = next(op for op in ops if op["name"] == "AgentTask/plan-001-training-review")
+    training_notes = json.loads(training_review["data"]["notes"])
+    assert training_notes["commands"][0].startswith("uv run --project sim flatdisk-sim-nav-training-readiness")
+    assert "--input sim/scratch/open_vocab_nav_research_loop" in training_notes["commands"][0]
+    assert "--commit-warmhub" in training_notes["commands"][0]
+    assert "training_readiness/training_readiness.json" in training_notes["expected_artifacts"]
 
 
 def test_task_finish_ops_write_subagent_result() -> None:

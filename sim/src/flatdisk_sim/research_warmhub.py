@@ -416,10 +416,21 @@ def make_task_plan_ops(
             tags=[*common_tags, "training-export", "grpo"],
             prerequisites=run_task_refs,
             notes={
+                "commands": [
+                    (
+                        "uv run --project sim flatdisk-sim-nav-training-readiness "
+                        f"--input {output_dir} "
+                        f"--output-dir {output_dir / 'training_readiness' / plan_name} "
+                        f"--experiment-id {config.experiment_id} "
+                        f"--about {experiment_ref} "
+                        "--commit-warmhub"
+                    )
+                ],
                 "expected_artifacts": [
                     "training_export/policy_steps.jsonl",
                     "training_export/episode_rollouts.jsonl",
                     "training_export/training_manifest.json",
+                    "training_readiness/training_readiness.json",
                 ],
                 "checks": [
                     "Policy inputs contain no hidden target/object metadata.",
