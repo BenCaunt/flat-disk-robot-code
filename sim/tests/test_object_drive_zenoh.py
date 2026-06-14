@@ -4,6 +4,7 @@ import math
 from pathlib import Path
 import sys
 import time
+import types
 
 from PIL import Image, ImageDraw
 
@@ -20,6 +21,7 @@ from object_drive_zenoh import (  # noqa: E402
     TargetBearingKalman,
     _detections_from_parsed,
     _image_gray,
+    _patch_florence_forced_bos_token_id,
     bbox_center_x_from_bearing_rad,
     clipped_cos,
     command_from_bbox,
@@ -99,6 +101,19 @@ def test_closest_prompt_prefers_lower_larger_non_oversized_box() -> None:
 
 def test_grounding_dino_prompt_removes_closest_and_negative_qualifiers() -> None:
     assert grounding_dino_prompt("closest individual chair, not the table") == "chair."
+
+
+def test_florence_forced_bos_patch_sets_class_default(monkeypatch) -> None:
+    class Florence2LanguageConfig:
+        pass
+
+    module = types.SimpleNamespace(Florence2LanguageConfig=Florence2LanguageConfig)
+    monkeypatch.setitem(sys.modules, "fake_florence_remote_config_for_test", module)
+
+    patched = _patch_florence_forced_bos_token_id()
+
+    assert patched >= 1
+    assert Florence2LanguageConfig.forced_bos_token_id is None
 
 
 def test_klt_tracker_replays_late_detection_to_current_frame() -> None:

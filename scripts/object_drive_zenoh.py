@@ -336,12 +336,25 @@ class FlorenceTransformersDetector:
         self.device = torch.device(device)
         dtype = torch.float16 if self.device.type in {"cuda", "mps"} else torch.float32
         self.dtype = dtype
-        self.processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            torch_dtype=dtype,
-            trust_remote_code=True,
-        ).to(self.device)
+        try:
+            self.processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_path,
+                torch_dtype=dtype,
+                trust_remote_code=True,
+            ).to(self.device)
+        except AttributeError as exc:
+            if "forced_bos_token_id" not in str(exc):
+                raise
+            patched = _patch_florence_forced_bos_token_id()
+            if patched == 0:
+                raise
+            self.processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_path,
+                torch_dtype=dtype,
+                trust_remote_code=True,
+            ).to(self.device)
         self.model.eval()
         self.max_tokens = max_tokens
 
