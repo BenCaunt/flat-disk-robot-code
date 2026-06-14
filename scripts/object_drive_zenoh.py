@@ -37,6 +37,7 @@ from flatdisk_robot_client import (  # noqa: E402
 DEFAULT_MODEL = "mlx-community/Florence-2-base-ft-4bit"
 DEFAULT_HFOV_DEG = 68.0
 AUTO_RERUN_SAVE = Path("__auto__")
+FLORENCE_OBJECT_DETECTION_TASK = "<OPEN_VOCABULARY_DETECTION>"
 
 
 @dataclass(frozen=True)
@@ -294,7 +295,7 @@ class FlorenceMlxDetector:
         self.temperature = temperature
 
     def detect(self, image: Image.Image, prompt: str) -> tuple[Detection, ...]:
-        task = "<CAPTION_TO_PHRASE_GROUNDING>"
+        task = FLORENCE_OBJECT_DETECTION_TASK
         text_prompt = task + prompt.strip().rstrip(".") + "."
         started = time.perf_counter()
         formatted_prompt = text_prompt
@@ -351,7 +352,7 @@ class FlorenceTransformersDetector:
         self.max_tokens = max_tokens
 
     def detect(self, image: Image.Image, prompt: str) -> tuple[Detection, ...]:
-        task = "<CAPTION_TO_PHRASE_GROUNDING>"
+        task = FLORENCE_OBJECT_DETECTION_TASK
         text_prompt = task + prompt.strip().rstrip(".") + "."
         inputs = self.processor(text=text_prompt, images=image, return_tensors="pt").to(self.device, self.dtype)
         with self.torch.inference_mode():

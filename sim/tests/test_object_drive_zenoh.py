@@ -16,6 +16,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 from flatdisk_robot_client import ImuSample, VideoFrame  # noqa: E402
 from object_drive_zenoh import (  # noqa: E402
     Detection,
+    FLORENCE_OBJECT_DETECTION_TASK,
     FrameState,
     KltBoxTracker,
     TargetBearingKalman,
@@ -65,7 +66,7 @@ def test_command_from_right_bbox_turns_right_and_slows_forward() -> None:
 
 def test_florence_post_processed_detection_prefers_matching_label() -> None:
     parsed = {
-        "<CAPTION_TO_PHRASE_GROUNDING>": {
+        FLORENCE_OBJECT_DETECTION_TASK: {
             "bboxes": [[10, 20, 110, 180], [200, 50, 260, 120]],
             "labels": ["chair", "lamp"],
         }
@@ -73,7 +74,7 @@ def test_florence_post_processed_detection_prefers_matching_label() -> None:
 
     detections = _detections_from_parsed(
         parsed,
-        task="<CAPTION_TO_PHRASE_GROUNDING>",
+        task=FLORENCE_OBJECT_DETECTION_TASK,
         prompt="chair",
         source="test",
         raw="",
