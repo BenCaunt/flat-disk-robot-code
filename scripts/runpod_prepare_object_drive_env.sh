@@ -6,7 +6,7 @@
 set -Eeuo pipefail
 
 OBJECT_DRIVE_VENV="${OBJECT_DRIVE_VENV:-/workspace/open_vocab_nav_object_drive_venv}"
-OBJECT_DRIVE_PACKAGES="${OBJECT_DRIVE_PACKAGES:-torch,transformers,timm,einops}"
+OBJECT_DRIVE_PACKAGES="${OBJECT_DRIVE_PACKAGES:-torch,transformers<5,timm,einops}"
 OBJECT_DRIVE_PYTHON="${FLATDISK_OBJECT_DRIVE_PYTHON:-${OBJECT_DRIVE_VENV}/bin/python}"
 
 needs_install=0
@@ -24,6 +24,10 @@ if [[ "${needs_install}" == 0 ]]; then
 import importlib
 for name in ("numpy", "PIL", "torch", "transformers", "timm", "einops", "zenoh"):
     importlib.import_module(name)
+transformers = importlib.import_module("transformers")
+major = int(transformers.__version__.split(".", 1)[0])
+if major >= 5:
+    raise RuntimeError(f"object-drive Florence requires transformers<5, found {transformers.__version__}")
 PY
   then
     needs_install=1
@@ -49,5 +53,9 @@ fi
 import importlib
 for name in ("numpy", "PIL", "torch", "transformers", "timm", "einops", "zenoh"):
     importlib.import_module(name)
+transformers = importlib.import_module("transformers")
+major = int(transformers.__version__.split(".", 1)[0])
+if major >= 5:
+    raise RuntimeError(f"object-drive Florence requires transformers<5, found {transformers.__version__}")
 print("[object-drive-env] dependency import check passed")
 PY
