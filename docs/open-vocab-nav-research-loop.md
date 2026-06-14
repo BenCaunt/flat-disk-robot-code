@@ -492,6 +492,24 @@ trajectory reward was positive. The reward function now caps non-reference
 parsed actions at a negative reward and invalid JSON at a stronger negative
 reward before scaling.
 
+A reward-cap 4-step run then completed in
+`/workspace/flat-disk-robot-code-train-20260614-grpo-rewardcap4`, from commit
+`6f93b6c`:
+
+- Result:
+  `sim/scratch/open_vocab_nav_research_loop/qwen_grpo_jobs/bathroom_cross_run_lora_4step_cap48_reward_cap/qwen_grpo_training_result.json`
+- Status `complete`, return code `0`, duration `1919.723` seconds.
+- `completion_log_sample_count` was `32`.
+- `completion_log_metrics`: `32/32` parsed actions, `12/32` exact reference
+  actions, `0` markdown fences, `0` truncated texts, and mean completion length
+  `92.938` characters.
+- TRL metrics: train runtime about `1673` seconds, train loss `-0.01638`,
+  reward mean `-0.1365`, reward std `0.1809`, and
+  `completions/clipped_ratio=0`.
+- Manual comparison against the pre-cap 4-step run showed positive rewards for
+  non-reference actions dropped from `5` to `0`, while exact reference actions
+  improved from `9/32` to `12/32`.
+
 Resume status for a future continuation:
 
 - This is no longer a verification-only blocker. Runpod auth works when
@@ -502,12 +520,13 @@ Resume status for a future continuation:
 - Use the pushed `codex/open-vocab-nav-research-loop` ref for a clean checkout;
   the original `/workspace/flat-disk-robot-code` directory on the pod is not a
   git repo.
-- The next useful experiment is a capped LoRA run from the reward-cap commit or
-  later, followed by automated inspection of `completion_log_metrics`. If the
-  exact reference action rate remains low, tune the reward/data; the JSON-format
-  issue is no longer the main blocker. Keep `--max-completion-length` explicit
-  so smoke and short training jobs cannot spend most of their time generating
-  long completions.
+- The next useful experiment is reward/data tuning for action choice. The
+  JSON-format issue is no longer the main blocker; exact reference action rate
+  is still only `12/32` on the logged reward-cap run. Useful next directions are
+  tool-family reward components, balancing visual-servo/check/turn examples, or
+  collecting more diverse grouped rollouts. Keep `--max-completion-length`
+  explicit so smoke and short training jobs cannot spend most of their time
+  generating long completions.
 
 The fixes needed to make the smoke complete were:
 

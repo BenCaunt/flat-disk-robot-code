@@ -172,6 +172,15 @@ Current handoff for GRPO training, 2026-06-14:
   actions cannot receive positive reward from a positive source trajectory
   reward. The next run should use this reward cap before judging action-choice
   learning.
+- A 4-step reward-cap run from commit `6f93b6c` completed in
+  `/workspace/flat-disk-robot-code-train-20260614-grpo-rewardcap4`.
+  `qwen_grpo_training_result.json` reports `status=complete`, `returncode=0`,
+  `duration_s=1919.723`, `completion_log_sample_count=32`, and
+  `completion_log_metrics` with `32/32` parsed actions, `12/32` exact reference
+  actions, `0` markdown fences, and `0` truncated texts. TRL reported
+  `completions/clipped_ratio=0`, reward mean `-0.1365`, reward std `0.1809`,
+  and train loss `-0.01638`. Manual comparison against the pre-cap 4-step run
+  showed positive rewards for non-reference actions dropped from 5 to 0.
 - The working pod venv is `/workspace/flatdisk-grpo-venv`, created with
   `--system-site-packages` so it can see image Torch `2.9.1+cu128`; install
   `torchvision==0.24.1 --no-deps` to match that Torch build. Do not let pip pull
@@ -180,10 +189,10 @@ Current handoff for GRPO training, 2026-06-14:
   the separate `images` column, use PEFT LoRA, and cap generation length for
   smoke jobs. Full-model Adam OOMs on A40; uncapped generation makes "tiny"
   smoke runs unreasonably long.
-- Next action is to run a capped LoRA job from the reward-cap commit or later
-  and inspect `completion_log_metrics` in `qwen_grpo_training_result.json`; if
-  exact reference rate remains low, tune reward/data rather than the JSON
-  format.
+- Next action is to tune action-choice data/reward. The JSON format is stable,
+  but exact reference rate is still only `12/32` on the logged reward-cap run.
+  Useful next directions: add tool-family reward components, balance
+  visual-servo/check/turn examples, or train on more diverse grouped rollouts.
 - Future continuation should treat this as past verification, not a blocker.
   There is no known Runpod auth issue when `.env` is loaded as above, and no
   user action is needed before launching the next capped LoRA training attempt.

@@ -239,17 +239,24 @@ def _completion_log_metrics(path: Path) -> dict[str, Any]:
     completion_texts = [str(record.get("completion_text") or "") for record in records]
     exact_reference_count = 0
     parsed_action_count = 0
+    positive_non_reference_count = 0
     for record in records:
         parsed_action = record.get("parsed_action") if isinstance(record.get("parsed_action"), dict) else {}
         if parsed_action:
             parsed_action_count += 1
-        if _canonical_json(parsed_action) == record.get("reference_action_canonical"):
+        exact_reference = _canonical_json(parsed_action) == record.get("reference_action_canonical")
+        if exact_reference:
             exact_reference_count += 1
+        elif _optional_float(record.get("reward")) and float(record["reward"]) > 0:
+            positive_non_reference_count += 1
     return {
         "sample_count": len(records),
         "malformed_line_count": malformed_count,
         "parsed_action_count": parsed_action_count,
         "exact_reference_action_count": exact_reference_count,
+        "positive_non_reference_reward_count": positive_non_reference_count,
+        "parsed_action_rate": round(parsed_action_count / len(records), 6) if records else 0.0,
+        "exact_reference_action_rate": round(exact_reference_count / len(records), 6) if records else 0.0,
         "markdown_fence_count": sum("```" in text for text in completion_texts),
         "truncated_text_count": sum(bool(record.get("completion_text_truncated")) for record in records),
         "mean_completion_chars": round(sum(len(text) for text in completion_texts) / len(completion_texts), 3)

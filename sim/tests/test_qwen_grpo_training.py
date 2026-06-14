@@ -431,10 +431,12 @@ def test_run_qwen_grpo_training_job_executes_ready_job(tmp_path: Path) -> None:
     completion_log_payload = (
         '{"completion_text":"{\\"action\\":{\\"tool\\":\\"wait\\",\\"args\\":{}}}",'
         '"parsed_action":{"args":{},"tool":"wait"},'
+        '"reward":0.1,'
         '"reference_action_canonical":"{\\"args\\": {}, \\"tool\\": \\"wait\\"}",'
         '"completion_text_truncated":false}\n'
         '{"completion_text":"```json",'
         '"parsed_action":{},'
+        '"reward":0.25,'
         '"reference_action_canonical":"{\\"args\\": {}, \\"tool\\": \\"wait\\"}",'
         '"completion_text_truncated":false}\n'
     )
@@ -467,6 +469,8 @@ def test_run_qwen_grpo_training_job_executes_ready_job(tmp_path: Path) -> None:
     assert result["completion_log_metrics"]["sample_count"] == 2
     assert result["completion_log_metrics"]["parsed_action_count"] == 1
     assert result["completion_log_metrics"]["exact_reference_action_count"] == 1
+    assert result["completion_log_metrics"]["positive_non_reference_reward_count"] == 1
+    assert result["completion_log_metrics"]["exact_reference_action_rate"] == 0.5
     assert result["completion_log_metrics"]["markdown_fence_count"] == 1
 
 
