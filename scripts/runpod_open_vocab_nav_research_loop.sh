@@ -25,6 +25,9 @@ FINISH_TASK="${FINISH_TASK:-1}"
 START_QWEN_SERVER="${START_QWEN_SERVER:-0}"
 START_THOR_XORG="${START_THOR_XORG:-1}"
 THOR_XORG_DISPLAY="${THOR_XORG_DISPLAY:-0}"
+PREPARE_OBJECT_DRIVE_ENV="${PREPARE_OBJECT_DRIVE_ENV:-1}"
+OBJECT_DRIVE_VENV="${OBJECT_DRIVE_VENV:-/workspace/open_vocab_nav_object_drive_venv}"
+OBJECT_DRIVE_PACKAGES="${OBJECT_DRIVE_PACKAGES:-torch,transformers,timm}"
 QWEN_MODEL="${QWEN_MODEL:-Qwen/Qwen3-VL-8B-Instruct}"
 QWEN_HOST="${QWEN_HOST:-127.0.0.1}"
 QWEN_PORT="${QWEN_PORT:-8000}"
@@ -33,6 +36,7 @@ QWEN_SERVER_PID="${QWEN_SERVER_PID:-/workspace/qwen_vllm.pid}"
 QWEN_SERVER_TIMEOUT_S="${QWEN_SERVER_TIMEOUT_S:-900}"
 export QWEN_MODEL QWEN_HOST QWEN_PORT QWEN_SERVER_LOG QWEN_SERVER_PID QWEN_SERVER_TIMEOUT_S
 export START_THOR_XORG THOR_XORG_DISPLAY
+export PREPARE_OBJECT_DRIVE_ENV OBJECT_DRIVE_VENV OBJECT_DRIVE_PACKAGES
 
 rm -f "${EXIT_FILE}"
 mkdir -p "$(dirname "${LOG}")" "${OUTPUT_DIR}"
@@ -123,6 +127,7 @@ echo "[config] uv_with=${UV_WITH}"
 echo "[config] complete_exit_codes=${COMPLETE_EXIT_CODES}"
 echo "[config] start_thor_xorg=${START_THOR_XORG}"
 echo "[config] start_qwen_server=${START_QWEN_SERVER}"
+echo "[config] prepare_object_drive_env=${PREPARE_OBJECT_DRIVE_ENV}"
 echo "[config] qwen_model=${QWEN_MODEL}"
 echo "[config] qwen_endpoint=http://${QWEN_HOST}:${QWEN_PORT}/v1/chat/completions"
 
@@ -149,6 +154,11 @@ fi
 if [[ "${START_QWEN_SERVER}" == "1" ]]; then
   chmod +x scripts/runpod_start_qwen_vllm.sh
   scripts/runpod_start_qwen_vllm.sh
+fi
+
+if [[ "${PREPARE_OBJECT_DRIVE_ENV}" == "1" ]]; then
+  chmod +x scripts/runpod_prepare_object_drive_env.sh
+  source scripts/runpod_prepare_object_drive_env.sh
 fi
 
 research_cmd=(

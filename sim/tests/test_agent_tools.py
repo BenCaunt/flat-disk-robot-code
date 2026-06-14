@@ -58,6 +58,16 @@ def test_transformers_object_drive_command_runs_with_optional_detector_deps() ->
     assert cmd[-1].endswith("object_drive_zenoh.py")
 
 
+def test_transformers_object_drive_command_uses_prepared_python(monkeypatch) -> None:
+    monkeypatch.setenv("FLATDISK_OBJECT_DRIVE_PYTHON", "/tmp/object-drive/bin/python")
+
+    cmd = _object_drive_command(detector="florence-transformers")
+
+    assert cmd[0] == "/tmp/object-drive/bin/python"
+    assert "--with" not in cmd
+    assert cmd[-1].endswith("object_drive_zenoh.py")
+
+
 def test_mlx_object_drive_command_keeps_current_python() -> None:
     cmd = _object_drive_command(detector="florence-mlx")
 

@@ -33,6 +33,7 @@ def test_build_runpodctl_command_contains_worker_env_and_docker_args() -> None:
     assert "flatdisk-sim-research-warmhub" in docker_args
     assert "task-run-command" in docker_args
     assert "scripts/runpod_start_thor_xorg.sh" in docker_args
+    assert "scripts/runpod_prepare_object_drive_env.sh" in docker_args
     assert "--complete-exit-code 2" in docker_args
     assert "git checkout abc123" in docker_args
 
@@ -68,6 +69,7 @@ def test_start_qwen_server_adds_endpoint_env_and_bootstrap_script() -> None:
     assert env["QWEN_VLLM_EXTRA_ARGS"] == "--max-model-len 8192"
     assert "scripts/runpod_start_qwen_vllm.sh" in docker_args
     assert "scripts/runpod_start_thor_xorg.sh" in docker_args
+    assert "scripts/runpod_prepare_object_drive_env.sh" in docker_args
     assert "finish_preclaimed_task" in docker_args
     assert "--no-claim" in docker_args
     assert "--evidence-artifact /workspace/qwen_vllm.log" in docker_args
@@ -110,6 +112,7 @@ def test_remote_worker_script_requires_wh_and_runs_selected_task_command() -> No
     script = remote_worker_script(spec)
 
     assert "command -v wh" in script
+    assert "source scripts/runpod_prepare_object_drive_env.sh" in script
     assert "--command-index \"$COMMAND_INDEX\"" in script
     assert "--evidence-artifact /workspace/outputs/open_vocab_nav_research_loop" in script
     assert "--log-file \"$LOG_FILE\"" in script

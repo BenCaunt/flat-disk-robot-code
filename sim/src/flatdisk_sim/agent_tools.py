@@ -365,6 +365,9 @@ def _object_drive_command(*, detector: str) -> list[str]:
     if override:
         return shlex.split(override) + [str(OBJECT_DRIVE_SCRIPT)]
     if detector in TRANSFORMERS_OBJECT_DRIVE_DETECTORS:
+        python_override = os.environ.get("FLATDISK_OBJECT_DRIVE_PYTHON", "").strip()
+        if python_override:
+            return [python_override, str(OBJECT_DRIVE_SCRIPT)]
         cmd = ["uv", "run", "--project", "sim"]
         for package in TRANSFORMERS_OBJECT_DRIVE_EXTRAS:
             cmd.extend(["--with", package])

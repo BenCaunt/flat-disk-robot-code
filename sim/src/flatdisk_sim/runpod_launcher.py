@@ -160,6 +160,12 @@ worker_task_claimed=1
 chmod +x scripts/runpod_start_qwen_vllm.sh
 scripts/runpod_start_qwen_vllm.sh
 """
+    object_drive_env_block = """
+if [[ "${PREPARE_OBJECT_DRIVE_ENV:-1}" == "1" ]]; then
+  chmod +x scripts/runpod_prepare_object_drive_env.sh
+  source scripts/runpod_prepare_object_drive_env.sh
+fi
+"""
     task_command = f"""uv run --project sim flatdisk-sim-research-warmhub --repo "$WARMHUB_REPO" task-run-command \\
   --task "$TASK_ID" \\
   --agent "$AGENT_NAME" \\
@@ -201,7 +207,7 @@ if ! command -v wh >/dev/null 2>&1; then
   echo "[abort] wh CLI missing; use an image with wh or set WH_INSTALL_CMD" >&2
   exit 2
 fi
-{qwen_start_block}{task_command_block}
+{qwen_start_block}{object_drive_env_block}{task_command_block}
 """
 
 
