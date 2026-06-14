@@ -1138,6 +1138,7 @@ def build_actor_prompt(
         "If the detector box is on a nearby surface, cabinet, wall, or other object instead of the intended instance, set next_prompt_should_change=true and choose a different bounded action or a more specific visible phrase.",
         "For visual_servo_object in clutter, prefer a precise visible phrase that identifies the intended instance by category plus color/material, part, or image location, not a bare category prompt.",
         "If a grounding audit or overlay shows the detector box on a nearby wrong object, do not repeat the same prompt; change viewpoint or use a more specific visible phrase selected from the latest RGB frame.",
+        "Use action_history_summary as compact control evidence; if it says same_prompt_repeat_is_contradicted_by_prior_audit, do not output visual_servo_object with that same prompt.",
         "check_object_grounding is non-motion; use it when the latest RGB frame has a plausible visible candidate but the previous visual servo grounding was sparse, absent, or on the wrong region.",
         "Treat check_object_grounding ready_for_visual_servo=true as detector-box existence only, not proof that the box is on the intended object.",
         "If check_object_grounding returns ready_for_visual_servo=false, grounding_geometry_warning, an edge-clipped box, or an overlay on the wrong region, change viewpoint or prompt before visual_servo_object.",
@@ -1154,6 +1155,7 @@ def build_actor_prompt(
         "Treat topomap route hints as memory evidence, not ground-truth completion; prefer the live camera when topomap memory disagrees with the current RGB frame.",
         "If the latest RGB frame or previous motion strip shows the described goal object or goal region very close in the foreground, dominating the frame, or cropped by the bottom/side edge, treat that as arrival evidence.",
         "If a same-goal visual_servo_object returns no_detection after close foreground or cropped goal evidence, choose stop and write memory_update.arrival_evidence instead of turning solely to reacquire the detector box.",
+        "The JSON action is the only command executed. Before returning, verify action.tool and action.args agree with thought, grounding_audit, and action_history_summary.",
         "If visual_servo_object reports moved=false or failure_reason, switch strategy with a bounded turn or drive instead of waiting.",
         "The harness already captures a fresh observation before each actor call; do not request another observation as your action.",
         "Prefer short bounded movements; turn to search or center the target, drive only briefly when the path or target evidence is plausible.",
@@ -1184,6 +1186,7 @@ def build_actor_prompt(
         "observation": sanitize_observation(observation),
         "previous_motion": compact_prompt_value(previous_motion or {}),
         "recent_memory": prompt_memory_tail(recent_memory),
+        "action_history_summary": action_history_summary(recent_memory),
     }
     return (
         "STATIC_HARNESS_CONTEXT\n"
@@ -1435,6 +1438,99 @@ def prompt_memory_tail(records: list[dict[str, Any]], limit: int = PROMPT_MEMORY
     if limit <= 0:
         return []
     return [compact_prompt_record(record) for record in records[-limit:] if isinstance(record, dict)]
+
+
+def action_history_summary(records: list[dict[str, Any]], limit: int = PROMPT_MEMORY_RECORD_LIMIT) -> dict[str, Any]:
+    recent = [record for record in records[-limit:] if isinstance(record, dict)]
+    if not recent:
+        return {}
+
+    summary: dict[str, Any] = {}
+    recent_actions: list[dict[str, Any]] = []
+    visual_servo_attempts: list[dict[str, Any]] = []
+    close_evidence_steps: list[int] = []
+    latest_audit: dict[str, Any] = {}
+
+    for record in recent:
+        step = _record_step(record)
+        action = _compact_action_payload(record.get("executed_action") or record.get("actor_action"))
+        if action:
+            action_signature = {"step": step, "tool": action.get("tool"), "args": action.get("args", {})}
+            recent_actions.append(action_signature)
+        audit = record.get("actor_grounding_audit")
+        if isinstance(audit, dict) and audit:
+            latest_audit = compact_prompt_value(audit)
+        if _record_has_close_arrival_evidence(record) and step is not None:
+            close_evidence_steps.append(step)
+        tool_result = record.get("tool_result")
+        if action.get("tool") == "visual_servo_object" and isinstance(tool_result, dict):
+            visual_servo_attempts.append(
+                {
+                    "step": step,
+                    "prompt": action.get("args", {}).get("prompt"),
+                    "moved": tool_result.get("moved"),
+                    "servo_status": tool_result.get("servo_status"),
+                    "failure_reason": tool_result.get("failure_reason"),
+                    "grounding_stability": tool_result.get("grounding_stability"),
+                    "detection_coverage_fraction": tool_result.get("detection_coverage_fraction"),
+                }
+            )
+
+    if recent_actions:
+        summary["recent_actions"] = recent_actions[-6:]
+    if latest_audit:
+        summary["latest_grounding_audit"] = latest_audit
+    if close_evidence_steps:
+        summary["close_or_foreground_evidence_steps"] = close_evidence_steps[-4:]
+    if visual_servo_attempts:
+        last_attempt = visual_servo_attempts[-1]
+        last_prompt = last_attempt.get("prompt")
+        same_prompt_attempts = [attempt for attempt in visual_servo_attempts if attempt.get("prompt") == last_prompt]
+        weak_attempts = [
+            attempt
+            for attempt in same_prompt_attempts
+            if attempt.get("grounding_stability") in {"sparse_detection_coverage", "insufficient_status_history", "no_detection"}
+            or attempt.get("servo_status") == "no_detection"
+            or bool(attempt.get("failure_reason"))
+        ]
+        summary["last_visual_servo"] = last_attempt
+        summary["same_prompt_visual_servo_attempt_count"] = len(same_prompt_attempts)
+        if weak_attempts:
+            summary["same_prompt_weak_or_failed_attempts"] = weak_attempts[-4:]
+        if latest_audit.get("next_prompt_should_change") is True and last_prompt:
+            summary["same_prompt_repeat_is_contradicted_by_prior_audit"] = {
+                "prompt": last_prompt,
+                "reason": "latest grounding_audit.next_prompt_should_change=true",
+            }
+        if (
+            last_prompt
+            and close_evidence_steps
+            and (last_attempt.get("servo_status") == "no_detection" or last_attempt.get("failure_reason") == "no_detection")
+        ):
+            summary["stop_is_valid_after_close_no_detection"] = {
+                "prompt": last_prompt,
+                "reason": "recent model-visible memory recorded close/foreground/cropped/arrival evidence and the same-prompt servo returned no_detection",
+            }
+    return compact_prompt_value(summary)
+
+
+def _record_step(record: dict[str, Any]) -> int | None:
+    try:
+        return int(record.get("step"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _record_has_close_arrival_evidence(record: dict[str, Any]) -> bool:
+    evidence_payload = {
+        "actor_memory_update": record.get("actor_memory_update"),
+        "saved_frames": record.get("saved_frames"),
+    }
+    text = json.dumps(evidence_payload, sort_keys=True, default=str).lower()
+    return any(
+        token in text
+        for token in ("arrival", "foreground", "very close", "close foreground", "close in the foreground", "cropped", "dominating")
+    )
 
 
 def compact_prompt_record(record: dict[str, Any]) -> dict[str, Any]:

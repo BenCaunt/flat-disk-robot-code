@@ -17,6 +17,7 @@ from flatdisk_sim.llm_harness import (
     SafetyCriticRunner,
     ScriptedOpenVocabRunner,
     TOOL_CONTRACT,
+    action_history_summary,
     build_actor_prompt,
     build_critic_prompt,
     parse_critic_decision,
@@ -225,6 +226,8 @@ def test_actor_prompt_declares_camera_image_authoritative_and_strips_legacy_dete
     assert "cannot discover a hidden goal object by itself" in prompt
     assert "visible waypoint" in prompt
     assert "not proof of semantic identity" in prompt
+    assert "Use action_history_summary as compact control evidence" in prompt
+    assert "The JSON action is the only command executed" in prompt
     assert "treat that as arrival evidence" in prompt
     assert "same-goal visual_servo_object returns no_detection" in prompt
     assert "memory_update.arrival_evidence" in prompt
@@ -362,6 +365,48 @@ def test_prompt_memory_tail_compacts_verbose_records() -> None:
     assert compact[-1]["tool_result"]["debug_overlay_contact_sheet"].endswith("_debug_overlay_strip.jpg")
     assert compact[-1]["tool_result"]["grounding_audit_contact_sheet"].endswith("_grounding_audit.jpg")
     assert len(compact[-1]["actor_memory_update"]["observation_note"]) <= 220
+
+
+def test_action_history_summary_surfaces_audit_conflict_and_arrival_stop_cue() -> None:
+    records = [
+        {
+            "step": 3,
+            "executed_action": {"tool": "visual_servo_object", "args": {"prompt": "goal object"}},
+            "actor_memory_update": {"observation_note": "goal object is very close in the foreground"},
+            "saved_frames": [{"note": "close foreground evidence"}],
+            "tool_result": {
+                "moved": True,
+                "servo_status": "moved",
+                "grounding_stability": "sparse_detection_coverage",
+                "detection_coverage_fraction": 0.12,
+            },
+        },
+        {
+            "step": 4,
+            "executed_action": {"tool": "visual_servo_object", "args": {"prompt": "goal object"}},
+            "actor_grounding_audit": {
+                "previous_visual_servo_box_matches_intended_object": False,
+                "previous_check_box_matches_intended_object": False,
+                "evidence": "box mismatch",
+                "check_overlay_evidence": "wrong region",
+                "next_prompt_should_change": True,
+            },
+            "tool_result": {
+                "moved": False,
+                "servo_status": "no_detection",
+                "failure_reason": "no_detection",
+                "grounding_stability": "no_detection",
+                "detection_coverage_fraction": 0.0,
+            },
+        },
+    ]
+
+    summary = action_history_summary(records)
+
+    assert summary["same_prompt_visual_servo_attempt_count"] == 2
+    assert summary["same_prompt_repeat_is_contradicted_by_prior_audit"]["prompt"] == "goal object"
+    assert summary["stop_is_valid_after_close_no_detection"]["prompt"] == "goal object"
+    assert summary["latest_grounding_audit"]["next_prompt_should_change"] is True
 
 
 def test_actor_action_parser_accepts_tool_schema_and_clamps() -> None:
