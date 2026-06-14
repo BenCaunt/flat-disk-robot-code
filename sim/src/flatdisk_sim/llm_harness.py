@@ -1112,6 +1112,13 @@ def _clean_extra_rules(extra_rules: tuple[str, ...] | list[str] | None) -> list[
     return cleaned
 
 
+def _use_action_history_summary(*, prompt_profile: str, extra_rules: list[str]) -> bool:
+    profile = prompt_profile.strip().lower()
+    if "action-history" in profile or "action_history" in profile:
+        return True
+    return any("action_history_summary" in rule for rule in extra_rules)
+
+
 def build_actor_prompt(
     *,
     goal: str,
@@ -1138,9 +1145,6 @@ def build_actor_prompt(
         "If the detector box is on a nearby surface, cabinet, wall, or other object instead of the intended instance, set next_prompt_should_change=true and choose a different bounded action or a more specific visible phrase.",
         "For visual_servo_object in clutter, prefer a precise visible phrase that identifies the intended instance by category plus color/material, part, or image location, not a bare category prompt.",
         "If a grounding audit or overlay shows the detector box on a nearby wrong object, do not repeat the same prompt; change viewpoint or use a more specific visible phrase selected from the latest RGB frame.",
-        "Use action_history_summary as compact control evidence; if it says same_prompt_repeat_is_contradicted_by_prior_audit, do not output visual_servo_object with that same prompt.",
-        "Do not treat sparse_detection_coverage alone as a mandatory turn/check; if the raw motion strip shows controlled progress toward the same visible instance, a short follow-up servo or stop may be valid.",
-        "If action_history_summary says recent_turn_oscillation, do not continue alternating small turns; choose a different information-gathering or progress action.",
         "check_object_grounding is non-motion; use it when the latest RGB frame has a plausible visible candidate but the previous visual servo grounding was sparse, absent, or on the wrong region.",
         "Treat check_object_grounding ready_for_visual_servo=true as detector-box existence only, not proof that the box is on the intended object.",
         "If check_object_grounding returns ready_for_visual_servo=false, grounding_geometry_warning, an edge-clipped box, or an overlay on the wrong region, change viewpoint or prompt before visual_servo_object.",
@@ -1158,7 +1162,7 @@ def build_actor_prompt(
         "If the latest RGB frame or previous motion strip shows the described goal object or goal region very close in the foreground, dominating the frame, or cropped by the bottom/side edge, treat that as arrival evidence.",
         "If a same-goal visual_servo_object returns no_detection after close foreground or cropped goal evidence, stop only when the latest RGB frame independently still shows clear arrival; otherwise re-check the view or change prompt/viewpoint.",
         "When choosing stop for completion, write memory_update.arrival_evidence with the latest RGB evidence supporting the completion assertion.",
-        "The JSON action is the only command executed. Before returning, verify action.tool and action.args agree with thought, grounding_audit, and action_history_summary.",
+        "The JSON action is the only command executed. Before returning, verify action.tool and action.args agree with thought, grounding_audit, and any action_history_summary when provided.",
         "If visual_servo_object reports moved=false or failure_reason, switch strategy with a bounded turn or drive instead of waiting.",
         "The harness already captures a fresh observation before each actor call; do not request another observation as your action.",
         "Prefer short bounded movements; turn to search or center the target, drive only briefly when the path or target evidence is plausible.",
@@ -1167,7 +1171,17 @@ def build_actor_prompt(
         "Do not stop unless repeated observations show the described goal object is reached or very close, or an operator/evaluator has requested stop.",
         "Return exactly one JSON object and no prose.",
     ]
-    rules.extend(_clean_extra_rules(extra_rules))
+    cleaned_extra_rules = _clean_extra_rules(extra_rules)
+    use_action_history = _use_action_history_summary(prompt_profile=prompt_profile, extra_rules=cleaned_extra_rules)
+    if use_action_history:
+        rules.extend(
+            [
+                "Use action_history_summary as compact control evidence; if it says same_prompt_repeat_is_contradicted_by_prior_audit, do not output visual_servo_object with that same prompt.",
+                "Do not treat sparse_detection_coverage alone as a mandatory turn/check; if the raw motion strip shows controlled progress toward the same visible instance, a short follow-up servo or stop may be valid.",
+                "If action_history_summary says recent_turn_oscillation, do not continue alternating small turns; choose a different information-gathering or progress action.",
+            ]
+        )
+    rules.extend(cleaned_extra_rules)
     static_prefix = {
         "role": "flat_disk_robot_actor",
         "prompt_profile": prompt_profile,
@@ -1189,8 +1203,9 @@ def build_actor_prompt(
         "observation": sanitize_observation(observation),
         "previous_motion": compact_prompt_value(previous_motion or {}),
         "recent_memory": prompt_memory_tail(recent_memory),
-        "action_history_summary": action_history_summary(recent_memory),
     }
+    if use_action_history:
+        dynamic_state["action_history_summary"] = action_history_summary(recent_memory)
     return (
         "STATIC_HARNESS_CONTEXT\n"
         + json.dumps(static_prefix, indent=2, sort_keys=True, default=str)

@@ -226,10 +226,10 @@ def test_actor_prompt_declares_camera_image_authoritative_and_strips_legacy_dete
     assert "cannot discover a hidden goal object by itself" in prompt
     assert "visible waypoint" in prompt
     assert "not proof of semantic identity" in prompt
-    assert "Use action_history_summary as compact control evidence" in prompt
     assert "The JSON action is the only command executed" in prompt
-    assert "sparse_detection_coverage alone" in prompt
-    assert "recent_turn_oscillation" in prompt
+    assert "Use action_history_summary as compact control evidence" not in prompt
+    assert "recent_turn_oscillation" not in prompt
+    assert '"action_history_summary"' not in prompt
     assert "treat that as arrival evidence" in prompt
     assert "same-goal visual_servo_object returns no_detection" in prompt
     assert "latest RGB frame independently still shows clear arrival" in prompt
@@ -289,6 +289,36 @@ def test_actor_prompt_accepts_prompt_profile_rule_overlay(tmp_path) -> None:
 
     assert '"prompt_profile": "explore-memory-v1"' in prompt
     assert "Write useful scratchpad state." in prompt
+
+
+def test_actor_prompt_can_opt_into_action_history_summary(tmp_path) -> None:
+    prompt = build_actor_prompt(
+        goal="Drive to the goal object.",
+        mode="auto",
+        step=4,
+        memory_path=tmp_path / "memory.jsonl",
+        observation={"path": "frames/0005.jpg", "yaw_deg": 0.0, "frame_seq": 5, "brightness_center": 0.5},
+        recent_memory=[
+            {
+                "step": 2,
+                "executed_action": {"tool": "turn_by_angle", "args": {"degrees": 10}},
+            },
+            {
+                "step": 3,
+                "executed_action": {"tool": "turn_by_angle", "args": {"degrees": -10}},
+            },
+            {
+                "step": 4,
+                "executed_action": {"tool": "turn_by_angle", "args": {"degrees": 10}},
+            },
+        ],
+        prompt_profile="action-history-v1",
+        extra_rules=("Use action_history_summary for this experimental prompt.",),
+    )
+
+    assert "Use action_history_summary as compact control evidence" in prompt
+    assert '"action_history_summary"' in prompt
+    assert "recent_turn_oscillation" in prompt
 
 
 def test_sanitize_memory_removes_nested_privileged_fields() -> None:
