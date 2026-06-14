@@ -67,6 +67,37 @@ def test_filter_tasks_skips_incomplete_prerequisites_by_default() -> None:
     assert [task.wref for task in selected] == ["AgentTask/plan-run-ready"]
 
 
+def test_filter_tasks_matches_versioned_related_experiment_refs() -> None:
+    tasks = [
+        AgentTaskSummary(
+            wref="AgentTask/plan-run-a",
+            name="plan-run-a",
+            status="planned",
+            owner="unassigned",
+            objective="Run A",
+            tags=("trial-slice", "runpod", "qwen"),
+            related_experiment="NavExperiment/open_vocab_nav_qwen_strategy_runpod_linux_v1@v1",
+        ),
+        AgentTaskSummary(
+            wref="AgentTask/plan-run-b",
+            name="plan-run-b",
+            status="planned",
+            owner="unassigned",
+            objective="Run B",
+            tags=("trial-slice", "runpod", "qwen"),
+            related_experiment="NavExperiment/other_experiment@v1",
+        ),
+    ]
+
+    selected = filter_tasks(
+        tasks,
+        tags=("runpod",),
+        related_experiment="open_vocab_nav_qwen_strategy_runpod_linux_v1",
+    )
+
+    assert [task.wref for task in selected] == ["AgentTask/plan-run-a"]
+
+
 def test_select_tasks_for_dispatch_auto_uses_ready_stage_order() -> None:
     tasks = [
         AgentTaskSummary(

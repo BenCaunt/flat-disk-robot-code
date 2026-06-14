@@ -147,7 +147,7 @@ def filter_tasks(
     for task in tasks:
         if name_prefix and not task.name.startswith(name_prefix):
             continue
-        if related_experiment and task.related_experiment != related_experiment:
+        if related_experiment and not _related_experiment_matches(task.related_experiment, related_experiment):
             continue
         if required_tags and not required_tags.issubset(set(task.tags)):
             continue
@@ -157,6 +157,19 @@ def filter_tasks(
             continue
         selected.append(task)
     return selected
+
+
+def _related_experiment_matches(task_experiment: str | None, requested: str) -> bool:
+    return _normalize_experiment_ref(task_experiment) == _normalize_experiment_ref(requested)
+
+
+def _normalize_experiment_ref(value: str | None) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.startswith("NavExperiment/"):
+        text = text.split("/", 1)[1]
+    return text.split("@", 1)[0]
 
 
 def skipped_for_prerequisites(tasks: list[AgentTaskSummary], *, completed_task_refs: set[str]) -> list[dict[str, Any]]:
