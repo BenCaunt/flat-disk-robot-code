@@ -740,7 +740,7 @@ def test_session_logs_llm_outputs_to_rerun_sink(tmp_path) -> None:
     assert critic_payload["final_decision"]["verdict"] in {"approve", "warn", "reject"}
 
 
-def test_session_logs_raw_actor_output_on_parse_error(tmp_path) -> None:
+def test_session_logs_raw_actor_output_on_parse_error_and_falls_back_to_wait(tmp_path) -> None:
     session = HarnessSession(
         config=HarnessConfig(run_dir=tmp_path, max_steps=1, rerun_enabled=True),
         tools=FakeHarnessTools(run_dir=tmp_path, environment="living_room"),
@@ -750,11 +750,13 @@ def test_session_logs_raw_actor_output_on_parse_error(tmp_path) -> None:
     )
 
     session.start_goal("Drive to the sofa.")
-    with pytest.raises(json.JSONDecodeError):
-        session.run_auto_step()
+    record = session.run_auto_step()
     events = session.read_events_tail(20)
     session.close()
 
+    assert record is not None
+    assert record["executed_action"]["tool"] == "wait"
+    assert record["actor_memory_update"]["actor_parse_error"]
     actor_errors = [event for event in events if event.get("event") == "actor_error"]
     assert actor_errors
     assert "missing comma" in actor_errors[-1]["output"]

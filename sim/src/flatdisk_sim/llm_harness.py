@@ -772,7 +772,22 @@ class HarnessSession:
                 }
                 self._log_llm(step, "actor_error", error_payload)
                 self.log_event("actor_error", error_payload)
-                raise
+                if not actor_attempt_outputs:
+                    raise
+                action = HarnessAction("wait", {"duration_s": 0.2}, "actor JSON parse fallback")
+                actor_side_effects = {
+                    "grounding_audit": {},
+                    "memory_update": {"actor_parse_error": str(exc)[:PROMPT_TEXT_LIMIT]},
+                    "save_frames": [],
+                }
+                actor_output = json.dumps(
+                    {
+                        "thought": "actor JSON parse failed after retry; using bounded wait fallback",
+                        "action": {"tool": action.tool, "args": action.args},
+                        "grounding_audit": {},
+                        "memory_update": actor_side_effects["memory_update"],
+                    }
+                )
             saved_frames = self._save_requested_frames(
                 actor_side_effects["save_frames"],
                 observation=observation_summary,
