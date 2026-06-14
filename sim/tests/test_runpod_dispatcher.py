@@ -132,6 +132,19 @@ def test_select_tasks_for_dispatch_auto_uses_ready_stage_order() -> None:
     assert task_stage(tasks[1]) == "failure-analysis"
 
 
+def test_task_stage_classifies_preference_training_tasks() -> None:
+    task = AgentTaskSummary(
+        wref="AgentTask/plan-qwen-dpo-train-plan",
+        name="plan-qwen-dpo-train-plan",
+        status="planned",
+        owner="unassigned",
+        objective="Plan Qwen DPO training",
+        tags=("preference-training", "qwen-dpo", "training-worker"),
+    )
+
+    assert task_stage(task) == "preference-training"
+
+
 def test_query_queue_health_summarizes_active_tasks(monkeypatch) -> None:
     def fake_query_agent_tasks(_repo, *, status, limit):  # noqa: ANN001
         assert limit == 100

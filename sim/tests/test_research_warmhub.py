@@ -246,6 +246,21 @@ def test_task_plan_config_creates_planned_slice_tasks(tmp_path) -> None:
     assert "qwen_tool_training/plan-001/qwen_dpo_messages.jsonl" in training_notes["expected_artifacts"]
     assert "training_readiness/plan-001/training_readiness.json" in training_notes["expected_artifacts"]
     assert any("prompt/chosen/rejected/images" in check for check in training_notes["checks"])
+    dpo_plan = next(op for op in ops if op["name"] == "AgentTask/plan-001-qwen-dpo-train-plan")
+    assert dpo_plan["data"]["tags"] == sorted(dpo_plan["data"]["tags"])
+    assert "preference-training" in dpo_plan["data"]["tags"]
+    assert "training-worker" in dpo_plan["data"]["tags"]
+    dpo_notes = json.loads(dpo_plan["data"]["notes"])
+    assert dpo_notes["prerequisites"] == ["AgentTask/plan-001-training-review"]
+    assert dpo_notes["accepted_exit_codes"] == [0, 2]
+    assert "flatdisk-sim-plan-qwen-dpo-training" in dpo_notes["commands"][0]
+    assert "--input sim/scratch/open_vocab_nav_research_loop/qwen_tool_training/plan-001" in dpo_notes["commands"][0]
+    assert "--output-dir sim/scratch/open_vocab_nav_research_loop/qwen_dpo_training/plan-001" in dpo_notes["commands"][0]
+    assert "--model-id Qwen/Qwen3-VL-8B-Instruct" in dpo_notes["commands"][0]
+    assert "--fail-on-not-ready" in dpo_notes["commands"][0]
+    assert "qwen_dpo_training/plan-001/qwen_dpo_training_job.json" in dpo_notes["expected_artifacts"]
+    assert "qwen_dpo_training/plan-001/train_qwen_dpo_trl.py" in dpo_notes["expected_artifacts"]
+    assert any("actual GPU training is a later worker step" in check for check in dpo_notes["checks"])
 
 
 def test_task_finish_ops_write_subagent_result() -> None:

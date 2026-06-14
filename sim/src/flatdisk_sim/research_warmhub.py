@@ -14,6 +14,7 @@ from typing import Any
 
 from .evaluate_text_goals import default_episodes
 from .llm_harness import POLICY_INPUT_ALLOWLIST
+from .qwen_dpo_training import DEFAULT_MODEL_ID as DEFAULT_QWEN_DPO_MODEL_ID
 from .research_loop import (
     DEFAULT_WARMHUB_REPO,
     ROBOT_IO_CONTRACT,
@@ -409,9 +410,11 @@ def make_task_plan_ops(
             },
         )
     )
+    training_review_task_id = f"{plan_name}-training-review"
+    training_review_ref = _task_wref(training_review_task_id)
     ops.append(
         _planned_task_op(
-            task_id=f"{plan_name}-training-review",
+            task_id=training_review_task_id,
             objective=f"Materialize Qwen DPO handoff data and review {config.experiment_id} artifacts for SFT/preference/PPO/GRPO readiness.",
             owner=owner,
             priority=priority,
@@ -452,6 +455,42 @@ def make_task_plan_ops(
                     "Successful and failed trajectories are both represented for ranking/filtering.",
                     "Candidate reward shaping is documented before using it for GRPO/PPO.",
                 ],
+            },
+        )
+    )
+    ops.append(
+        _planned_task_op(
+            task_id=f"{plan_name}-qwen-dpo-train-plan",
+            objective=f"Plan a Qwen DPO preference-training job for {config.experiment_id} without starting GPU training.",
+            owner=owner,
+            priority=priority,
+            related_experiment=experiment_ref,
+            tags=[*common_tags, "qwen-dpo", "preference-training", "training-worker"],
+            prerequisites=[training_review_ref],
+            notes={
+                "commands": [
+                    (
+                        "if test -f "
+                        f"{output_dir / 'qwen_tool_training' / plan_name / 'qwen_tool_training_manifest.json'}; then "
+                        "uv run --project sim flatdisk-sim-plan-qwen-dpo-training "
+                        f"--input {output_dir / 'qwen_tool_training' / plan_name} "
+                        f"--output-dir {output_dir / 'qwen_dpo_training' / plan_name} "
+                        f"--model-id {_qwen_training_model_id(config)} "
+                        "--fail-on-not-ready; "
+                        "else echo '[qwen-dpo] missing qwen_tool_training manifest; no trainable preference data yet'; exit 2; fi"
+                    )
+                ],
+                "accepted_exit_codes": [0, 2],
+                "expected_artifacts": [
+                    f"qwen_dpo_training/{plan_name}/qwen_dpo_training_job.json",
+                    f"qwen_dpo_training/{plan_name}/train_qwen_dpo_trl.py",
+                ],
+                "checks": [
+                    "DPO training job manifest validates prompt/chosen/rejected/images columns.",
+                    "Generated TRL script is a handoff artifact only; actual GPU training is a later worker step.",
+                    "Exit code 2 means no trainable preference data yet, not an infrastructure failure.",
+                ],
+                "policy_constraints": _policy_constraints(),
             },
         )
     )
@@ -1361,6 +1400,28 @@ def _baseline_variant_name(config: ResearchConfig) -> str:
 def _candidate_variant_names(config: ResearchConfig) -> list[str]:
     baseline = _baseline_variant_name(config)
     return [variant.name for variant in config.variants if variant.name != baseline]
+
+
+def _qwen_training_model_id(config: ResearchConfig) -> str:
+    for variant in config.variants:
+        if (
+            variant.runner == "qwen"
+            and variant.qwen_model
+            and _is_trainable_qwen_model_id(variant.qwen_model)
+        ):
+            return variant.qwen_model
+    return DEFAULT_QWEN_DPO_MODEL_ID
+
+
+def _is_trainable_qwen_model_id(model_id: str) -> bool:
+    lowered = model_id.lower()
+    return not (
+        lowered.startswith("mlx-community/")
+        or lowered.endswith("-4bit")
+        or "gguf" in lowered
+        or "awq" in lowered
+        or "gptq" in lowered
+    )
 
 
 def _promotion_gate_commands(

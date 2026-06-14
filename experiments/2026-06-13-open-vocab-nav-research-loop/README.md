@@ -177,3 +177,14 @@ uv run --project sim flatdisk-sim-nav-training-readiness \
   --input sim/scratch/open_vocab_nav_research_loop/<run> \
   --output-dir sim/scratch/open_vocab_nav_research_loop/<run>/training_readiness
 ```
+
+After readiness, generate the DPO training handoff. This validates
+`qwen_dpo_messages.jsonl`, confirms the referenced Qwen images still exist,
+and writes a job manifest plus a generated TRL script without starting GPU
+fine-tuning in the local sim environment.
+
+```bash
+uv run --project sim flatdisk-sim-plan-qwen-dpo-training \
+  --input sim/scratch/open_vocab_nav_research_loop/<run>/qwen_tool_training \
+  --output-dir sim/scratch/open_vocab_nav_research_loop/<run>/qwen_dpo_training
+```

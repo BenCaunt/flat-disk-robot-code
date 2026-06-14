@@ -248,6 +248,11 @@ The generated training-review task also runs
 `flatdisk-sim-nav-training-readiness`, so WarmHub readiness assertions include
 accepted Qwen SFT counts, Qwen guard-replacement preferences, and
 `qwen_dpo_messages.jsonl` handoff counts.
+The downstream `qwen-dpo-train-plan` task runs
+`flatdisk-sim-plan-qwen-dpo-training` to validate the DPO handoff and write a
+`qwen_dpo_training_job.json` plus a generated TRL script. That task is a
+training handoff only; actual GPU fine-tuning should run in a later worker with
+an isolated TRL/Transformers/Accelerate/PEFT environment.
 
 ## Runpod Worker
 
@@ -369,6 +374,10 @@ By default it skips tasks whose `notes.prerequisites` are not complete; pass
   The readiness assertion now reports raw policy samples, accepted Qwen SFT
   records, Qwen guard-replacement preferences, DPO handoff records, missing Qwen
   images, and privileged-token scans separately.
+- Use `flatdisk-sim-plan-qwen-dpo-training` after readiness to validate
+  `qwen_dpo_messages.jsonl`, generate a `qwen_dpo_training_job.json`, and emit a
+  Runpod-oriented TRL script without importing GPU training dependencies in the
+  local sim test environment.
 - Use `training_export/policy_review_traces.jsonl` first for failure triage and
   parallel-agent handoff; it records tool calls and contact-sheet paths without
   hidden target distances or THOR object metadata.

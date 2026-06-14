@@ -45,6 +45,7 @@ TASK_STAGE_ORDER = (
     "promotion-gate",
     "failure-analysis",
     "training-review",
+    "preference-training",
     "other",
 )
 TASK_STAGE_CHOICES = ("auto", "any", *TASK_STAGE_ORDER)
@@ -342,6 +343,8 @@ def task_stage(task: AgentTaskSummary) -> str:
         return "failure-analysis"
     if "training-export" in tags or "training-review" in tags:
         return "training-review"
+    if "preference-training" in tags or "training-worker" in tags:
+        return "preference-training"
     return "other"
 
 
