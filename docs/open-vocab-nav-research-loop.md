@@ -202,6 +202,22 @@ Research-loop exit code `2` is accepted for queued worker tasks because it means
 the eval produced unsuccessful navigation or structured failure data; worker
 failure should be reserved for crashes, missing artifacts, or command errors.
 
+When a failure trace shows `visual_servo_object` returned `no_detection` on
+visually plausible frames, run the detector doctor on saved policy frames before
+rerunning a full slice:
+
+```bash
+uv run --project sim --with torch --with transformers --with timm --with einops \
+  flatdisk-sim-detector-doctor \
+  --image path/to/frame.jpg \
+  --prompt "visible object phrase" \
+  --detector grounding-dino \
+  --output-dir sim/scratch/detector_doctor/run-id
+```
+
+The doctor writes JSON, Markdown, and detector overlays so agents can compare
+Florence/GroundingDINO-style backends without using hidden simulator metadata.
+
 To create a Warmhub work queue from a research-loop config:
 
 ```bash
