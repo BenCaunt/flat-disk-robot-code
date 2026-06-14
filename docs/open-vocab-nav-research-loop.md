@@ -510,6 +510,26 @@ A reward-cap 4-step run then completed in
   non-reference actions dropped from `5` to `0`, while exact reference actions
   improved from `9/32` to `12/32`.
 
+A generic tool/argument reward-shaping 4-step run then completed in
+`/workspace/flat-disk-robot-code-train-20260614-grpo-toolreward4`, from commit
+`1ce438b`:
+
+- Result:
+  `sim/scratch/open_vocab_nav_research_loop/qwen_grpo_jobs/bathroom_cross_run_lora_4step_cap48_tool_reward/qwen_grpo_training_result.json`
+- Status `complete`, return code `0`, duration `1888.442` seconds.
+- `completion_log_sample_count` was `32`.
+- `completion_log_metrics`: `32/32` parsed actions, `12/32` exact reference
+  actions, `17/32` same-tool matches, mean argument-match fraction `0.4375`,
+  `0` positive non-reference rewards, `0` markdown fences, `0` truncated texts,
+  and mean completion length `92.406` characters.
+- TRL metrics: train runtime about `1647` seconds, train loss `-0.01663`,
+  reward mean `-0.1392`, reward std `0.1748`, and
+  `completions/clipped_ratio=0`.
+- This run did not improve exact action rate over the reward-cap run on the
+  tiny four-step comparison. It did verify the new generic partial-credit reward
+  surface: same-tool and argument-key matches receive graded negative rewards,
+  while non-reference actions still never receive positive reward.
+
 Resume status for a future continuation:
 
 - This is no longer a verification-only blocker. Runpod auth works when
@@ -520,13 +540,14 @@ Resume status for a future continuation:
 - Use the pushed `codex/open-vocab-nav-research-loop` ref for a clean checkout;
   the original `/workspace/flat-disk-robot-code` directory on the pod is not a
   git repo.
-- The next useful experiment is reward/data tuning for action choice. The
-  JSON-format issue is no longer the main blocker; exact reference action rate
-  is still only `12/32` on the logged reward-cap run. Useful next directions are
-  tool-family reward components, balancing visual-servo/check/turn examples, or
-  collecting more diverse grouped rollouts. Keep `--max-completion-length`
-  explicit so smoke and short training jobs cannot spend most of their time
-  generating long completions.
+- The next useful experiment is action-choice data/evaluation tuning. The
+  JSON-format issue is no longer the main blocker, and generic partial reward is
+  in place; exact reference action rate is still only `12/32` on the latest
+  four-step comparison. Useful next directions are balancing
+  visual-servo/check/turn examples, training for more steps from the shaped
+  reward, or collecting more diverse grouped rollouts. Keep
+  `--max-completion-length` explicit so smoke and short training jobs cannot
+  spend most of their time generating long completions.
 
 The fixes needed to make the smoke complete were:
 

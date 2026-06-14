@@ -181,6 +181,22 @@ Current handoff for GRPO training, 2026-06-14:
   `completions/clipped_ratio=0`, reward mean `-0.1365`, reward std `0.1809`,
   and train loss `-0.01638`. Manual comparison against the pre-cap 4-step run
   showed positive rewards for non-reference actions dropped from 5 to 0.
+- Commit `1ce438b` adds generic GRPO action reward shaping: non-exact parsed
+  actions still cannot receive positive reward, but same-tool and
+  argument-key matches get a less-negative shaped signal. The 4-step comparison
+  run completed in
+  `/workspace/flat-disk-robot-code-train-20260614-grpo-toolreward4`.
+  Local result:
+  `sim/scratch/open_vocab_nav_research_loop/qwen_grpo_jobs/bathroom_cross_run_lora_4step_cap48_tool_reward/qwen_grpo_training_result.json`.
+  It reports `status=complete`, `returncode=0`, `duration_s=1888.442`,
+  `completion_log_sample_count=32`, `32/32` parsed actions, `12/32` exact
+  reference actions, `17/32` same-tool matches, mean argument-match fraction
+  `0.4375`, `0` positive non-reference rewards, `0` markdown fences, and `0`
+  truncated texts. TRL reported train runtime about `1647` seconds, train loss
+  `-0.01663`, reward mean `-0.1392`, reward std `0.1748`, and
+  `completions/clipped_ratio=0`. Exact action rate did not improve over the
+  reward-cap run on this tiny four-step comparison; the useful change is the
+  now-measurable generic partial-credit reward surface.
 - The working pod venv is `/workspace/flatdisk-grpo-venv`, created with
   `--system-site-packages` so it can see image Torch `2.9.1+cu128`; install
   `torchvision==0.24.1 --no-deps` to match that Torch build. Do not let pip pull
@@ -189,10 +205,11 @@ Current handoff for GRPO training, 2026-06-14:
   the separate `images` column, use PEFT LoRA, and cap generation length for
   smoke jobs. Full-model Adam OOMs on A40; uncapped generation makes "tiny"
   smoke runs unreasonably long.
-- Next action is to tune action-choice data/reward. The JSON format is stable,
-  but exact reference rate is still only `12/32` on the logged reward-cap run.
-  Useful next directions: add tool-family reward components, balance
-  visual-servo/check/turn examples, or train on more diverse grouped rollouts.
+- Next action is to tune action-choice data and evaluation. The JSON format is
+  stable and generic partial reward exists, but exact reference rate is still
+  only `12/32` on the latest four-step comparison. Useful next directions:
+  balance visual-servo/check/turn examples, train for more steps from the
+  shaped reward, or collect more diverse grouped rollouts.
 - Future continuation should treat this as past verification, not a blocker.
   There is no known Runpod auth issue when `.env` is loaded as above, and no
   user action is needed before launching the next capped LoRA training attempt.
