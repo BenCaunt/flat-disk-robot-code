@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import shlex
+import subprocess
 import time
 from typing import Any
 
@@ -351,6 +352,17 @@ def reserve_tasks_before_launch(repo: str, specs: list[RunpodLaunchSpec]) -> lis
     return reserved
 
 
+def check_runpod_auth() -> None:
+    completed = subprocess.run(["runpodctl", "user"], text=True, capture_output=True, check=False)
+    if completed.returncode == 0:
+        return
+    detail = (completed.stderr.strip() or completed.stdout.strip() or "runpodctl user failed").splitlines()[0]
+    raise SystemExit(
+        "refusing to reserve WarmHub tasks or launch Runpod pods because runpodctl auth is not configured: "
+        f"{detail}"
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", default=DEFAULT_WARMHUB_REPO, help="Warmhub repo.")
@@ -471,6 +483,9 @@ def main() -> int:
     if not args.launch:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
+
+    if specs:
+        check_runpod_auth()
 
     if not args.no_reserve_before_launch:
         reserved_tasks = reserve_tasks_before_launch(args.repo, specs)

@@ -300,6 +300,10 @@ def test_main_launch_reserves_before_creating_pods(monkeypatch, capsys, tmp_path
         events.append("launch")
         return 0
 
+    def fake_check_runpod_auth():  # noqa: ANN202
+        events.append("auth")
+
+    monkeypatch.setattr(runpod_dispatcher, "check_runpod_auth", fake_check_runpod_auth)
     monkeypatch.setattr(runpod_dispatcher, "reserve_tasks_before_launch", fake_reserve)
     monkeypatch.setattr(runpod_dispatcher, "launch_with_runpodctl", fake_launch)
     monkeypatch.setattr(
@@ -318,10 +322,71 @@ def test_main_launch_reserves_before_creating_pods(monkeypatch, capsys, tmp_path
 
     assert runpod_dispatcher.main() == 0
     payload = json.loads(capsys.readouterr().out)
-    assert events == ["reserve", "launch"]
+    assert events == ["auth", "reserve", "launch"]
     assert payload["reserved_task_count"] == 1
     assert payload["reserved_tasks"] == ["AgentTask/plan-run-a"]
     assert payload["failed_launches"] == 0
+
+
+def test_main_launch_refuses_missing_runpod_auth_before_reserving(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    events = []
+    monkeypatch.setattr(runpod_dispatcher, "current_git_remote", lambda _cwd: "https://github.com/BenCaunt/flat-disk-robot-code.git")
+    monkeypatch.setattr(runpod_dispatcher, "current_git_ref", lambda _cwd: "abc123")
+    monkeypatch.setattr(runpod_dispatcher, "worktree_dirty", lambda _cwd: False)
+    monkeypatch.setattr(runpod_dispatcher, "query_completed_task_refs", lambda *_args, **_kwargs: {"AgentTask/plan-preflight"})
+    monkeypatch.setattr(
+        runpod_dispatcher,
+        "query_agent_tasks",
+        lambda *_args, **_kwargs: [
+            AgentTaskSummary(
+                wref="AgentTask/plan-run-a",
+                name="plan-run-a",
+                status="planned",
+                owner="unassigned",
+                objective="Run A",
+                tags=("trial-slice", "runpod", "qwen"),
+                prerequisites=("AgentTask/plan-preflight",),
+            )
+        ],
+    )
+
+    def fake_check_runpod_auth():  # noqa: ANN202
+        events.append("auth")
+        raise SystemExit("missing runpod auth")
+
+    def fake_reserve(_repo, _specs):  # noqa: ANN001, ANN202
+        events.append("reserve")
+        return []
+
+    def fake_launch(_command):  # noqa: ANN001, ANN202
+        events.append("launch")
+        return 0
+
+    monkeypatch.setattr(runpod_dispatcher, "check_runpod_auth", fake_check_runpod_auth)
+    monkeypatch.setattr(runpod_dispatcher, "reserve_tasks_before_launch", fake_reserve)
+    monkeypatch.setattr(runpod_dispatcher, "launch_with_runpodctl", fake_launch)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "flatdisk-sim-runpod-dispatch",
+            "--name-prefix",
+            "plan-",
+            "--tag",
+            "runpod",
+            "--max-workers",
+            "1",
+            "--launch",
+        ],
+    )
+
+    try:
+        runpod_dispatcher.main()
+    except SystemExit as exc:
+        assert "missing runpod auth" in str(exc)
+    else:
+        raise AssertionError("expected SystemExit")
+    assert events == ["auth"]
 
 
 def test_main_auto_stage_dispatches_ready_promotion_gate(monkeypatch, capsys, tmp_path) -> None:
