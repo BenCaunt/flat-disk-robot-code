@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Iterable
@@ -25,7 +26,8 @@ def analyze_failure_traces(
     author: str = "flatdisk-sim-failure-analysis",
 ) -> dict[str, Any]:
     trace_paths = _discover_trace_paths(input_paths)
-    trace_records = [(trace, path) for path in trace_paths for trace in _load_trace_records(path)]
+    raw_trace_records = [(trace, path) for path in trace_paths for trace in _load_trace_records(path)]
+    trace_records, duplicate_records = _dedupe_trace_records(raw_trace_records)
     traces = [trace for trace, _path in trace_records]
     if not traces:
         raise FileNotFoundError("no policy_review_trace.json or policy_review_traces.jsonl files found")
@@ -51,7 +53,10 @@ def analyze_failure_traces(
         "schema": FAILURE_ANALYSIS_SCHEMA,
         "analysis_id": analysis_id,
         "experiment_id": experiment_id,
+        "input_trace_record_count": len(raw_trace_records),
         "trace_count": len(traces),
+        "duplicate_trace_count": len(duplicate_records),
+        "duplicate_trace_records": duplicate_records,
         "run_count": len(runs),
         "runs": runs,
         "aggregate": {
@@ -95,6 +100,34 @@ def _discover_trace_paths(input_paths: Iterable[Path]) -> list[Path]:
             found.extend(path.glob("**/policy_review_trace.json"))
             found.extend(path.glob("**/policy_review_traces.jsonl"))
     return sorted(set(found))
+
+
+def _dedupe_trace_records(trace_records: list[tuple[dict[str, Any], Path]]) -> tuple[list[tuple[dict[str, Any], Path]], list[dict[str, Any]]]:
+    deduped: list[tuple[dict[str, Any], Path]] = []
+    seen: dict[str, Path] = {}
+    duplicates: list[dict[str, Any]] = []
+    for trace, path in trace_records:
+        key = _trace_identity(trace)
+        if key in seen:
+            duplicates.append(
+                {
+                    "identity": key,
+                    "kept_source_path": str(seen[key]),
+                    "duplicate_source_path": str(path),
+                }
+            )
+            continue
+        seen[key] = path
+        deduped.append((trace, path))
+    return deduped, duplicates
+
+
+def _trace_identity(trace: dict[str, Any]) -> str:
+    record_id = trace.get("record_id")
+    if isinstance(record_id, str) and record_id.strip():
+        return f"record_id:{record_id.strip()}"
+    digest = hashlib.sha256(json.dumps(trace, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")).hexdigest()
+    return f"sha256:{digest}"
 
 
 def _load_trace_records(path: Path) -> list[dict[str, Any]]:
@@ -285,9 +318,15 @@ def _warmhub_note(report: dict[str, Any]) -> str:
     top_flags = ", ".join(f"{key}={value}" for key, value in aggregate["review_flag_counts"].items()) or "none"
     recommendation_ids = ", ".join(item["id"] for item in report["recommendations"]) or "none"
     variant = report["candidate_variant"]
+    dedupe_note = ""
+    if report.get("duplicate_trace_count"):
+        dedupe_note = (
+            f"Deduped {report['input_trace_record_count']} input trace record(s) "
+            f"to {report['trace_count']} unique trace(s). "
+        )
     return (
         f"Failure analysis {report['analysis_id']} reviewed {report['run_count']} policy-review trace(s). "
-        f"Top flags: {top_flags}. Recommended next checks: {recommendation_ids}. "
+        f"{dedupe_note}Top flags: {top_flags}. Recommended next checks: {recommendation_ids}. "
         f"Candidate general variant {variant['name']} should bind grounding_audit to the next action, avoid repeated failed servo prompts, "
         "and use viewpoint changes or image memory after repeated unstable grounding."
     )
@@ -304,6 +343,18 @@ def _markdown_report(report: dict[str, Any]) -> str:
     ]
     for key, value in report["aggregate"]["review_flag_counts"].items():
         lines.append(f"- `{key}`: {value}")
+    if report.get("duplicate_trace_count"):
+        lines.extend(
+            [
+                "",
+                "## Deduplication",
+                (
+                    f"Input trace records: `{report.get('input_trace_record_count')}`, "
+                    f"unique traces: `{report.get('trace_count')}`, "
+                    f"duplicates collapsed: `{report.get('duplicate_trace_count')}`"
+                ),
+            ]
+        )
     lines.extend(["", "## Recommendations"])
     for item in report["recommendations"]:
         lines.append(f"- `{item['id']}` ({item['priority']}): {item['general_rule']}")

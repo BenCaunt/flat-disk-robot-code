@@ -127,3 +127,28 @@ def test_analyze_failure_traces_keeps_multiline_jsonl_runs_separate(tmp_path: Pa
     assert report["trace_count"] == 2
     assert report["run_count"] == 2
     assert [run["record_id"] for run in report["runs"]] == ["trial-a", "trial-b"]
+
+
+def test_analyze_failure_traces_deduplicates_aggregate_and_per_run_trace(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    aggregate_path = run_dir / "training_export" / "policy_review_traces.jsonl"
+    individual_path = run_dir / "training_export" / "runs" / "trial-a" / "policy_review_trace.json"
+    aggregate_path.parent.mkdir(parents=True)
+    individual_path.parent.mkdir(parents=True)
+    trace = _trace("trial-a")
+    aggregate_path.write_text(json.dumps(trace) + "\n", encoding="utf-8")
+    individual_path.write_text(json.dumps(trace) + "\n", encoding="utf-8")
+
+    report = analyze_failure_traces(
+        [run_dir],
+        output_dir=tmp_path / "analysis",
+        analysis_id="analysis-001",
+    )
+
+    assert report["input_trace_record_count"] == 2
+    assert report["trace_count"] == 1
+    assert report["duplicate_trace_count"] == 1
+    assert report["duplicate_trace_records"][0]["identity"] == "record_id:trial-a"
+    assert report["run_count"] == 1
+    ops = json.loads((tmp_path / "analysis" / "warmhub_ops.json").read_text(encoding="utf-8"))
+    assert "Deduped 2 input trace record(s) to 1 unique trace(s)." in ops[0]["data"]["note"]
