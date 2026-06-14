@@ -9,10 +9,16 @@ QWEN_SERVER_PID="${QWEN_SERVER_PID:-/workspace/qwen_vllm.pid}"
 QWEN_SERVER_TIMEOUT_S="${QWEN_SERVER_TIMEOUT_S:-900}"
 QWEN_VLLM_INSTALL="${QWEN_VLLM_INSTALL:-1}"
 QWEN_VLLM_PACKAGE="${QWEN_VLLM_PACKAGE:-vllm}"
+QWEN_VLLM_VENV="${QWEN_VLLM_VENV:-/workspace/open_vocab_nav_qwen_vllm_venv}"
 QWEN_VLLM_EXTRA_ARGS="${QWEN_VLLM_EXTRA_ARGS:---max-model-len 16384}"
+QWEN_HF_HOME="${QWEN_HF_HOME:-/workspace/huggingface}"
+QWEN_TMPDIR="${QWEN_TMPDIR:-/workspace/tmp}"
 
 models_url="http://${QWEN_HOST}:${QWEN_PORT}/v1/models"
-mkdir -p "$(dirname "${QWEN_SERVER_LOG}")"
+mkdir -p "$(dirname "${QWEN_SERVER_LOG}")" "${QWEN_HF_HOME}" "${QWEN_TMPDIR}"
+export HF_HOME="${HF_HOME:-${QWEN_HF_HOME}}"
+export HF_HUB_DISABLE_XET="${HF_HUB_DISABLE_XET:-1}"
+export TMPDIR="${TMPDIR:-${QWEN_TMPDIR}}"
 
 endpoint_ready() {
   MODELS_URL="${models_url}" python3 - <<'PY'
@@ -34,13 +40,16 @@ if endpoint_ready; then
   exit 0
 fi
 
-if ! command -v vllm >/dev/null 2>&1; then
+vllm_cmd="$(command -v vllm || true)"
+if [[ -z "${vllm_cmd}" ]]; then
   if [[ "${QWEN_VLLM_INSTALL}" != "1" ]]; then
     echo "[qwen] vllm command missing and QWEN_VLLM_INSTALL=${QWEN_VLLM_INSTALL}" >&2
     exit 2
   fi
-  python3 -m pip install --upgrade pip
-  python3 -m pip install --upgrade "${QWEN_VLLM_PACKAGE}"
+  python3 -m venv "${QWEN_VLLM_VENV}"
+  "${QWEN_VLLM_VENV}/bin/python" -m pip install --upgrade pip
+  "${QWEN_VLLM_VENV}/bin/python" -m pip install --upgrade "${QWEN_VLLM_PACKAGE}"
+  vllm_cmd="${QWEN_VLLM_VENV}/bin/vllm"
 fi
 
 extra_args=()
@@ -65,12 +74,12 @@ echo "[qwen] log: ${QWEN_SERVER_LOG}"
   exec >>"${QWEN_SERVER_LOG}" 2>&1
   echo "[qwen] server start $(date -Iseconds)"
   if ((${#extra_args[@]} > 0)); then
-    exec vllm serve "${QWEN_MODEL}" \
+    exec "${vllm_cmd}" serve "${QWEN_MODEL}" \
       --host "${QWEN_HOST}" \
       --port "${QWEN_PORT}" \
       "${extra_args[@]}"
   fi
-  exec vllm serve "${QWEN_MODEL}" \
+  exec "${vllm_cmd}" serve "${QWEN_MODEL}" \
     --host "${QWEN_HOST}" \
     --port "${QWEN_PORT}"
 ) &
