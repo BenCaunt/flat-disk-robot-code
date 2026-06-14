@@ -327,7 +327,11 @@ def test_plan_qwen_grpo_training_uses_existing_manifest_and_writes_job(tmp_path:
     assert "navigation_tool_reward" in script_text
     assert "FLATDISK_GRPO_COMPLETION_LOG" in script_text
     assert "log_completion_batch" in script_text
-    assert "min(base_reward - 0.2, -0.2)" in script_text
+    assert "partial_action_reward" in script_text
+    assert "arg_match_fraction" in script_text
+    assert "expected_action" in script_text
+    assert "base_reward - 0.05" in script_text
+    assert "-0.02" in script_text
     assert "min(base_reward - 0.5, -0.5)" in script_text
     assert "conversational_text_messages" in script_text
     assert "record[\"prompt\"] = conversational_text_messages(messages)" in script_text
@@ -470,7 +474,10 @@ def test_run_qwen_grpo_training_job_executes_ready_job(tmp_path: Path) -> None:
     assert result["completion_log_metrics"]["parsed_action_count"] == 1
     assert result["completion_log_metrics"]["exact_reference_action_count"] == 1
     assert result["completion_log_metrics"]["positive_non_reference_reward_count"] == 1
+    assert result["completion_log_metrics"]["tool_match_count"] == 1
     assert result["completion_log_metrics"]["exact_reference_action_rate"] == 0.5
+    assert result["completion_log_metrics"]["tool_match_rate"] == 0.5
+    assert result["completion_log_metrics"]["mean_arg_match_fraction"] == 0.5
     assert result["completion_log_metrics"]["markdown_fence_count"] == 1
 
 

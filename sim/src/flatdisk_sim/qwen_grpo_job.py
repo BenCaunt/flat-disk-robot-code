@@ -240,10 +240,30 @@ def _completion_log_metrics(path: Path) -> dict[str, Any]:
     exact_reference_count = 0
     parsed_action_count = 0
     positive_non_reference_count = 0
+    tool_match_count = 0
+    arg_match_fractions = []
     for record in records:
         parsed_action = record.get("parsed_action") if isinstance(record.get("parsed_action"), dict) else {}
+        expected_action = (
+            record.get("expected_action")
+            if isinstance(record.get("expected_action"), dict)
+            else _reference_action_from_canonical(record.get("reference_action_canonical"))
+        )
         if parsed_action:
             parsed_action_count += 1
+        tool_match = (
+            bool(record.get("tool_match"))
+            if "tool_match" in record
+            else _action_tool(parsed_action) == _action_tool(expected_action)
+        )
+        if parsed_action and tool_match:
+            tool_match_count += 1
+        arg_match_fraction = _optional_float(record.get("arg_match_fraction"))
+        if arg_match_fraction is None:
+            arg_match_fraction = (
+                _arg_match_fraction(parsed_action, expected_action) if parsed_action and tool_match else 0.0
+            )
+        arg_match_fractions.append(arg_match_fraction)
         exact_reference = _canonical_json(parsed_action) == record.get("reference_action_canonical")
         if exact_reference:
             exact_reference_count += 1
@@ -255,8 +275,13 @@ def _completion_log_metrics(path: Path) -> dict[str, Any]:
         "parsed_action_count": parsed_action_count,
         "exact_reference_action_count": exact_reference_count,
         "positive_non_reference_reward_count": positive_non_reference_count,
+        "tool_match_count": tool_match_count,
         "parsed_action_rate": round(parsed_action_count / len(records), 6) if records else 0.0,
         "exact_reference_action_rate": round(exact_reference_count / len(records), 6) if records else 0.0,
+        "tool_match_rate": round(tool_match_count / len(records), 6) if records else 0.0,
+        "mean_arg_match_fraction": round(sum(arg_match_fractions) / len(arg_match_fractions), 6)
+        if arg_match_fractions
+        else 0.0,
         "markdown_fence_count": sum("```" in text for text in completion_texts),
         "truncated_text_count": sum(bool(record.get("completion_text_truncated")) for record in records),
         "mean_completion_chars": round(sum(len(text) for text in completion_texts) / len(completion_texts), 3)
@@ -611,6 +636,45 @@ def _canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, default=str)
 
 
+def _reference_action_from_canonical(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return {}
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _action_tool(action: Any) -> str | None:
+    if not isinstance(action, dict):
+        return None
+    tool = action.get("tool")
+    return str(tool) if tool is not None else None
+
+
+def _action_args(action: Any) -> dict[str, Any]:
+    if not isinstance(action, dict):
+        return {}
+    args = action.get("args")
+    return args if isinstance(args, dict) else {}
+
+
+def _arg_match_fraction(parsed_action: Any, expected_action: Any) -> float:
+    expected_args = _action_args(expected_action)
+    parsed_args = _action_args(parsed_action)
+    if not expected_args:
+        return 1.0 if parsed_args == expected_args else 0.0
+    matches = sum(
+        1
+        for key, expected_value in expected_args.items()
+        if _canonical_json(parsed_args.get(key)) == _canonical_json(expected_value)
+    )
+    return matches / len(expected_args)
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -703,6 +767,60 @@ def parse_action(text: str) -> dict:
     return {}
 
 
+def parse_reference_action(value) -> dict:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return {}
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def action_tool(action) -> str | None:
+    if not isinstance(action, dict):
+        return None
+    tool = action.get("tool")
+    return str(tool) if tool is not None else None
+
+
+def action_args(action) -> dict:
+    if not isinstance(action, dict):
+        return {}
+    args = action.get("args")
+    return args if isinstance(args, dict) else {}
+
+
+def arg_match_fraction(parsed_action, expected_action) -> float:
+    expected_args = action_args(expected_action)
+    parsed_args = action_args(parsed_action)
+    if not expected_args:
+        return 1.0 if parsed_args == expected_args else 0.0
+    matches = sum(
+        1
+        for key, expected_value in expected_args.items()
+        if canonical_json(parsed_args.get(key)) == canonical_json(expected_value)
+    )
+    return matches / len(expected_args)
+
+
+def action_reward_diagnostics(parsed_action, expected_action) -> dict:
+    tool_match = bool(parsed_action) and action_tool(parsed_action) == action_tool(expected_action)
+    return {
+        "tool_match": tool_match,
+        "arg_match_fraction": arg_match_fraction(parsed_action, expected_action) if tool_match else 0.0,
+    }
+
+
+def partial_action_reward(parsed_action, expected_action) -> float:
+    diagnostics = action_reward_diagnostics(parsed_action, expected_action)
+    if diagnostics["tool_match"]:
+        return -0.15 + (0.10 * diagnostics["arg_match_fraction"])
+    return -0.30
+
+
 def content_to_text(content) -> str:
     if isinstance(content, str):
         return content
@@ -750,6 +868,10 @@ def log_completion_batch(completions, rewards, reference_action_canonical=None, 
     with path.open("a", encoding="utf-8") as handle:
         for index, completion in enumerate(completions):
             text = completion_text(completion)
+            expected = value_at(reference_action_canonical, index)
+            expected_action = parse_reference_action(expected)
+            parsed_action = parse_action(text)
+            diagnostics = action_reward_diagnostics(parsed_action, expected_action)
             record = {
                 "schema": "flatdisk.qwen_grpo_completion_sample.v1",
                 "logged_at": logged_at,
@@ -759,8 +881,11 @@ def log_completion_batch(completions, rewards, reference_action_canonical=None, 
                 "source_rollout_id": value_at(metadata.get("source_rollout_id"), index),
                 "reward": value_at(rewards, index),
                 "candidate_step_reward": value_at(candidate_step_reward, index),
-                "reference_action_canonical": value_at(reference_action_canonical, index),
-                "parsed_action": parse_action(text),
+                "reference_action_canonical": expected,
+                "expected_action": expected_action,
+                "parsed_action": parsed_action,
+                "tool_match": diagnostics["tool_match"],
+                "arg_match_fraction": diagnostics["arg_match_fraction"],
                 "completion_text": text[:4000],
                 "completion_text_truncated": len(text) > 4000,
             }
@@ -775,10 +900,11 @@ def navigation_tool_reward(completions, reference_action_canonical=None, candida
         step_reward = candidate_step_reward[index] if isinstance(candidate_step_reward, list) else candidate_step_reward
         parsed = parse_action(completion_text(completion))
         base_reward = float(step_reward or 0.0)
+        expected_action = parse_reference_action(expected)
         if canonical_json(parsed) == expected:
             rewards.append(base_reward * scale)
         elif parsed:
-            rewards.append(min(base_reward - 0.2, -0.2) * scale)
+            rewards.append(min(partial_action_reward(parsed, expected_action), base_reward - 0.05, -0.02) * scale)
         else:
             rewards.append(min(base_reward - 0.5, -0.5) * scale)
     log_completion_batch(completions, rewards, reference_action_canonical, candidate_step_reward, kwargs)
