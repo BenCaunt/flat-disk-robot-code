@@ -27,9 +27,12 @@ def test_build_runpodctl_command_contains_worker_env_and_docker_args() -> None:
     assert env["AGENT_NAME"] == "agent-a"
     assert env["COMMAND_INDEX"] == "0"
     assert env["GIT_URL"] == "https://github.com/BenCaunt/flat-disk-robot-code.git"
+    assert env["START_THOR_XORG"] == "1"
+    assert env["THOR_XORG_DISPLAY"] == "0"
     docker_args = command[command.index("--docker-args") + 1]
     assert "flatdisk-sim-research-warmhub" in docker_args
     assert "task-run-command" in docker_args
+    assert "scripts/runpod_start_thor_xorg.sh" in docker_args
     assert "--complete-exit-code 2" in docker_args
     assert "git checkout abc123" in docker_args
 
@@ -64,6 +67,7 @@ def test_start_qwen_server_adds_endpoint_env_and_bootstrap_script() -> None:
     assert env["QWEN_SERVER_TIMEOUT_S"] == "1200"
     assert env["QWEN_VLLM_EXTRA_ARGS"] == "--max-model-len 8192"
     assert "scripts/runpod_start_qwen_vllm.sh" in docker_args
+    assert "scripts/runpod_start_thor_xorg.sh" in docker_args
     assert "finish_preclaimed_task" in docker_args
     assert "--no-claim" in docker_args
     assert "--evidence-artifact /workspace/qwen_vllm.log" in docker_args

@@ -51,6 +51,8 @@ class RunpodLaunchSpec:
     evidence_artifacts: tuple[str, ...] = ()
     env: dict[str, str] = field(default_factory=dict)
     start_qwen_server: bool = False
+    start_thor_xorg: bool = True
+    thor_xorg_display: int = 0
     qwen_model: str = DEFAULT_QWEN_MODEL
     qwen_host: str = DEFAULT_QWEN_HOST
     qwen_port: int = DEFAULT_QWEN_PORT
@@ -118,6 +120,13 @@ def remote_worker_script(spec: RunpodLaunchSpec) -> str:
 git fetch --all --tags
 git checkout {shlex.quote(spec.git_ref)}
 """
+    thor_xorg_setup_block = """
+if [[ "${START_THOR_XORG:-1}" == "1" ]]; then
+  export DISPLAY="${DISPLAY:-:${THOR_XORG_DISPLAY:-0}}"
+  chmod +x scripts/runpod_start_thor_xorg.sh
+  scripts/runpod_start_thor_xorg.sh
+fi
+"""
     qwen_start_block = ""
     if spec.start_qwen_server:
         qwen_start_block = """
@@ -147,6 +156,7 @@ uv run --project sim flatdisk-sim-research-warmhub --repo "$WARMHUB_REPO" task-c
   --owner "$AGENT_NAME" \\
   --note "Runpod worker claimed task before starting the local Qwen endpoint."
 worker_task_claimed=1
+""" + thor_xorg_setup_block + """
 chmod +x scripts/runpod_start_qwen_vllm.sh
 scripts/runpod_start_qwen_vllm.sh
 """
@@ -171,6 +181,8 @@ echo "[done] $(date -Iseconds)"
 exit "${{task_code}}"
 """
     else:
+        if spec.start_thor_xorg:
+            task_command = f"{thor_xorg_setup_block}{task_command}"
         task_command_block = f"""echo "[command] running Warmhub task command"
 {task_command}
 echo "[done] $(date -Iseconds)"
@@ -204,6 +216,8 @@ def worker_env(spec: RunpodLaunchSpec) -> dict[str, str]:
         "WARMHUB_REPO": spec.warmhub_repo,
         "GIT_URL": spec.git_url,
         "LOG_FILE": spec.log_file,
+        "START_THOR_XORG": "1" if spec.start_thor_xorg else "0",
+        "THOR_XORG_DISPLAY": str(spec.thor_xorg_display),
     }
     if spec.start_qwen_server:
         env.update(
@@ -327,6 +341,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--evidence-artifact", action="append", default=[])
     parser.add_argument("--env", action="append", default=[], help="Additional pod env as KEY=VALUE. Secrets are redacted in dry-run output.")
     parser.add_argument("--start-qwen-server", action="store_true", help="Start a local vLLM Qwen endpoint before running the task command.")
+    parser.add_argument("--no-start-thor-xorg", action="store_true", help="Skip starting the AI2-THOR Xorg display before running the task command.")
+    parser.add_argument("--thor-xorg-display", type=int, default=0)
     parser.add_argument("--qwen-model", default=DEFAULT_QWEN_MODEL)
     parser.add_argument("--qwen-host", default=DEFAULT_QWEN_HOST)
     parser.add_argument("--qwen-port", type=int, default=DEFAULT_QWEN_PORT)
@@ -374,6 +390,8 @@ def main() -> int:
         evidence_artifacts=tuple(args.evidence_artifact),
         env=parse_env_assignments(args.env),
         start_qwen_server=args.start_qwen_server,
+        start_thor_xorg=not args.no_start_thor_xorg,
+        thor_xorg_display=args.thor_xorg_display,
         qwen_model=args.qwen_model,
         qwen_host=args.qwen_host,
         qwen_port=args.qwen_port,
