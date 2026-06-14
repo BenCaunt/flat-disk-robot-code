@@ -588,12 +588,48 @@ commit `ea4d3fd`:
   Exact-by-tool was `visual_servo_object=4/20`, `turn_by_angle=15/26`, and
   `check_object_grounding=6/18`.
 
+An exact-reference-action bonus ablation then completed in
+`/workspace/flat-disk-robot-code-train-20260614-grpo-exactbonus4`, from commit
+`987ec94`:
+
+- Planner change: `--zero-reward-exact-action-bonus` adds a generic opt-in
+  bonus only for exact reference actions whose source `candidate_step_reward` is
+  present and zero. Missing source rewards still cannot produce positive exact
+  rewards, and non-reference actions remain non-positive. The bonus value and
+  reference action remain out of the prompt/response contract.
+- Tests: `sim/tests/test_qwen_grpo_training.py` covers the planner audit,
+  generated training script, prompt non-leakage, generic tool names, missing
+  reward handling, and the non-reference positive reward cap.
+- Result:
+  `sim/scratch/open_vocab_nav_research_loop/qwen_grpo_jobs/bathroom_cross_run_lora_4step_cap48_tool_balanced_exact_bonus005/qwen_grpo_training_result.json`
+- Status `complete`, return code `0`, duration `1626.631` seconds.
+- `completion_log_sample_count` was `32`.
+- `completion_log_metrics`: `32/32` parsed actions, `11/32` exact reference
+  actions, `19/32` same-tool matches, mean argument-match fraction `0.458333`,
+  `0` positive non-reference rewards, `0` markdown fences, `0` truncated texts,
+  and mean completion length `84.688` characters.
+- TRL metrics: train runtime about `1397` seconds, train loss `-0.01657`,
+  reward mean `-0.1313`, reward std `0.1537`, step time `344.5` seconds, and
+  `completions/clipped_ratio=0`.
+- The remote LoRA adapter saved successfully under `adapter/adapter_model.safetensors`.
+  The top-level adapter files were copied back locally under the same job's
+  `adapter/` directory; the optimizer checkpoint was left on the pod.
+- Compared with the no-bonus balanced 4-step run, exact matches dropped from
+  `12/32` to `11/32`, same-tool matches dropped from `20/32` to `19/32`, and
+  mean argument match dropped from `0.489583` to `0.458333`. This says the
+  simple zero-reward exact-action bonus is not the next scaling lever.
+- Turn overuse persisted. Expected tools in the 32 logged samples were
+  `visual_servo_object=4`, `turn_by_angle=14`, and `check_object_grounding=14`;
+  parsed tools were `visual_servo_object=5`, `turn_by_angle=20`, and
+  `check_object_grounding=7`. Exact-by-tool was `visual_servo_object=0/4`,
+  `turn_by_angle=6/14`, and `check_object_grounding=5/14`.
+
 Resume status for a future continuation:
 
 - This is no longer a verification-only blocker. Runpod auth works when
   `RUNPOD_API_KEY` is loaded from the repo root `.env`, the A40 pod can run the
-  training stack, and one-step, four-step, and eight-step LoRA adapters were saved
-  successfully.
+  training stack, and one-step, four-step, eight-step, and exact-bonus LoRA
+  adapters were saved successfully.
 - No user action is currently required to start the next training attempt.
 - Use the pushed `codex/open-vocab-nav-research-loop` ref for a clean checkout;
   the original `/workspace/flat-disk-robot-code` directory on the pod is not a
@@ -602,12 +638,13 @@ Resume status for a future continuation:
   scaling. The JSON-format issue is no longer the main blocker, generic partial
   reward is in place, and reference-tool balancing improves early same-tool
   behavior; the 8-step diagnostic still shows weak exact-action selection and
-  persistent `turn_by_angle` fallback. Useful next directions are adding a
-  generic exact-action bonus ablation for zero-reward tools, collecting more
+  persistent `turn_by_angle` fallback; the exact-action bonus ablation did not
+  help on the short comparison. Useful next directions are collecting more
   diverse grouped rollouts with stop/arrival and ambiguous grounding examples,
-  and then running a 24-step balanced comparison or held-out completion eval.
-  Keep `--max-completion-length` explicit so smoke and short training jobs
-  cannot spend most of their time generating long completions.
+  adding a held-out completion eval, auditing whether reference actions are too
+  noisy or too correlated with turns, and then running a 24-step balanced
+  comparison. Keep `--max-completion-length` explicit so smoke and short
+  training jobs cannot spend most of their time generating long completions.
 
 The fixes needed to make the smoke complete were:
 

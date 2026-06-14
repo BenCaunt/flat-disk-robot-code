@@ -243,6 +243,35 @@ Current handoff for GRPO training, 2026-06-14:
   `visual_servo_object=8`, `turn_by_angle=48`, `check_object_grounding=8`.
   Exact-by-tool was `visual_servo_object=4/20`, `turn_by_angle=15/26`, and
   `check_object_grounding=6/18`.
+- Commit `987ec94` adds an opt-in
+  `--zero-reward-exact-action-bonus` GRPO ablation. The bonus is generic,
+  applies only to exact reference actions whose source `candidate_step_reward`
+  is present and zero, and is not exposed in the prompt. Missing source rewards
+  remain non-positive. Tests in `sim/tests/test_qwen_grpo_training.py` cover the
+  planner audit, generated train script, prompt non-leakage, generic tool names,
+  and non-reference positive reward cap.
+- The exact-bonus 4-step comparison completed in
+  `/workspace/flat-disk-robot-code-train-20260614-grpo-exactbonus4`, from
+  commit `987ec94`. Local result:
+  `sim/scratch/open_vocab_nav_research_loop/qwen_grpo_jobs/bathroom_cross_run_lora_4step_cap48_tool_balanced_exact_bonus005/qwen_grpo_training_result.json`.
+  It reports `status=complete`, `returncode=0`, `duration_s=1626.631`,
+  `completion_log_sample_count=32`, `32/32` parsed actions, `11/32` exact
+  reference actions, `19/32` same-tool matches, mean argument-match fraction
+  `0.458333`, `0` positive non-reference rewards, `0` markdown fences, and `0`
+  truncated texts. TRL reported train runtime about `1397` seconds, train loss
+  `-0.01657`, reward mean `-0.1313`, reward std `0.1537`, step time `344.5`
+  seconds, and `completions/clipped_ratio=0`. The remote LoRA adapter saved and
+  top-level adapter files were copied back locally under the same job's
+  `adapter/` directory.
+- The exact-bonus ablation did not improve this short diagnostic. Compared with
+  the no-bonus balanced 4-step run, exact matches dropped from `12/32` to
+  `11/32`, same-tool matches dropped from `20/32` to `19/32`, and mean argument
+  match dropped from `0.489583` to `0.458333`. The persistent pattern remains
+  turn overuse: expected tools were `visual_servo_object=4`, `turn_by_angle=14`,
+  `check_object_grounding=14`, while parsed tools were `visual_servo_object=5`,
+  `turn_by_angle=20`, `check_object_grounding=7`. Exact-by-tool was
+  `visual_servo_object=0/4`, `turn_by_angle=6/14`, and
+  `check_object_grounding=5/14`.
 - The working pod venv is `/workspace/flatdisk-grpo-venv`, created with
   `--system-site-packages` so it can see image Torch `2.9.1+cu128`; install
   `torchvision==0.24.1 --no-deps` to match that Torch build. Do not let pip pull
@@ -254,11 +283,11 @@ Current handoff for GRPO training, 2026-06-14:
 - Next action is to improve action-choice learning signal and evaluation. The
   JSON format is stable, generic partial reward exists, and balancing improved
   early same-tool behavior, but doubling the balanced run to 8 steps did not
-  solve exact action selection and exposed a persistent turn fallback. Useful
-  next directions: add a generic exact-action bonus ablation for zero-reward
-  tools, collect more diverse grouped rollouts with stop/arrival and ambiguous
-  grounding examples, and only then scale to a 24-step balanced run or held-out
-  completion evaluation.
+  solve exact action selection; the exact-action bonus ablation also did not
+  help. Useful next directions: collect more diverse grouped rollouts with
+  stop/arrival and ambiguous grounding examples, add a held-out completion
+  evaluation, inspect whether reference actions are too noisy or too
+  correlated with turns, and only then scale to a 24-step balanced run.
 - Future continuation should treat this as past verification, not a blocker.
   There is no known Runpod auth issue when `.env` is loaded as above, and no
   user action is needed before launching the next capped LoRA training attempt.
