@@ -695,13 +695,20 @@ class AsyncDetector:
             self._pending = False
         return results
 
-    def close(self) -> None:
+    def close(self, *, timeout_s: float = 2.0) -> None:
         self._closed = True
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        while self._pending and time.monotonic() < deadline:
+            self.get_results()
+            if not self._pending:
+                break
+            time.sleep(0.05)
         try:
             self._jobs.put_nowait(None)
         except queue.Full:
             pass
-        self._thread.join(timeout=2.0)
+        remaining_s = max(0.0, deadline - time.monotonic())
+        self._thread.join(timeout=remaining_s)
 
     def _worker(self) -> None:
         while True:
@@ -1134,6 +1141,8 @@ class ObjectDriveRunner:
         signal.signal(signal.SIGTERM, self.request_stop)
         detector = AsyncDetector(self.detector, self.args.prompt)
         start_ns = time.monotonic_ns()
+        active_start_ns: int | None = None
+        first_detection_deadline_ns = start_ns + int(self.args.initial_detection_timeout * 1_000_000_000.0)
         next_detect_ns = start_ns
         try:
             self.robot.open()
@@ -1151,8 +1160,7 @@ class ObjectDriveRunner:
             while not self.stop_requested:
                 now_ns = time.monotonic_ns()
                 elapsed_s = (now_ns - start_ns) / 1_000_000_000.0
-                if elapsed_s >= self.args.duration:
-                    break
+                active_elapsed_s = 0.0 if active_start_ns is None else (now_ns - active_start_ns) / 1_000_000_000.0
 
                 frame_state = self._poll_frame_state(now_ns)
                 self._poll_status()
@@ -1162,11 +1170,20 @@ class ObjectDriveRunner:
                     if self.last_frame_seq is None or frame_state.frame.seq != self.last_frame_seq:
                         self._track_latest(frame_state)
                         self.last_frame_seq = frame_state.frame.seq
-                    if now_ns >= next_detect_ns and not detector.pending:
+                    active_remaining_s = float("inf") if active_start_ns is None else self.args.duration - active_elapsed_s
+                    can_submit_detection = active_remaining_s >= self.args.min_detection_remaining_s
+                    if now_ns >= next_detect_ns and not detector.pending and can_submit_detection:
                         if detector.submit_latest(frame_state):
                             next_detect_ns = now_ns + int(self.args.detect_interval * 1_000_000_000.0)
 
-                self._consume_detection_results(detector)
+                result_count = self._consume_detection_results(detector)
+                if active_start_ns is None:
+                    if result_count > 0:
+                        active_start_ns = now_ns
+                    elif now_ns >= first_detection_deadline_ns and not detector.pending:
+                        active_start_ns = now_ns
+                if active_start_ns is not None and (now_ns - active_start_ns) / 1_000_000_000.0 >= self.args.duration:
+                    break
                 command, detection_age_s = self._make_command(frame_state)
                 published = False
                 if command is not None and self.args.arm:
@@ -1196,7 +1213,7 @@ class ObjectDriveRunner:
                 self._report(now_ns, detector_pending=detector.pending)
                 time.sleep(1.0 / max(self.args.control_hz, 1.0))
         finally:
-            detector.close()
+            detector.close(timeout_s=self.args.detector_shutdown_timeout)
             try:
                 if self.args.stop_on_exit:
                     self.robot.stop()
@@ -1344,8 +1361,10 @@ class ObjectDriveRunner:
         )
         self.active_detection_frame_ns = frame_state.monotonic_ns
 
-    def _consume_detection_results(self, detector: AsyncDetector) -> None:
+    def _consume_detection_results(self, detector: AsyncDetector) -> int:
+        result_count = 0
         for result in detector.get_results():
+            result_count += 1
             self.latest_detection_error = result.error
             if result.error:
                 self.lost_count += 1
@@ -1407,6 +1426,7 @@ class ObjectDriveRunner:
                 raw=best.raw,
             )
             self.active_detection_frame_ns = (list(self.frame_buffer)[-1].monotonic_ns if self.frame_buffer else origin.monotonic_ns)
+        return result_count
 
     def _make_command(self, frame_state: FrameState | None) -> tuple[DriveCommand | None, float | None]:
         if frame_state is None or self.active_detection is None:
@@ -1573,6 +1593,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--control-hz", type=float, default=DEFAULT_CONTROL_HZ)
     parser.add_argument("--detect-interval", type=float, default=0.6)
+    parser.add_argument(
+        "--initial-detection-timeout",
+        type=float,
+        default=180.0,
+        help="Wait up to this many seconds for the first detector result before starting the active duration.",
+    )
+    parser.add_argument(
+        "--detector-shutdown-timeout",
+        type=float,
+        default=180.0,
+        help="Wait up to this many seconds for an in-flight detector job before process shutdown.",
+    )
+    parser.add_argument(
+        "--min-detection-remaining-s",
+        type=float,
+        default=5.0,
+        help="Only submit a new detector job if this much active servo time remains.",
+    )
     parser.add_argument("--camera-hz-hint", type=float, default=10.0)
     parser.add_argument("--frame-buffer-s", type=float, default=4.0)
     parser.add_argument("--max-track-age", type=float, default=2.5)
@@ -1642,6 +1680,12 @@ def parse_args() -> argparse.Namespace:
         parser.error("--duration must be positive")
     if args.forward_power < 0.0:
         parser.error("--forward-power must be non-negative")
+    if args.initial_detection_timeout < 0.0:
+        parser.error("--initial-detection-timeout must be non-negative")
+    if args.detector_shutdown_timeout < 0.0:
+        parser.error("--detector-shutdown-timeout must be non-negative")
+    if args.min_detection_remaining_s < 0.0:
+        parser.error("--min-detection-remaining-s must be non-negative")
     if args.imu_heading_noise_deg < 0.0:
         parser.error("--imu-heading-noise-deg must be non-negative")
     if args.model_bearing_noise_deg <= 0.0:
