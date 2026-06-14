@@ -275,6 +275,21 @@ def test_task_plan_config_creates_planned_slice_tasks(tmp_path) -> None:
     assert "qwen_grpo_training/plan-001/qwen_grpo_rollout_groups.jsonl" in grpo_notes["expected_artifacts"]
     assert "qwen_grpo_training/plan-001/qwen_ppo_step_samples.jsonl" in grpo_notes["expected_artifacts"]
     assert any("actor action equals executed action" in check for check in grpo_notes["checks"])
+    grpo_job_plan = next(op for op in ops if op["name"] == "AgentTask/plan-001-qwen-grpo-job-plan")
+    assert "qwen-grpo" in grpo_job_plan["data"]["tags"]
+    assert "preference-training" in grpo_job_plan["data"]["tags"]
+    grpo_job_notes = json.loads(grpo_job_plan["data"]["notes"])
+    assert grpo_job_notes["prerequisites"] == ["AgentTask/plan-001-qwen-grpo-train-plan"]
+    assert grpo_job_notes["accepted_exit_codes"] == [0, 2]
+    assert "flatdisk-sim-plan-qwen-grpo-training" in grpo_job_notes["commands"][0]
+    assert "--input sim/scratch/open_vocab_nav_research_loop/qwen_grpo_training/plan-001" in grpo_job_notes["commands"][0]
+    assert "--output-dir sim/scratch/open_vocab_nav_research_loop/qwen_grpo_jobs/plan-001" in grpo_job_notes["commands"][0]
+    assert "--model-id Qwen/Qwen3-VL-8B-Instruct" in grpo_job_notes["commands"][0]
+    assert "--fail-on-not-ready" in grpo_job_notes["commands"][0]
+    assert "qwen_grpo_jobs/plan-001/qwen_grpo_training_job.json" in grpo_job_notes["expected_artifacts"]
+    assert "qwen_grpo_jobs/plan-001/qwen_grpo_trl_dataset.jsonl" in grpo_job_notes["expected_artifacts"]
+    assert "qwen_grpo_jobs/plan-001/train_qwen_grpo_trl.py" in grpo_job_notes["expected_artifacts"]
+    assert any("offline replay rewards" in check for check in grpo_job_notes["checks"])
     dpo_train = next(op for op in ops if op["name"] == "AgentTask/plan-001-qwen-dpo-train-worker")
     assert "preference-training" in dpo_train["data"]["tags"]
     assert "gpu-training-worker" in dpo_train["data"]["tags"]
@@ -289,6 +304,21 @@ def test_task_plan_config_creates_planned_slice_tasks(tmp_path) -> None:
     assert "qwen_dpo_training/plan-001/train_qwen_dpo_trl.py" in dpo_train_notes["expected_artifacts"]
     assert "qwen_dpo_training/plan-001/qwen_dpo_training_result.json" in dpo_train_notes["expected_artifacts"]
     assert any("required training packages" in check for check in dpo_train_notes["checks"])
+    grpo_train = next(op for op in ops if op["name"] == "AgentTask/plan-001-qwen-grpo-train-worker")
+    assert "qwen-grpo" in grpo_train["data"]["tags"]
+    assert "preference-training" in grpo_train["data"]["tags"]
+    assert "gpu-training-worker" in grpo_train["data"]["tags"]
+    grpo_train_notes = json.loads(grpo_train["data"]["notes"])
+    assert grpo_train_notes["prerequisites"] == ["AgentTask/plan-001-qwen-grpo-job-plan"]
+    assert grpo_train_notes["accepted_exit_codes"] == [0, 2]
+    assert "flatdisk-sim-run-qwen-grpo-training" in grpo_train_notes["commands"][0]
+    assert "--job sim/scratch/open_vocab_nav_research_loop/qwen_grpo_jobs/plan-001/qwen_grpo_training_job.json" in grpo_train_notes["commands"][0]
+    assert "--result-dir sim/scratch/open_vocab_nav_research_loop/qwen_grpo_jobs/plan-001" in grpo_train_notes["commands"][0]
+    assert 'if test "$code" -eq 2; then exit 1; fi' in grpo_train_notes["commands"][0]
+    assert "qwen_grpo_jobs/plan-001/qwen_grpo_training_job.json" in grpo_train_notes["expected_artifacts"]
+    assert "qwen_grpo_jobs/plan-001/train_qwen_grpo_trl.py" in grpo_train_notes["expected_artifacts"]
+    assert "qwen_grpo_jobs/plan-001/qwen_grpo_training_result.json" in grpo_train_notes["expected_artifacts"]
+    assert any("required training packages" in check for check in grpo_train_notes["checks"])
 
 
 def test_task_finish_ops_write_subagent_result() -> None:

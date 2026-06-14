@@ -462,7 +462,14 @@ def make_task_plan_ops(
     dpo_train_plan_ref = _task_wref(dpo_train_plan_task_id)
     dpo_training_dir = output_dir / "qwen_dpo_training" / plan_name
     dpo_training_job = dpo_training_dir / "qwen_dpo_training_job.json"
+    grpo_train_plan_task_id = f"{plan_name}-qwen-grpo-train-plan"
+    grpo_train_plan_ref = _task_wref(grpo_train_plan_task_id)
     grpo_training_dir = output_dir / "qwen_grpo_training" / plan_name
+    grpo_training_manifest = grpo_training_dir / "qwen_grpo_training_manifest.json"
+    grpo_job_plan_task_id = f"{plan_name}-qwen-grpo-job-plan"
+    grpo_job_plan_ref = _task_wref(grpo_job_plan_task_id)
+    grpo_job_dir = output_dir / "qwen_grpo_jobs" / plan_name
+    grpo_training_job = grpo_job_dir / "qwen_grpo_training_job.json"
     ops.append(
         _planned_task_op(
             task_id=dpo_train_plan_task_id,
@@ -501,7 +508,7 @@ def make_task_plan_ops(
     )
     ops.append(
         _planned_task_op(
-            task_id=f"{plan_name}-qwen-grpo-train-plan",
+            task_id=grpo_train_plan_task_id,
             objective=f"Materialize Qwen GRPO grouped-rollout handoff data for {config.experiment_id}.",
             owner=owner,
             priority=priority,
@@ -530,6 +537,42 @@ def make_task_plan_ops(
                     "GRPO handoff keeps evaluator rewards outside model-facing prompt and completion messages.",
                     "Only rollout candidates where actor action equals executed action are marked trainable.",
                     "Each trainable group has at least two Qwen trajectory candidates with comparable rewards.",
+                ],
+                "policy_constraints": _policy_constraints(),
+            },
+        )
+    )
+    ops.append(
+        _planned_task_op(
+            task_id=grpo_job_plan_task_id,
+            objective=f"Plan an offline replay Qwen GRPO training job for {config.experiment_id} without starting GPU training.",
+            owner=owner,
+            priority=priority,
+            related_experiment=experiment_ref,
+            tags=[*common_tags, "qwen-grpo", "grpo", "preference-training", "training-worker"],
+            prerequisites=[grpo_train_plan_ref],
+            notes={
+                "commands": [
+                    (
+                        f"if test -f {grpo_training_manifest}; then "
+                        "uv run --project sim flatdisk-sim-plan-qwen-grpo-training "
+                        f"--input {grpo_training_dir} "
+                        f"--output-dir {grpo_job_dir} "
+                        f"--model-id {_qwen_training_model_id(config)} "
+                        "--fail-on-not-ready; "
+                        "else echo '[qwen-grpo-job] missing qwen_grpo_training manifest; no trainable grouped rollout data yet'; exit 2; fi"
+                    )
+                ],
+                "accepted_exit_codes": [0, 2],
+                "expected_artifacts": [
+                    f"qwen_grpo_jobs/{plan_name}/qwen_grpo_training_job.json",
+                    f"qwen_grpo_jobs/{plan_name}/qwen_grpo_trl_dataset.jsonl",
+                    f"qwen_grpo_jobs/{plan_name}/train_qwen_grpo_trl.py",
+                ],
+                "checks": [
+                    "GRPO job manifest validates prompt/image paths, trainable rollout counts, and privileged-token scans.",
+                    "Generated TRL script uses offline replay rewards from sidecar columns and does not claim online simulator reward.",
+                    "Exit code 2 means no trainable grouped rollout data yet, not an infrastructure failure.",
                 ],
                 "policy_constraints": _policy_constraints(),
             },
@@ -568,6 +611,46 @@ def make_task_plan_ops(
                 "checks": [
                     "Runner validates the job manifest, dataset, train script, and required training packages before launch.",
                     "The generated TRL command is the only process that imports Transformers/TRL training dependencies.",
+                    "Exit code 2 from the runner is a real not-ready worker failure and should not be treated as complete.",
+                ],
+                "policy_constraints": _policy_constraints(),
+            },
+        )
+    )
+    ops.append(
+        _planned_task_op(
+            task_id=f"{plan_name}-qwen-grpo-train-worker",
+            objective=f"Run the planned offline replay Qwen GRPO training job for {config.experiment_id} on a training-capable worker.",
+            owner=owner,
+            priority=priority,
+            related_experiment=experiment_ref,
+            tags=[*common_tags, "qwen-grpo", "grpo", "preference-training", "training-worker", "gpu-training-worker"],
+            prerequisites=[grpo_job_plan_ref],
+            notes={
+                "commands": [
+                    (
+                        f"if test -f {grpo_training_job}; then "
+                        "set +e; "
+                        "uv run --project sim flatdisk-sim-run-qwen-grpo-training "
+                        f"--job {grpo_training_job} "
+                        f"--result-dir {grpo_job_dir}; "
+                        "code=$?; set -e; "
+                        "if test \"$code\" -eq 2; then exit 1; fi; "
+                        "exit \"$code\"; "
+                        "else echo '[qwen-grpo-train] missing qwen_grpo_training job; no training run to start'; exit 2; fi"
+                    )
+                ],
+                "accepted_exit_codes": [0, 2],
+                "expected_artifacts": [
+                    f"qwen_grpo_jobs/{plan_name}/qwen_grpo_training_job.json",
+                    f"qwen_grpo_jobs/{plan_name}/qwen_grpo_trl_dataset.jsonl",
+                    f"qwen_grpo_jobs/{plan_name}/train_qwen_grpo_trl.py",
+                    f"qwen_grpo_jobs/{plan_name}/qwen_grpo_training_result.json",
+                    f"qwen_grpo_jobs/{plan_name}/adapter",
+                ],
+                "checks": [
+                    "Runner validates the job manifest, TRL dataset, train script, and required training packages before launch.",
+                    "The generated GRPO script is the only process that imports Transformers/TRL training dependencies.",
                     "Exit code 2 from the runner is a real not-ready worker failure and should not be treated as complete.",
                 ],
                 "policy_constraints": _policy_constraints(),

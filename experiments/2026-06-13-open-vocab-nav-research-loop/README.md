@@ -213,3 +213,25 @@ uv run --project sim flatdisk-sim-prepare-qwen-grpo-training \
 
 For split Runpod artifacts, repeat `--input` once per artifact directory and
 write a merged output directory such as `qwen_grpo_training/bathroom_cross_run`.
+
+Then plan the offline replay GRPO training job. This validates the ready
+`qwen_grpo_training_manifest.json`, writes `qwen_grpo_trl_dataset.jsonl`, and
+generates a TRL `GRPOTrainer` script without starting GPU training locally.
+
+```bash
+uv run --project sim flatdisk-sim-plan-qwen-grpo-training \
+  --input sim/scratch/open_vocab_nav_research_loop/<run>/qwen_grpo_training \
+  --output-dir sim/scratch/open_vocab_nav_research_loop/<run>/qwen_grpo_jobs
+```
+
+On a training-capable worker, run the generated job:
+
+```bash
+uv run --project sim flatdisk-sim-run-qwen-grpo-training \
+  --job sim/scratch/open_vocab_nav_research_loop/<run>/qwen_grpo_jobs/qwen_grpo_training_job.json
+```
+
+Use `--dry-run --skip-dependency-check` to validate the job handoff without
+starting `accelerate launch`. This GRPO path uses recorded rollout rewards as
+an offline proxy reward; online simulator reward training is still a separate
+future worker design.

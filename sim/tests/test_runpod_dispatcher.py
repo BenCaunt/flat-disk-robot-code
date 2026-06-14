@@ -147,6 +147,19 @@ def test_task_stage_classifies_preference_training_tasks() -> None:
     assert task_stage(task) == "preference-training"
 
 
+def test_task_stage_classifies_grpo_training_worker_tasks() -> None:
+    task = AgentTaskSummary(
+        wref="AgentTask/plan-qwen-grpo-train-worker",
+        name="plan-qwen-grpo-train-worker",
+        status="planned",
+        owner="unassigned",
+        objective="Run Qwen GRPO training",
+        tags=("gpu-training-worker", "qwen-grpo", "training-worker"),
+    )
+
+    assert task_stage(task) == "preference-training"
+
+
 def test_preference_training_dispatch_can_skip_thor_xorg() -> None:
     task = AgentTaskSummary(
         wref="AgentTask/plan-qwen-dpo-train-worker",
@@ -205,6 +218,30 @@ def test_preference_training_dispatch_can_skip_thor_xorg() -> None:
     assert env["START_THOR_XORG"] == "0"
     assert "scripts/runpod_start_thor_xorg.sh" not in docker_args
     assert "scripts/runpod_start_qwen_vllm.sh" not in docker_args
+
+    grpo_task = AgentTaskSummary(
+        wref="AgentTask/plan-qwen-grpo-train-worker",
+        name="plan-qwen-grpo-train-worker",
+        status="planned",
+        owner="unassigned",
+        objective="Run Qwen GRPO training",
+        tags=("gpu-training-worker", "qwen-grpo", "training-worker"),
+    )
+    grpo_specs = make_dispatch_specs(
+        args,
+        [grpo_task],
+        git_url="https://github.com/BenCaunt/flat-disk-robot-code.git",
+        git_ref="abc123",
+    )
+    grpo_command = build_runpodctl_command(grpo_specs[0])
+    grpo_env = json.loads(grpo_command[grpo_command.index("--env") + 1])
+    grpo_docker_args = grpo_command[grpo_command.index("--docker-args") + 1]
+
+    assert grpo_specs[0].start_thor_xorg is False
+    assert grpo_specs[0].start_qwen_server is False
+    assert grpo_env["START_THOR_XORG"] == "0"
+    assert "scripts/runpod_start_thor_xorg.sh" not in grpo_docker_args
+    assert "scripts/runpod_start_qwen_vllm.sh" not in grpo_docker_args
 
 
 def test_query_queue_health_summarizes_active_tasks(monkeypatch) -> None:

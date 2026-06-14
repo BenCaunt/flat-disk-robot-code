@@ -260,7 +260,11 @@ The sibling `qwen-grpo-train-plan` task runs
 `flatdisk-sim-prepare-qwen-grpo-training` to materialize grouped rollout
 candidates for future GRPO/PPO work. It marks only trajectories whose actor
 actions were actually executed as trainable and keeps evaluator rewards outside
-model-facing messages.
+model-facing messages. The following `qwen-grpo-job-plan` task turns that
+handoff into a `qwen_grpo_training_job.json`, `qwen_grpo_trl_dataset.jsonl`,
+and generated TRL script. The worker task runs
+`flatdisk-sim-run-qwen-grpo-training`; this is an offline replay/proxy GRPO
+handoff, not a claim that Qwen is receiving live simulator rewards yet.
 
 ## Runpod Worker
 
@@ -396,9 +400,15 @@ By default it skips tasks whose `notes.prerequisites` are not complete; pass
   Qwen prompt/assistant targets and trajectory rewards held in a separate
   evaluator channel for later GRPO/PPO training. Pass repeated `--input`
   values to merge split one-rollout Runpod exports into a comparable group.
+- Use `flatdisk-sim-plan-qwen-grpo-training` on a ready
+  `qwen_grpo_training_manifest.json` to write the offline replay GRPO job
+  manifest, prompt/image JSONL, and generated TRL script. Run
+  `flatdisk-sim-run-qwen-grpo-training --job <qwen_grpo_training_job.json>`
+  only on a training-capable worker; use `--dry-run --skip-dependency-check`
+  for queue/path validation.
 - Dispatch preference-training GPU workers with `--stage preference-training`
   and `--tag gpu-training-worker --no-start-thor-xorg`; do not pass
-  `--start-qwen-server` because DPO training loads the model directly.
+  `--start-qwen-server` because DPO/GRPO training loads the model directly.
 - Use `training_export/policy_review_traces.jsonl` first for failure triage and
   parallel-agent handoff; it records tool calls and contact-sheet paths without
   hidden target distances or THOR object metadata.
