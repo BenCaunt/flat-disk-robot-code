@@ -116,7 +116,10 @@ The generated sweep keeps all variants model-based (`qwen`), avoids static
 object/color examples in actor rules, and keeps semantic topomap term routing
 off. It relies on the default strict research-loop gate. Use
 `flatdisk-sim-research-warmhub task-plan-config` to seed planned Runpod
-trial-slice tasks from it.
+trial-slice tasks from it. The generated training-review task materializes
+`qwen_dpo_messages.jsonl` from `training_export/policy_dataset_v1` before
+running training readiness, so future workers can see whether preference-tuning
+handoff data exists.
 
 The `qwen_grounding_recovery` variant is derived from policy-review trace
 failure analysis. It specifically tests whether Qwen can bind its own

@@ -233,11 +233,19 @@ def test_task_plan_config_creates_planned_slice_tasks(tmp_path) -> None:
     assert "--input sim/scratch/open_vocab_nav_research_loop" in analysis_notes["commands"][0]
     assert "--commit-warmhub" in analysis_notes["commands"][0]
     training_review = next(op for op in ops if op["name"] == "AgentTask/plan-001-training-review")
+    assert "qwen-dpo" in training_review["data"]["tags"]
+    assert "preference-tuning" in training_review["data"]["tags"]
     training_notes = json.loads(training_review["data"]["notes"])
-    assert training_notes["commands"][0].startswith("uv run --project sim flatdisk-sim-nav-training-readiness")
+    assert "flatdisk-sim-prepare-qwen-tool-training" in training_notes["commands"][0]
+    assert "training_export/policy_dataset_v1" in training_notes["commands"][0]
+    assert "qwen_tool_training/plan-001" in training_notes["commands"][0]
+    assert "flatdisk-sim-nav-training-readiness" in training_notes["commands"][0]
     assert "--input sim/scratch/open_vocab_nav_research_loop" in training_notes["commands"][0]
+    assert "--input sim/scratch/open_vocab_nav_research_loop/qwen_tool_training/plan-001" in training_notes["commands"][0]
     assert "--commit-warmhub" in training_notes["commands"][0]
-    assert "training_readiness/training_readiness.json" in training_notes["expected_artifacts"]
+    assert "qwen_tool_training/plan-001/qwen_dpo_messages.jsonl" in training_notes["expected_artifacts"]
+    assert "training_readiness/plan-001/training_readiness.json" in training_notes["expected_artifacts"]
+    assert any("prompt/chosen/rejected/images" in check for check in training_notes["checks"])
 
 
 def test_task_finish_ops_write_subagent_result() -> None:

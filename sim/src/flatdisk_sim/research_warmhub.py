@@ -412,17 +412,24 @@ def make_task_plan_ops(
     ops.append(
         _planned_task_op(
             task_id=f"{plan_name}-training-review",
-            objective=f"Review training_export artifacts from {config.experiment_id} for SFT/GRPO/PPO readiness.",
+            objective=f"Materialize Qwen DPO handoff data and review {config.experiment_id} artifacts for SFT/preference/PPO/GRPO readiness.",
             owner=owner,
             priority=priority,
             related_experiment=experiment_ref,
-            tags=[*common_tags, "training-export", "grpo"],
+            tags=[*common_tags, "training-export", "qwen-dpo", "preference-tuning", "grpo"],
             prerequisites=run_task_refs,
             notes={
                 "commands": [
                     (
+                        "if test -f "
+                        f"{output_dir / 'training_export' / 'policy_dataset_v1' / 'dataset_manifest.json'}; then "
+                        "uv run --project sim flatdisk-sim-prepare-qwen-tool-training "
+                        f"--input {output_dir / 'training_export' / 'policy_dataset_v1'} "
+                        f"--output-dir {output_dir / 'qwen_tool_training' / plan_name}; "
+                        "fi; "
                         "uv run --project sim flatdisk-sim-nav-training-readiness "
                         f"--input {output_dir} "
+                        f"--input {output_dir / 'qwen_tool_training' / plan_name} "
                         f"--output-dir {output_dir / 'training_readiness' / plan_name} "
                         f"--experiment-id {config.experiment_id} "
                         f"--about {experiment_ref} "
@@ -433,11 +440,15 @@ def make_task_plan_ops(
                     "training_export/policy_steps.jsonl",
                     "training_export/episode_rollouts.jsonl",
                     "training_export/training_manifest.json",
-                    "training_readiness/training_readiness.json",
+                    f"qwen_tool_training/{plan_name}/qwen_dpo_messages.jsonl",
+                    f"qwen_tool_training/{plan_name}/qwen_tool_training_manifest.json",
+                    f"training_readiness/{plan_name}/training_readiness.json",
                 ],
                 "checks": [
                     "Policy inputs contain no hidden target/object metadata.",
                     "Evaluator rewards are separated from policy inputs.",
+                    "Qwen DPO handoff records use explicit prompt/chosen/rejected/images columns.",
+                    "Qwen DPO image references exist and remain model-facing path references.",
                     "Successful and failed trajectories are both represented for ranking/filtering.",
                     "Candidate reward shaping is documented before using it for GRPO/PPO.",
                 ],

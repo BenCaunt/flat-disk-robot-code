@@ -243,6 +243,11 @@ commands for each episode and `flatdisk-sim-research-loop --preflight-only`
 validation commands. The v4 fixture, preflight, and topomap-memory slice
 commands include conditional map-build guards, so fresh pods can create missing
 CLIP map artifacts before running the eval without rebuilding existing maps.
+The generated training-review task also runs
+`flatdisk-sim-prepare-qwen-tool-training` before
+`flatdisk-sim-nav-training-readiness`, so WarmHub readiness assertions include
+accepted Qwen SFT counts, Qwen guard-replacement preferences, and
+`qwen_dpo_messages.jsonl` handoff counts.
 
 ## Runpod Worker
 
