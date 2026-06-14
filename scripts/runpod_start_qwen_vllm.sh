@@ -8,8 +8,8 @@ QWEN_SERVER_LOG="${QWEN_SERVER_LOG:-/workspace/qwen_vllm.log}"
 QWEN_SERVER_PID="${QWEN_SERVER_PID:-/workspace/qwen_vllm.pid}"
 QWEN_SERVER_TIMEOUT_S="${QWEN_SERVER_TIMEOUT_S:-900}"
 QWEN_VLLM_INSTALL="${QWEN_VLLM_INSTALL:-1}"
-QWEN_VLLM_PACKAGE="${QWEN_VLLM_PACKAGE:-vllm}"
-QWEN_VLLM_VENV="${QWEN_VLLM_VENV:-/workspace/open_vocab_nav_qwen_vllm_venv}"
+QWEN_VLLM_PACKAGE="${QWEN_VLLM_PACKAGE:-vllm==0.16.0}"
+QWEN_VLLM_VENV="${QWEN_VLLM_VENV:-/workspace/open_vocab_nav_qwen_vllm_venv_vllm016}"
 QWEN_VLLM_EXTRA_ARGS="${QWEN_VLLM_EXTRA_ARGS:---max-model-len 16384}"
 QWEN_HF_HOME="${QWEN_HF_HOME:-/workspace/huggingface}"
 QWEN_PIP_CACHE_DIR="${QWEN_PIP_CACHE_DIR:-/workspace/pip-cache}"
@@ -42,7 +42,12 @@ if endpoint_ready; then
   exit 0
 fi
 
-vllm_cmd="$(command -v vllm || true)"
+vllm_cmd=""
+if [[ -x "${QWEN_VLLM_VENV}/bin/vllm" ]]; then
+  vllm_cmd="${QWEN_VLLM_VENV}/bin/vllm"
+else
+  vllm_cmd="$(command -v vllm || true)"
+fi
 if [[ -z "${vllm_cmd}" ]]; then
   if [[ "${QWEN_VLLM_INSTALL}" != "1" ]]; then
     echo "[qwen] vllm command missing and QWEN_VLLM_INSTALL=${QWEN_VLLM_INSTALL}" >&2
