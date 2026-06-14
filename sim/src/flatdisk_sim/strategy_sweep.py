@@ -20,6 +20,7 @@ class StrategyTemplate:
     critic_rules: tuple[str, ...] = ()
     topomap_memory: bool = False
     object_drive_detector: str | None = None
+    critic_mode: str = "none"
 
 
 STRATEGY_TEMPLATES: tuple[StrategyTemplate, ...] = (
@@ -92,6 +93,25 @@ STRATEGY_TEMPLATES: tuple[StrategyTemplate, ...] = (
         ),
     ),
     StrategyTemplate(
+        name="grounding_audit_critic",
+        description="Critic-enabled recovery strategy that uses action history and a second Qwen pass to block contradicted repeated servo prompts.",
+        prompt_profile="grounding-audit-critic-action-history-v1",
+        actor_rules=(
+            "Use action_history_summary as explicit control evidence; if it reports same_prompt_repeat_is_contradicted_by_prior_audit, do not call visual_servo_object with that prompt.",
+            "Before any visual_servo_object call, write grounding_audit.evidence tying the prompt to a currently visible instance in the latest RGB frame.",
+            "When a previous audit requested a prompt change, select a visibly distinct waypoint phrase, check_object_grounding, query_topomap_memory, or a bounded viewpoint-changing action.",
+            "After a critic rejection, obey replacement_action when present; otherwise choose a bounded information-gathering action and update memory with the rejected prompt.",
+            "Do not turn a failed final-goal phrase into a longer synonym list; change viewpoint or use a different visible landmark selected from the latest RGB frame.",
+        ),
+        critic_rules=(
+            "Reject visual_servo_object when action_history_summary.same_prompt_repeat_is_contradicted_by_prior_audit names the same prompt.",
+            "Reject visual_servo_object when grounding_audit.previous_visual_servo_box_matches_intended_object is false and the action repeats the previous prompt.",
+            "Reject stop unless memory_update.arrival_evidence cites latest RGB evidence, not detector status alone.",
+            "Approve check_object_grounding, query_topomap_memory, or bounded viewpoint changes after repeated unstable servo attempts.",
+        ),
+        critic_mode="same-model",
+    ),
+    StrategyTemplate(
         name="grounding_dino_recovery",
         description="Detector-backend recovery strategy that uses GroundingDINO phrase grounding while keeping the same Qwen tool loop.",
         prompt_profile="grounding-dino-recovery-v1",
@@ -161,7 +181,7 @@ def generate_strategy_config(
             "object_drive_detector": object_drive_detector or template.object_drive_detector or inherited.get("object_drive_detector"),
             "actor_rules": list(template.actor_rules),
             "critic_rules": list(template.critic_rules),
-            "critic_mode": "none",
+            "critic_mode": template.critic_mode,
         }
         if template.topomap_memory:
             variant.update(

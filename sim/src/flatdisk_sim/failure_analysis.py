@@ -270,6 +270,32 @@ def _recommendations(
 
 
 def _candidate_variant(recommendations: list[dict[str, Any]]) -> dict[str, Any]:
+    source_ids = [item["id"] for item in recommendations]
+    if "grounding_audit_must_bind_next_action" in source_ids:
+        rules = [
+            "Use action_history_summary as explicit control evidence; if it reports same_prompt_repeat_is_contradicted_by_prior_audit, do not call visual_servo_object with that prompt.",
+            "Before any visual_servo_object call, write grounding_audit.evidence tying the prompt to a currently visible instance in the latest RGB frame.",
+            "When a previous audit requested a prompt change, select a visibly distinct waypoint phrase, check_object_grounding, query_topomap_memory, or a bounded viewpoint-changing action.",
+            "After a critic rejection, obey replacement_action when present; otherwise choose a bounded information-gathering action and update memory with the rejected prompt.",
+            "Do not turn a failed final-goal phrase into a longer synonym list; change viewpoint or use a different visible landmark selected from the latest RGB frame.",
+        ]
+        critic_rules = [
+            "Reject visual_servo_object when action_history_summary.same_prompt_repeat_is_contradicted_by_prior_audit names the same prompt.",
+            "Reject visual_servo_object when grounding_audit.previous_visual_servo_box_matches_intended_object is false and the action repeats the previous prompt.",
+            "Reject stop unless memory_update.arrival_evidence cites latest RGB evidence, not detector status alone.",
+            "Approve check_object_grounding, query_topomap_memory, or bounded viewpoint changes after repeated unstable servo attempts.",
+        ]
+        return {
+            "name": "qwen_grounding_audit_critic_v1",
+            "description": "Trace-derived critic-enabled recovery variant for repeated contradicted phrase grounding.",
+            "prompt_profile": "grounding-audit-critic-action-history-v1",
+            "actor_rules": rules,
+            "critic_rules": critic_rules,
+            "critic_mode": "same-model",
+            "source_recommendation_ids": source_ids,
+            "no_static_object_or_color_examples": True,
+            "topomap_memory_allow_semantic_terms": False,
+        }
     rules = [
         "Maintain failed_servo_prompts and failed_viewpoints in memory_update; remove an entry only after a later tool result reports stable grounding.",
         "If the previous grounding_audit says the box mismatched or next_prompt_should_change is true, do not reuse the same visual_servo_object prompt on the next step.",
@@ -288,7 +314,8 @@ def _candidate_variant(recommendations: list[dict[str, Any]]) -> dict[str, Any]:
         "prompt_profile": "grounding-recovery-v1",
         "actor_rules": rules,
         "critic_rules": critic_rules,
-        "source_recommendation_ids": [item["id"] for item in recommendations],
+        "critic_mode": "none",
+        "source_recommendation_ids": source_ids,
         "no_static_object_or_color_examples": True,
         "topomap_memory_allow_semantic_terms": False,
     }

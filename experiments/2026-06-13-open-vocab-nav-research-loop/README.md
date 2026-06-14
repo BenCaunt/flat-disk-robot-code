@@ -127,6 +127,13 @@ grounding-audit result to the next action: after mismatched or unstable visual
 servo grounding, it should avoid repeating the same servo prompt and instead
 change viewpoint, query image memory, or use a distinct visible waypoint.
 
+The `qwen_grounding_audit_critic` variant is the next trace-derived pressure
+test. It enables `action_history_summary` and uses `critic_mode=same-model` so
+a second Qwen pass can reject a repeated `visual_servo_object` prompt when the
+actor's own prior grounding audit said the prompt should change. This keeps the
+policy model-based and scene-general while directly testing the dominant
+bathroom cross-run failure pattern.
+
 The `qwen_grounding_dino_recovery` variant is derived from detector-doctor
 evidence on the bathroom failure case: Florence returned no boxes on a saved
 frame where the target fixture was plainly visible, while GroundingDINO selected

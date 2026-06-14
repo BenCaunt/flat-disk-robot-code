@@ -8,7 +8,7 @@ from flatdisk_sim.strategy_sweep import generate_strategy_config
 from flatdisk_sim.research_loop import load_config
 
 
-def test_generate_strategy_config_produces_qwen_variants_without_semantic_terms(tmp_path) -> None:
+def _write_base_config(tmp_path) -> object:
     base_config = tmp_path / "base.json"
     base_config.write_text(
         json.dumps(
@@ -29,6 +29,11 @@ def test_generate_strategy_config_produces_qwen_variants_without_semantic_terms(
         ),
         encoding="utf-8",
     )
+    return base_config
+
+
+def test_generate_strategy_config_produces_qwen_variants_without_semantic_terms(tmp_path) -> None:
+    base_config = _write_base_config(tmp_path)
     base = load_config(base_config)
 
     generated = generate_strategy_config(base, experiment_id="generated_exp")
@@ -36,12 +41,14 @@ def test_generate_strategy_config_produces_qwen_variants_without_semantic_terms(
     output_config = tmp_path / "generated.json"
     output_config.write_text(json.dumps(generated), encoding="utf-8")
     parsed = load_config(output_config)
-    assert len(parsed.variants) == 7
+    assert len(parsed.variants) == 8
     assert {variant.runner for variant in parsed.variants} == {"qwen"}
     assert all(variant.qwen_endpoint == "http://127.0.0.1:8000/v1/chat/completions" for variant in parsed.variants)
     assert all(variant.qwen_model == "Qwen/Qwen3-VL-8B-Instruct" for variant in parsed.variants)
     assert all(variant.qwen_max_tokens >= 1024 for variant in parsed.variants)
-    assert all(variant.critic_mode == "none" for variant in parsed.variants)
+    critic_enabled = [variant for variant in parsed.variants if variant.critic_mode != "none"]
+    assert [variant.name for variant in critic_enabled] == ["qwen_grounding_audit_critic"]
+    assert critic_enabled[0].critic_mode == "same-model"
     assert all(not variant.topomap_memory_allow_semantic_terms for variant in parsed.variants)
     topomap = next(variant for variant in parsed.variants if variant.name == "qwen_topomap_memory")
     assert topomap.topomap_memory_use_clip is True
@@ -49,6 +56,10 @@ def test_generate_strategy_config_produces_qwen_variants_without_semantic_terms(
     grounding = next(variant for variant in parsed.variants if variant.name == "qwen_grounding_recovery")
     assert grounding.prompt_profile == "grounding-recovery-v1"
     assert any("failed_servo_prompts" in rule for rule in grounding.actor_rules)
+    audit_critic = next(variant for variant in parsed.variants if variant.name == "qwen_grounding_audit_critic")
+    assert audit_critic.prompt_profile == "grounding-audit-critic-action-history-v1"
+    assert any("action_history_summary" in rule for rule in audit_critic.actor_rules)
+    assert any("same_prompt_repeat_is_contradicted_by_prior_audit" in rule for rule in audit_critic.critic_rules)
     dino = next(variant for variant in parsed.variants if variant.name == "qwen_grounding_dino_recovery")
     assert dino.prompt_profile == "grounding-dino-recovery-v1"
     assert dino.object_drive_detector == "grounding-dino"
@@ -97,6 +108,41 @@ def test_generated_strategy_prompts_pass_static_generality_audit(tmp_path) -> No
     assert audit["prompt_audit_passed"] is True
 
 
+def test_grounding_audit_critic_prompt_includes_action_history_summary(tmp_path) -> None:
+    generated = generate_strategy_config(
+        load_config(_write_base_config(tmp_path)),
+        experiment_id="generated_exp",
+    )
+    generated_config = tmp_path / "generated.json"
+    generated_config.write_text(json.dumps(generated), encoding="utf-8")
+    variant = next(
+        item for item in load_config(generated_config).variants
+        if item.name == "qwen_grounding_audit_critic"
+    )
+
+    prompt = build_actor_prompt(
+        goal="Drive to the target.",
+        mode="auto",
+        step=2,
+        memory_path=tmp_path / "memory.jsonl",
+        observation={"path": "frame.jpg", "yaw_deg": 0.0, "frame_seq": 3},
+        recent_memory=[
+            {
+                "step": 0,
+                "actor_action": {"tool": "visual_servo_object", "args": {"prompt": "visible landmark"}},
+                "executed_action": {"tool": "visual_servo_object", "args": {"prompt": "visible landmark"}},
+                "actor_grounding_audit": {"next_prompt_should_change": True},
+                "tool_result": {"servo_status": "no_detection", "grounding_stability": "no_detection"},
+            },
+        ],
+        prompt_profile=variant.prompt_profile,
+        extra_rules=variant.actor_rules,
+    )
+
+    assert "action_history_summary" in prompt
+    assert "same_prompt_repeat_is_contradicted_by_prior_audit" in prompt
+
+
 def test_strategy_sweep_cli_writes_loadable_config(monkeypatch, tmp_path, capsys) -> None:
     base_config = tmp_path / "base.json"
     output_config = tmp_path / "strategy.json"
@@ -129,14 +175,15 @@ def test_strategy_sweep_cli_writes_loadable_config(monkeypatch, tmp_path, capsys
 
     assert strategy_sweep.main() == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["variant_count"] == 6
+    assert payload["variant_count"] == 7
     parsed = load_config(output_config)
-    assert len(parsed.variants) == 6
+    assert len(parsed.variants) == 7
     assert {variant.name for variant in parsed.variants} == {
         "qwen_baseline",
         "qwen_frontier_scan",
         "qwen_evidence_exploit",
         "qwen_recovery_switch",
         "qwen_grounding_recovery",
+        "qwen_grounding_audit_critic",
         "qwen_grounding_dino_recovery",
     }

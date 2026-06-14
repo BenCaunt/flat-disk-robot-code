@@ -100,14 +100,16 @@ def test_analyze_failure_traces_writes_report_and_warmhub_ops(tmp_path: Path) ->
         "treat_unstable_servo_as_weak_control",
         "train_or_prompt_against_guard_replacements",
     }
-    assert report["candidate_variant"]["name"] == "qwen_grounding_recovery_v1"
+    assert report["candidate_variant"]["name"] == "qwen_grounding_audit_critic_v1"
+    assert report["candidate_variant"]["critic_mode"] == "same-model"
+    assert any("action_history_summary" in rule for rule in report["candidate_variant"]["actor_rules"])
     assert report["candidate_variant"]["no_static_object_or_color_examples"] is True
     assert (tmp_path / "analysis" / "failure_analysis.json").exists()
     assert (tmp_path / "analysis" / "failure_analysis.md").exists()
     ops = json.loads((tmp_path / "analysis" / "warmhub_ops.json").read_text(encoding="utf-8"))
     assert ops[0]["name"] == "AgentNote/analysis-001"
     assert ops[0]["about"] == "NavExperiment/exp"
-    assert "qwen_grounding_recovery_v1" in ops[0]["data"]["note"]
+    assert "qwen_grounding_audit_critic_v1" in ops[0]["data"]["note"]
 
 
 def test_analyze_failure_traces_keeps_multiline_jsonl_runs_separate(tmp_path: Path) -> None:
