@@ -160,6 +160,18 @@ Current handoff for GRPO training, 2026-06-14:
   `duration_s=675.898`, `completion_log_sample_count=8`, `8/8` parsed actions,
   `5/8` exact reference actions, `0` markdown fences, and TRL
   `completions/clipped_ratio=0`.
+- A larger 4-step post-fix run from commit `98b962a` completed in
+  `/workspace/flat-disk-robot-code-train-20260614-grpo-contract4`.
+  `qwen_grpo_training_result.json` reports `status=complete`, `returncode=0`,
+  `duration_s=1907.898`, `completion_log_sample_count=32`, and
+  `completion_log_metrics` with `32/32` parsed actions, `9/32` exact reference
+  actions, `0` markdown fences, and `0` truncated texts. TRL reported
+  `completions/clipped_ratio=0`, reward mean `-0.132`, reward std `0.1579`,
+  and train loss `-0.01928`.
+- After that run, the reward function was tightened so parsed but non-reference
+  actions cannot receive positive reward from a positive source trajectory
+  reward. The next run should use this reward cap before judging action-choice
+  learning.
 - The working pod venv is `/workspace/flatdisk-grpo-venv`, created with
   `--system-site-packages` so it can see image Torch `2.9.1+cu128`; install
   `torchvision==0.24.1 --no-deps` to match that Torch build. Do not let pip pull
@@ -168,9 +180,10 @@ Current handoff for GRPO training, 2026-06-14:
   the separate `images` column, use PEFT LoRA, and cap generation length for
   smoke jobs. Full-model Adam OOMs on A40; uncapped generation makes "tiny"
   smoke runs unreasonably long.
-- Next action is to run a larger capped LoRA job from `6b4eaac` or later and
-  inspect `completion_log_metrics` in `qwen_grpo_training_result.json`; if exact
-  reference rate remains low, tune reward/data rather than the JSON format.
+- Next action is to run a capped LoRA job from the reward-cap commit or later
+  and inspect `completion_log_metrics` in `qwen_grpo_training_result.json`; if
+  exact reference rate remains low, tune reward/data rather than the JSON
+  format.
 - Future continuation should treat this as past verification, not a blocker.
   There is no known Runpod auth issue when `.env` is loaded as above, and no
   user action is needed before launching the next capped LoRA training attempt.

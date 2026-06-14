@@ -470,6 +470,28 @@ Two logged one-step follow-up runs isolated and fixed the formatting issue:
   `completion_log_sample_count`, and `completion_log_metrics` so this quality
   check can be automated in the research loop.
 
+A larger post-fix 4-step run then completed in
+`/workspace/flat-disk-robot-code-train-20260614-grpo-contract4`, from commit
+`98b962a`:
+
+- Result:
+  `sim/scratch/open_vocab_nav_research_loop/qwen_grpo_jobs/bathroom_cross_run_lora_4step_cap48_action_contract/qwen_grpo_training_result.json`
+- Status `complete`, return code `0`, duration `1907.898` seconds.
+- `completion_log_sample_count` was `32`.
+- `completion_log_metrics`: `32/32` parsed actions, `9/32` exact reference
+  actions, `0` markdown fences, `0` truncated texts, and mean completion length
+  `91.75` characters.
+- TRL metrics: train runtime about `1673` seconds, train loss `-0.01928`,
+  reward mean `-0.132`, reward std `0.1579`, and
+  `completions/clipped_ratio=0`.
+
+That run showed the format problem is fixed, while action-choice quality still
+needs work. One important reward-shaping issue was identified afterward: parsed
+but non-reference actions could still receive a positive reward when the source
+trajectory reward was positive. The reward function now caps non-reference
+parsed actions at a negative reward and invalid JSON at a stronger negative
+reward before scaling.
+
 Resume status for a future continuation:
 
 - This is no longer a verification-only blocker. Runpod auth works when
@@ -480,7 +502,7 @@ Resume status for a future continuation:
 - Use the pushed `codex/open-vocab-nav-research-loop` ref for a clean checkout;
   the original `/workspace/flat-disk-robot-code` directory on the pod is not a
   git repo.
-- The next useful experiment is a larger capped LoRA run from `6b4eaac` or
+- The next useful experiment is a capped LoRA run from the reward-cap commit or
   later, followed by automated inspection of `completion_log_metrics`. If the
   exact reference action rate remains low, tune the reward/data; the JSON-format
   issue is no longer the main blocker. Keep `--max-completion-length` explicit

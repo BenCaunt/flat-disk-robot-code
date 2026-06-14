@@ -327,6 +327,8 @@ def test_plan_qwen_grpo_training_uses_existing_manifest_and_writes_job(tmp_path:
     assert "navigation_tool_reward" in script_text
     assert "FLATDISK_GRPO_COMPLETION_LOG" in script_text
     assert "log_completion_batch" in script_text
+    assert "min(base_reward - 0.2, -0.2)" in script_text
+    assert "min(base_reward - 0.5, -0.5)" in script_text
     assert "conversational_text_messages" in script_text
     assert "record[\"prompt\"] = conversational_text_messages(messages)" in script_text
     assert "apply_chat_template" not in script_text

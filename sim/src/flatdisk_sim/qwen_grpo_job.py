@@ -771,9 +771,9 @@ def navigation_tool_reward(completions, reference_action_canonical=None, candida
         if canonical_json(parsed) == expected:
             rewards.append(base_reward * scale)
         elif parsed:
-            rewards.append((base_reward - 0.2) * scale)
+            rewards.append(min(base_reward - 0.2, -0.2) * scale)
         else:
-            rewards.append((base_reward - 0.5) * scale)
+            rewards.append(min(base_reward - 0.5, -0.5) * scale)
     log_completion_batch(completions, rewards, reference_action_canonical, candidate_step_reward, kwargs)
     return rewards
 
