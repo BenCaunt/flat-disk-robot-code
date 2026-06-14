@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -60,6 +61,8 @@ def test_research_loop_dry_run_writes_trial_matrix_and_warmhub_bundle(tmp_path) 
     assert shapes["NavEvalRun"]["fields"]["bestDistanceM?"] == "number"
     assert shapes["NavEvalRun"]["fields"]["actorModel"] == "string"
     assert shapes["NavEvalRun"]["fields"]["qwenModel?"] == "string"
+    assert shapes["NavArtifact"]["fields"]["availabilityStatus"] == "string"
+    assert shapes["NavArtifact"]["fields"]["directoryManifestSha256?"] == "string"
     assert shapes["RunAssessment"]["fields"]["finalToBestRegressionM?"] == "number"
     assert shapes["PromotionDecision"]["fields"]["status"]["enum"] == ["promote", "reject"]
     assert shapes["TrainingReadiness"]["fields"]["grpoReady"] == "boolean"
@@ -293,6 +296,17 @@ def test_warmhub_ops_record_failed_run_artifacts_and_failure_observation(tmp_pat
     assert run["data"]["qwenEndpoint"] == "http://127.0.0.1:8000/v1/chat/completions"
     assert run["data"]["bestDistanceM"] == 0.42
     assert assessment["data"]["finalToBestRegressionM"] == 0.81
+    camera_artifact = next(op for op in ops if op["name"] == "NavArtifact/trial_failed_camera_contact_sheet")
+    assert camera_artifact["data"]["pathKind"] == "file"
+    assert camera_artifact["data"]["availabilityStatus"] == "available_at_commit_path"
+    assert camera_artifact["data"]["sha256"] == hashlib.sha256(b"camera").hexdigest()
+    assert camera_artifact["data"]["sizeBytes"] == len(b"camera")
+    assert "writer filesystem" in camera_artifact["data"]["retrievalHint"]
+    topomap_dir_artifact = next(op for op in ops if op["name"] == "NavArtifact/trial_failed_topomap_memory_contact_sheets")
+    assert topomap_dir_artifact["data"]["pathKind"] == "directory"
+    assert topomap_dir_artifact["data"]["directoryFileCount"] == 3
+    assert topomap_dir_artifact["data"]["directoryTotalBytes"] > 0
+    assert len(topomap_dir_artifact["data"]["directoryManifestSha256"]) == 64
     failure = next(op for op in ops if op["name"] == "FailureObservation/trial_failed")
     assert str(policy_dir / "policy_review_trace.json") in failure["data"]["evidenceArtifacts"]
 

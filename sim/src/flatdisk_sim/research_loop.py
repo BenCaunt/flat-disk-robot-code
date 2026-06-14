@@ -397,9 +397,16 @@ def warmhub_shapes() -> dict[str, dict[str, Any]]:
                 "run": {"type": "wref", "shape": "NavEvalRun"},
                 "artifactType": "string",
                 "path": "string",
+                "pathKind": "string",
+                "availabilityStatus": "string",
                 "sha256?": "string",
+                "sizeBytes?": "number",
+                "directoryFileCount?": "number",
+                "directoryTotalBytes?": "number",
+                "directoryManifestSha256?": "string",
                 "privileged": "boolean",
                 "description?": "string",
+                "retrievalHint?": "string",
             },
         },
         "RunAssessment": {
@@ -1173,6 +1180,7 @@ def _artifact_ops(summary: dict[str, Any], run_ref: str) -> list[dict[str, Any]]
         path = Path(path_value)
         if not path.exists():
             continue
+        artifact_metadata = _artifact_path_metadata(path)
         ops.append(
             {
                 "operation": "add",
@@ -1182,9 +1190,10 @@ def _artifact_ops(summary: dict[str, Any], run_ref: str) -> list[dict[str, Any]]
                     "run": run_ref,
                     "artifactType": artifact_type,
                     "path": str(path),
-                    "sha256": _sha256(path) if path.is_file() else None,
+                    **artifact_metadata,
                     "privileged": privileged,
                     "description": f"{artifact_type} artifact for {summary['trial_id']}",
+                    "retrievalHint": _artifact_retrieval_hint(path),
                 },
             }
         )
@@ -1339,6 +1348,50 @@ def _sha256(path: Path) -> str | None:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _artifact_path_metadata(path: Path) -> dict[str, Any]:
+    if path.is_file():
+        return {
+            "pathKind": "file",
+            "availabilityStatus": "available_at_commit_path",
+            "sha256": _sha256(path),
+            "sizeBytes": path.stat().st_size,
+        }
+    if path.is_dir():
+        manifest = _directory_manifest_digest(path)
+        return {
+            "pathKind": "directory",
+            "availabilityStatus": "available_at_commit_path",
+            "directoryFileCount": manifest["file_count"],
+            "directoryTotalBytes": manifest["total_bytes"],
+            "directoryManifestSha256": manifest["sha256"],
+        }
+    return {
+        "pathKind": "other",
+        "availabilityStatus": "available_at_commit_path",
+    }
+
+
+def _directory_manifest_digest(path: Path) -> dict[str, Any]:
+    digest = hashlib.sha256()
+    file_count = 0
+    total_bytes = 0
+    for child in sorted((item for item in path.rglob("*") if item.is_file()), key=lambda item: item.relative_to(path).as_posix()):
+        relative = child.relative_to(path).as_posix()
+        size = child.stat().st_size
+        file_hash = _sha256(child) or ""
+        digest.update(f"{relative}\t{size}\t{file_hash}\n".encode("utf-8"))
+        file_count += 1
+        total_bytes += size
+    return {"file_count": file_count, "total_bytes": total_bytes, "sha256": digest.hexdigest()}
+
+
+def _artifact_retrieval_hint(path: Path) -> str:
+    text = str(path)
+    if text.startswith("/workspace/"):
+        return "Runpod workspace path; copy from the worker pod or persisted output volume before pod teardown."
+    return "Path existed on the writer filesystem when this WarmHub artifact record was committed."
 
 
 def _format_float(value: Any) -> str:
