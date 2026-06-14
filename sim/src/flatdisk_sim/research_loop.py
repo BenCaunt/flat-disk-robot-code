@@ -291,6 +291,7 @@ def write_research_report(aggregate: dict[str, Any], output_root: Path) -> Path:
                 f"- Episode rollouts: `{training_export.get('episode_rollouts_jsonl')}`",
                 f"- Rollout groups: `{training_export.get('rollout_groups_jsonl')}`",
                 f"- Trajectory preferences: `{training_export.get('trajectory_preferences_jsonl')}`",
+                f"- Policy review traces: `{training_export.get('policy_review_traces_jsonl')}`",
                 f"- Policy samples: `{training_export.get('policy_samples_jsonl')}`",
                 f"- Evaluator labels: `{training_export.get('evaluator_labels_jsonl')}`",
             ]
@@ -1018,6 +1019,7 @@ def _artifact_ops(summary: dict[str, Any], run_ref: str) -> list[dict[str, Any]]
         ("training_export_dir", summary.get("training_export_dir"), True),
         ("training_policy_steps_jsonl", summary.get("training_policy_steps_jsonl"), True),
         ("training_episode_rollout_json", summary.get("training_episode_rollout_json"), True),
+        ("policy_review_trace_json", summary.get("policy_review_trace_json"), False),
         ("camera_contact_sheet", summary.get("camera_contact_sheet"), False),
         ("progress_contact_sheet", summary.get("progress_contact_sheet"), True),
         ("rerun", summary.get("rerun_path"), False),
@@ -1072,6 +1074,7 @@ def _failure_op(summary: dict[str, Any], run_ref: str) -> dict[str, Any]:
         path
         for path in (
             summary.get("camera_contact_sheet"),
+            summary.get("policy_review_trace_json"),
             summary.get("progress_contact_sheet"),
             str(Path(summary["policy_dir"]) / "memory.jsonl") if summary.get("policy_dir") else None,
         )

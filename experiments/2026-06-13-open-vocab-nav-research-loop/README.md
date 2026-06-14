@@ -119,12 +119,16 @@ off. It relies on the default strict research-loop gate. Use
 trial-slice tasks from it.
 
 Executed sweeps write `training_export/policy_steps.jsonl`,
+`training_export/policy_review_traces.jsonl`,
 `training_export/episode_rollouts.jsonl`, `training_export/rollout_groups.jsonl`,
 `training_export/trajectory_preferences.jsonl`, and
 `training_export/policy_dataset_v1/`. These are intended as the bridge to
 offline SFT/GRPO/PPO work: policy sample records contain only model-facing
 inputs and outputs, while hidden THOR distance/success is stored in separate
-evaluator reward/label fields.
+evaluator reward/label fields. Use `policy_review_traces.jsonl` for fast
+failure triage and sub-agent handoff: it records Qwen actor output, executed
+tool calls, critic decisions, grounding-audit fields, and contact-sheet paths
+without hidden target distance or THOR object metadata.
 
 Before training, run the Qwen tool-training materializer, which joins
 `policy_dataset_v1/policy_samples.jsonl` with

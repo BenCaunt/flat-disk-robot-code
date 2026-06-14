@@ -222,6 +222,7 @@ def test_warmhub_ops_record_failed_run_artifacts_and_failure_observation(tmp_pat
     (run_dir / "episode_summary.json").write_text("{}", encoding="utf-8")
     (policy_dir / "memory.jsonl").write_text("{}\n", encoding="utf-8")
     (policy_dir / "camera_contact_sheet.jpg").write_bytes(b"camera")
+    (policy_dir / "policy_review_trace.json").write_text("{}", encoding="utf-8")
     (run_dir / "progress_contact_sheet.jpg").write_bytes(b"progress")
     (topomap_dir / "topomap_memory_manifest.json").write_text("{}", encoding="utf-8")
     (topomap_dir / "query_log.jsonl").write_text("{}\n", encoding="utf-8")
@@ -236,6 +237,7 @@ def test_warmhub_ops_record_failed_run_artifacts_and_failure_observation(tmp_pat
         "policy_dir": str(policy_dir),
         "evaluator_only_dir": str(evaluator_dir),
         "camera_contact_sheet": str(policy_dir / "camera_contact_sheet.jpg"),
+        "policy_review_trace_json": str(policy_dir / "policy_review_trace.json"),
         "progress_contact_sheet": str(run_dir / "progress_contact_sheet.jpg"),
         "success": False,
         "final_distance_m": 1.23,
@@ -264,6 +266,9 @@ def test_warmhub_ops_record_failed_run_artifacts_and_failure_observation(tmp_pat
     assert "NavArtifact/trial_failed_topomap_memory_manifest" in names
     assert "NavArtifact/trial_failed_topomap_memory_query_jsonl" in names
     assert "NavArtifact/trial_failed_topomap_memory_contact_sheets" in names
+    assert "NavArtifact/trial_failed_policy_review_trace_json" in names
+    failure = next(op for op in ops if op["name"] == "FailureObservation/trial_failed")
+    assert str(policy_dir / "policy_review_trace.json") in failure["data"]["evidenceArtifacts"]
 
 
 def test_warmhub_ops_use_summary_generality_flag_for_eval_run(tmp_path) -> None:
@@ -527,8 +532,10 @@ def test_research_loop_exports_training_records_for_completed_trials(tmp_path, m
     assert aggregate["training_export"]["step_count"] == 1
     summary = aggregate["summaries"][0]
     assert Path(summary["training_policy_steps_jsonl"]).exists()
+    assert Path(summary["policy_review_trace_json"]).exists()
     ops = json.loads((tmp_path / "out" / "warmhub_ops.json").read_text(encoding="utf-8"))
     assert any(op["name"].endswith("_training_policy_steps_jsonl") for op in ops)
+    assert any(op["name"].endswith("_policy_review_trace_json") for op in ops)
 
 
 def test_warmhub_ops_record_trial_exceptions_as_failed_runs(tmp_path) -> None:

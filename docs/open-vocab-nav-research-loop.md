@@ -23,11 +23,15 @@ Dry-run mode writes:
 - `AGENTS.warmhub.md`: startup instructions for future agents.
 
 Executed runs also write `training_export/` with policy-step JSONL,
-episode-rollout JSONL, rollout groups, trajectory preference pairs, and
-`policy_dataset_v1/`. The policy channel contains actor prompts, image/contact
-sheet paths, sanitized observations, actions, and tool feedback. Hidden THOR
+policy-review traces, episode-rollout JSONL, rollout groups, trajectory
+preference pairs, and `policy_dataset_v1/`. The policy channel contains actor
+prompts, image/contact sheet paths, sanitized observations, actions, and tool
+feedback. `policy_review_traces.jsonl` is the compact sub-agent review surface
+for Qwen actor outputs, critic decisions, executed tools, grounding audits, and
+general flags such as unstable visual-servo grounding. Hidden THOR
 distance/success is kept in evaluator-only reward/label channels for offline
-ranking, SFT filtering, PPO, or GRPO; it is never inserted into model inputs.
+ranking, SFT filtering, PPO, or GRPO; it is never inserted into model inputs or
+policy-review traces.
 
 Seed config:
 
@@ -326,6 +330,9 @@ By default it skips tasks whose `notes.prerequisites` are not complete; pass
   Qwen-compatible multimodal SFT JSONL, and write an audit report covering
   reward filters, missing images, actor-vs-executed action targets, and
   privileged-token leakage.
+- Use `training_export/policy_review_traces.jsonl` first for failure triage and
+  parallel-agent handoff; it records tool calls and contact-sheet paths without
+  hidden target distances or THOR object metadata.
 - Use `rollout_groups.jsonl` / `trajectory_preferences.jsonl` for trajectory
   ranking only after the materializer can prove policy inputs remain clean and
   there are enough successful and failed runs for a meaningful comparison.

@@ -25,8 +25,58 @@ TRAJECTORY_PREFERENCE_SCHEMA = "flatdisk.nav_trajectory_preference_pair.v1"
 POLICY_SAMPLE_SCHEMA = "flatdisk.nav_policy_sample.v1"
 EVALUATOR_LABEL_SCHEMA = "flatdisk.nav_evaluator_label.v1"
 POLICY_DATASET_MANIFEST_SCHEMA = "flatdisk.nav_policy_dataset_manifest.v1"
+POLICY_REVIEW_TRACE_SCHEMA = "flatdisk.nav_policy_review_trace.v1"
 TRAINING_EXPORT_SCHEMA = "flatdisk.nav_training_export.v1"
 FORBIDDEN_POLICY_TOKENS = ("hidden_score", "nearest_target", "object_metadata", "target_pose", "distance_m", "detections")
+FORBIDDEN_REVIEW_TRACE_TOKENS = (
+    "hidden_score",
+    "nearest_target",
+    "object_metadata",
+    "target_pose",
+    "distance_m",
+    "detections",
+    "objectid",
+)
+REVIEW_TOOL_RESULT_KEYS = {
+    "action",
+    "cost",
+    "debug_overlay_contact_sheet",
+    "detector",
+    "detection_coverage_fraction",
+    "detection_status_count",
+    "duration_s",
+    "elapsed_s",
+    "ever_detected",
+    "failure_reason",
+    "final_yaw_deg",
+    "forward_power",
+    "frame_count",
+    "goal_query",
+    "grounding_audit_contact_sheet",
+    "grounding_stability",
+    "heading_error_deg",
+    "last_command",
+    "map_summary",
+    "matching_mode",
+    "motion_contact_sheet",
+    "motor_commands_sent",
+    "moved",
+    "ok",
+    "planner_note",
+    "prompt",
+    "reason",
+    "route_length",
+    "route_node_ids",
+    "route_truncated",
+    "semantic_identity",
+    "servo_status",
+    "started_yaw_deg",
+    "status_sample_count",
+    "target_detected",
+    "target_yaw_deg",
+    "timed_out",
+    "topomap_contact_sheet",
+}
 
 
 @dataclass(frozen=True)
@@ -37,6 +87,7 @@ class TrainingExportResult:
     episode_rollouts_jsonl: str
     rollout_groups_jsonl: str
     trajectory_preferences_jsonl: str
+    policy_review_traces_jsonl: str
     policy_dataset_dir: str
     policy_dataset_manifest_path: str
     policy_samples_jsonl: str
@@ -45,6 +96,7 @@ class TrainingExportResult:
     step_count: int
     rollout_group_count: int
     trajectory_preference_count: int
+    policy_review_trace_count: int
     policy_sample_count: int
     evaluator_label_count: int
 
@@ -57,6 +109,7 @@ class TrainingExportResult:
             "episode_rollouts_jsonl": self.episode_rollouts_jsonl,
             "rollout_groups_jsonl": self.rollout_groups_jsonl,
             "trajectory_preferences_jsonl": self.trajectory_preferences_jsonl,
+            "policy_review_traces_jsonl": self.policy_review_traces_jsonl,
             "policy_dataset_dir": self.policy_dataset_dir,
             "policy_dataset_manifest_path": self.policy_dataset_manifest_path,
             "policy_samples_jsonl": self.policy_samples_jsonl,
@@ -65,6 +118,7 @@ class TrainingExportResult:
             "step_count": self.step_count,
             "rollout_group_count": self.rollout_group_count,
             "trajectory_preference_count": self.trajectory_preference_count,
+            "policy_review_trace_count": self.policy_review_trace_count,
             "policy_sample_count": self.policy_sample_count,
             "evaluator_label_count": self.evaluator_label_count,
         }
@@ -83,11 +137,17 @@ def export_training_data_from_summaries(
     global_episodes_path = output_dir / "episode_rollouts.jsonl"
     rollout_groups_path = output_dir / "rollout_groups.jsonl"
     trajectory_preferences_path = output_dir / "trajectory_preferences.jsonl"
+    review_traces_path = output_dir / "policy_review_traces.jsonl"
     episode_count = 0
     step_count = 0
+    review_trace_count = 0
     episode_records: list[dict[str, Any]] = []
     policy_step_records: list[dict[str, Any]] = []
-    with global_steps_path.open("w", encoding="utf-8") as steps_handle, global_episodes_path.open("w", encoding="utf-8") as episodes_handle:
+    with (
+        global_steps_path.open("w", encoding="utf-8") as steps_handle,
+        global_episodes_path.open("w", encoding="utf-8") as episodes_handle,
+        review_traces_path.open("w", encoding="utf-8") as review_traces_handle,
+    ):
         for summary in summaries:
             if not isinstance(summary.get("steps"), list):
                 continue
@@ -96,9 +156,12 @@ def export_training_data_from_summaries(
             run_export_dir.mkdir(parents=True, exist_ok=True)
             run_steps_path = run_export_dir / "policy_steps.jsonl"
             run_episode_path = run_export_dir / "episode_rollout.json"
+            run_review_trace_path = run_export_dir / "policy_review_trace.json"
             records = _step_records(summary, include_prompt_text=include_prompt_text)
             if not records:
                 continue
+            review_trace = _policy_review_trace(summary, step_records=records, run_steps_path=run_steps_path)
+            _assert_review_trace_safe(review_trace)
             policy_step_records.extend(records)
             episode_record = _episode_record(
                 summary,
@@ -114,12 +177,16 @@ def export_training_data_from_summaries(
                     steps_handle.write(text + "\n")
             run_episode_path.write_text(json.dumps(episode_record, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
             episodes_handle.write(json.dumps(episode_record, sort_keys=True, default=str) + "\n")
+            run_review_trace_path.write_text(json.dumps(review_trace, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+            review_traces_handle.write(json.dumps(review_trace, sort_keys=True, default=str) + "\n")
             episode_records.append(episode_record)
             summary["training_export_dir"] = str(run_export_dir)
             summary["training_policy_steps_jsonl"] = str(run_steps_path)
             summary["training_episode_rollout_json"] = str(run_episode_path)
+            summary["policy_review_trace_json"] = str(run_review_trace_path)
             episode_count += 1
             step_count += len(records)
+            review_trace_count += 1
 
     rollout_groups, trajectory_preferences = _rl_rollout_records(episode_records, experiment_id=experiment_id, research_run_id=run_id)
     _write_jsonl(rollout_groups_path, rollout_groups)
@@ -136,6 +203,7 @@ def export_training_data_from_summaries(
         episode_rollouts_jsonl=str(global_episodes_path),
         rollout_groups_jsonl=str(rollout_groups_path),
         trajectory_preferences_jsonl=str(trajectory_preferences_path),
+        policy_review_traces_jsonl=str(review_traces_path),
         policy_dataset_dir=policy_dataset["output_dir"],
         policy_dataset_manifest_path=policy_dataset["manifest_path"],
         policy_samples_jsonl=policy_dataset["policy_samples_jsonl"],
@@ -144,6 +212,7 @@ def export_training_data_from_summaries(
         step_count=step_count,
         rollout_group_count=len(rollout_groups),
         trajectory_preference_count=len(trajectory_preferences),
+        policy_review_trace_count=review_trace_count,
         policy_sample_count=int(policy_dataset["sample_count"]),
         evaluator_label_count=int(policy_dataset["label_count"]),
     )
@@ -169,9 +238,15 @@ def export_training_data_from_summaries(
             "trajectory preference pairs keyed by evaluator reward margin for DPO/RLHF-style filtering",
             "all reward labels remain in evaluator_reward/evaluator_preference, outside policy_input",
         ],
+        "agent_review_channel": [
+            "policy_review_traces_jsonl stores compact per-step actor/tool/critic traces for human and sub-agent review",
+            "review traces include model-facing image/contact-sheet paths and general grounding flags",
+            "hidden evaluator distances, target object metadata, and detection arrays are excluded",
+        ],
         "privileged_reward_used": True,
         "privileged_reward_purpose": "training label / offline ranking only; never model prompt input",
         "forbidden_policy_fields": ["pose", "scene", "objects", "object_metadata", "nearest_target", "target_pose", "distance_m"],
+        "forbidden_review_trace_fields": list(FORBIDDEN_REVIEW_TRACE_TOKENS),
     }
     (output_dir / "training_manifest.json").write_text(json.dumps(manifest_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return manifest_payload
@@ -235,11 +310,13 @@ def _step_records(summary: dict[str, Any], *, include_prompt_text: bool) -> list
             "policy_output": {
                 "raw_actor_output": actor_outputs.get(step) or _canonical_actor_output(memory),
                 "actor_action": sanitize_memory(memory.get("actor_action", {})),
+                "actor_grounding_audit": sanitize_memory(memory.get("actor_grounding_audit", {})),
                 "actor_memory_update": sanitize_memory(memory.get("actor_memory_update", {})),
                 "critic": sanitize_memory(memory.get("critic", {})),
                 "executed_action": sanitize_memory(memory.get("executed_action", {})),
             },
             "tool_feedback": sanitize_memory(memory.get("tool_result", {})),
+            "review_tool_feedback": _review_tool_feedback(memory.get("tool_result", {})),
             "evaluator_reward": {
                 "privileged": True,
                 "post_action_score": post_score,
@@ -293,6 +370,211 @@ def _episode_record(
             "allow_semantic_terms": bool(summary.get("topomap_memory_allow_semantic_terms")),
         },
     }
+
+
+def _policy_review_trace(
+    summary: dict[str, Any],
+    *,
+    step_records: list[dict[str, Any]],
+    run_steps_path: Path,
+) -> dict[str, Any]:
+    steps: list[dict[str, Any]] = []
+    previous_visual_servo_prompt: str | None = None
+    for index, record in enumerate(step_records):
+        step = _policy_review_step(record, index=index)
+        actor_action = step.get("actor_action") if isinstance(step.get("actor_action"), dict) else {}
+        actor_audit = step.get("actor_grounding_audit") if isinstance(step.get("actor_grounding_audit"), dict) else {}
+        actor_prompt = _action_prompt(actor_action)
+        if (
+            previous_visual_servo_prompt
+            and _action_tool(actor_action) == "visual_servo_object"
+            and _normalized_prompt(actor_prompt) == _normalized_prompt(previous_visual_servo_prompt)
+            and _grounding_audit_requested_prompt_change(actor_audit)
+        ):
+            step["review_flags"].append("actor_repeated_servo_prompt_after_grounding_audit_requested_change")
+        steps.append(step)
+        executed_action = step.get("executed_action") if isinstance(step.get("executed_action"), dict) else {}
+        tool_result = step.get("tool_result") if isinstance(step.get("tool_result"), dict) else {}
+        if _action_tool(executed_action) == "visual_servo_object" or tool_result.get("action") == "visual_servo_object":
+            previous_visual_servo_prompt = str(tool_result.get("prompt") or _action_prompt(executed_action) or "").strip() or None
+
+    review_flags = sorted({flag for step in steps for flag in step.get("review_flags", []) if isinstance(flag, str)})
+    goal = str(summary.get("prompt") or "")
+    if not goal and step_records:
+        policy_input = step_records[0].get("policy_input") if isinstance(step_records[0].get("policy_input"), dict) else {}
+        goal = str(policy_input.get("goal") or "")
+    trace = {
+        "schema": POLICY_REVIEW_TRACE_SCHEMA,
+        "record_id": _run_record_id(summary),
+        "source": {
+            "trial_id": summary.get("trial_id"),
+            "slot_id": summary.get("slot_id"),
+            "run_dir": summary.get("run_dir"),
+            "policy_dir": summary.get("policy_dir"),
+        },
+        "task": {
+            "goal": goal,
+            "episode": summary.get("episode"),
+        },
+        "run": {
+            "variant": summary.get("variant"),
+            "runner": summary.get("runner"),
+            "model": summary.get("model"),
+            "prompt_profile": summary.get("prompt_profile"),
+            "reason": summary.get("reason"),
+            "step_count": int(summary.get("step_count") or len(steps)),
+        },
+        "policy_steps_jsonl": str(run_steps_path),
+        "step_count": len(steps),
+        "review_flags": review_flags,
+        "steps": steps,
+        "policy_safety": {
+            "model_facing_artifact": True,
+            "privileged_evaluator_fields_excluded": True,
+            "hidden_target_metadata_excluded": True,
+        },
+    }
+    trace["policy_safety"]["forbidden_review_field_names_present"] = _forbidden_review_field_names(trace)
+    return trace
+
+
+def _policy_review_step(record: dict[str, Any], *, index: int) -> dict[str, Any]:
+    policy_input = record.get("policy_input") if isinstance(record.get("policy_input"), dict) else {}
+    policy_output = record.get("policy_output") if isinstance(record.get("policy_output"), dict) else {}
+    actor_action = _review_action(policy_output.get("actor_action"))
+    executed_action = _review_action(policy_output.get("executed_action"))
+    actor_grounding_audit = _safe_review_value(policy_output.get("actor_grounding_audit", {}))
+    tool_result = _review_tool_feedback(record.get("review_tool_feedback") or record.get("tool_feedback", {}))
+    review_flags = _review_step_flags(
+        actor_action=actor_action,
+        executed_action=executed_action,
+        actor_grounding_audit=actor_grounding_audit if isinstance(actor_grounding_audit, dict) else {},
+        tool_result=tool_result,
+    )
+    return {
+        "step": int(policy_input.get("step") or index),
+        "image_paths": _safe_review_value(policy_input.get("image_paths", [])),
+        "actor_raw_output": _safe_review_text(policy_output.get("raw_actor_output"), limit=12000),
+        "actor_action": actor_action,
+        "actor_grounding_audit": actor_grounding_audit,
+        "actor_memory_update": _safe_review_value(policy_output.get("actor_memory_update", {})),
+        "critic": _safe_review_value(policy_output.get("critic", {})),
+        "executed_action": executed_action,
+        "actor_action_replaced": _canonical_json(actor_action) != _canonical_json(executed_action),
+        "tool_result": tool_result,
+        "review_flags": review_flags,
+    }
+
+
+def _review_action(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    tool = str(value.get("tool", value.get("action", ""))).strip()
+    args = value.get("args", {})
+    return {
+        "tool": tool,
+        "args": _safe_review_value(args if isinstance(args, dict) else {}),
+    }
+
+
+def _review_tool_feedback(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    cleaned: dict[str, Any] = {}
+    for key, item in value.items():
+        key_text = str(key)
+        if key_text in REVIEW_TOOL_RESULT_KEYS:
+            cleaned[key_text] = _safe_review_value(item)
+    return cleaned
+
+
+def _review_step_flags(
+    *,
+    actor_action: dict[str, Any],
+    executed_action: dict[str, Any],
+    actor_grounding_audit: dict[str, Any],
+    tool_result: dict[str, Any],
+) -> list[str]:
+    flags: list[str] = []
+    if _canonical_json(actor_action) != _canonical_json(executed_action):
+        flags.append("actor_action_replaced")
+    if _grounding_audit_requested_prompt_change(actor_grounding_audit):
+        flags.append("actor_reported_previous_grounding_mismatch")
+    executed_tool = _action_tool(executed_action)
+    result_action = str(tool_result.get("action") or "")
+    if executed_tool == "visual_servo_object" or result_action == "visual_servo_object":
+        stability = str(tool_result.get("grounding_stability") or "")
+        if stability and stability != "status_track_present":
+            flags.append("visual_servo_grounding_not_stable")
+            flags.append(f"visual_servo_{_safe_id(stability)}")
+        if tool_result.get("target_detected") is False or tool_result.get("ever_detected") is False or stability == "no_detection":
+            flags.append("visual_servo_no_detection")
+    if tool_result.get("reason") == "topomap_memory_not_configured":
+        flags.append("topomap_memory_not_configured")
+    return sorted(set(flags))
+
+
+def _grounding_audit_requested_prompt_change(value: dict[str, Any]) -> bool:
+    return value.get("next_prompt_should_change") is True or value.get("previous_visual_servo_box_matches_intended_object") is False
+
+
+def _action_tool(value: dict[str, Any]) -> str:
+    return str(value.get("tool") or value.get("action") or "")
+
+
+def _action_prompt(value: dict[str, Any]) -> str:
+    args = value.get("args") if isinstance(value.get("args"), dict) else {}
+    return str(args.get("prompt") or "")
+
+
+def _normalized_prompt(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip().lower())
+
+
+def _safe_review_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _safe_review_text(value)
+    if isinstance(value, list):
+        return [_safe_review_value(item) for item in value[:12]]
+    if isinstance(value, dict):
+        cleaned: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if _review_field_name_allowed(key_text):
+                cleaned[key_text] = _safe_review_value(item)
+        return cleaned
+    return value
+
+
+def _safe_review_text(value: Any, *, limit: int = 2000) -> str | None:
+    if value is None:
+        return None
+    return str(value)[:limit]
+
+
+def _review_field_name_allowed(key: str) -> bool:
+    key_lower = key.lower()
+    return not any(token in key_lower for token in FORBIDDEN_REVIEW_TRACE_TOKENS)
+
+
+def _forbidden_review_field_names(value: Any) -> list[str]:
+    found: set[str] = set()
+    if isinstance(value, list):
+        for item in value:
+            found.update(_forbidden_review_field_names(item))
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            key_text = str(key)
+            if not _review_field_name_allowed(key_text):
+                found.add(key_text)
+            found.update(_forbidden_review_field_names(item))
+    return sorted(found)
+
+
+def _assert_review_trace_safe(trace: dict[str, Any]) -> None:
+    forbidden = _forbidden_review_field_names(trace)
+    if forbidden:
+        raise ValueError(f"policy review trace contains forbidden field names: {forbidden}")
 
 
 def _rl_rollout_records(

@@ -140,6 +140,57 @@ def test_policy_dataset_splits_model_inputs_from_evaluator_labels(tmp_path) -> N
     assert label["grpo"]["eligible"] is False
 
 
+def test_training_export_writes_policy_review_trace_for_agent_review(tmp_path) -> None:
+    summary = _summary_fixture(tmp_path, trial_id="trial_001", final_distance_m=1.25)
+    memory = summary["steps"][0]["harness_memory_record"]
+    visual_servo_action = {
+        "tool": "visual_servo_object",
+        "args": {"prompt": "armchair", "duration_s": 1.5},
+        "thought": "use a visible landmark",
+    }
+    memory["actor_action"] = visual_servo_action
+    memory["executed_action"] = visual_servo_action
+    memory["actor_grounding_audit"] = {
+        "previous_visual_servo_box_matches_intended_object": False,
+        "evidence": "box was on a different visible object",
+        "next_prompt_should_change": True,
+    }
+    memory["tool_result"] = {
+        "action": "visual_servo_object",
+        "prompt": "armchair",
+        "target_detected": False,
+        "ever_detected": False,
+        "grounding_stability": "no_detection",
+        "detection_coverage_fraction": 0.0,
+        "motion_contact_sheet": "motion_frames/strip.jpg",
+        "grounding_audit_contact_sheet": "motion_frames/audit.jpg",
+        "detections": [{"name": "legacy"}],
+        "nearest_target": {"objectId": "hidden"},
+    }
+
+    manifest = export_training_data_from_summaries(
+        [summary],
+        output_dir=tmp_path / "training",
+        experiment_id="exp",
+        run_id="run",
+    )
+
+    trace = json.loads((tmp_path / "training" / "runs" / "trial_001" / "policy_review_trace.json").read_text(encoding="utf-8"))
+    assert manifest["policy_review_trace_count"] == 1
+    assert manifest["policy_review_traces_jsonl"] == str(tmp_path / "training" / "policy_review_traces.jsonl")
+    assert summary["policy_review_trace_json"].endswith("policy_review_trace.json")
+    assert trace["schema"] == "flatdisk.nav_policy_review_trace.v1"
+    assert trace["steps"][0]["actor_action"]["tool"] == "visual_servo_object"
+    assert trace["steps"][0]["actor_grounding_audit"]["next_prompt_should_change"] is True
+    assert trace["steps"][0]["tool_result"]["target_detected"] is False
+    assert "actor_reported_previous_grounding_mismatch" in trace["steps"][0]["review_flags"]
+    assert "visual_servo_no_detection" in trace["steps"][0]["review_flags"]
+    assert trace["policy_safety"]["forbidden_review_field_names_present"] == []
+    trace_text = json.dumps(trace).lower()
+    for token in ("nearest_target", "objectid", "detections", "distance_m"):
+        assert token not in trace_text
+
+
 def test_training_export_writes_rollout_groups_and_preference_pairs(tmp_path) -> None:
     better = _summary_fixture(tmp_path, trial_id="trial_better", final_distance_m=0.2, success=True)
     worse = _summary_fixture(tmp_path, trial_id="trial_worse", final_distance_m=2.5, success=False)
