@@ -31,6 +31,7 @@ from flatdisk_robot_client import DEFAULT_CONNECT, FlatDiskRobotClient, MotionRe
 OBJECT_DRIVE_SCRIPT = SCRIPTS_DIR / "object_drive_zenoh.py"
 TRANSFORMERS_OBJECT_DRIVE_DETECTORS = {"florence-transformers", "grounding-dino"}
 TRANSFORMERS_OBJECT_DRIVE_EXTRAS = ("torch", "transformers", "timm")
+DEFAULT_OBJECT_DRIVE_TIMEOUT_S = 300.0
 
 
 @dataclass(frozen=True)
@@ -197,11 +198,12 @@ class AgentTools:
             "1",
         ]
         started = time.perf_counter()
+        timeout_s = _object_drive_timeout_s(duration_s)
         completed = subprocess.run(
             cmd,
             text=True,
             capture_output=True,
-            timeout=max(15.0, duration_s + 90.0),
+            timeout=timeout_s,
             check=False,
             cwd=REPO_ROOT,
         )
@@ -222,6 +224,7 @@ class AgentTools:
             "prompt": prompt,
             "detector": detector_name,
             "duration_s": duration_s,
+            "timeout_s": timeout_s,
             "forward_power": forward_power,
             "elapsed_s": elapsed_s,
             "returncode": completed.returncode,
@@ -368,6 +371,16 @@ def _object_drive_command(*, detector: str) -> list[str]:
         cmd.extend(["python", str(OBJECT_DRIVE_SCRIPT)])
         return cmd
     return [sys.executable, str(OBJECT_DRIVE_SCRIPT)]
+
+
+def _object_drive_timeout_s(duration_s: float) -> float:
+    override = os.environ.get("FLATDISK_OBJECT_DRIVE_TIMEOUT_S", "").strip()
+    if override:
+        try:
+            return max(float(duration_s) + 5.0, float(override))
+        except ValueError:
+            pass
+    return max(DEFAULT_OBJECT_DRIVE_TIMEOUT_S, float(duration_s) + DEFAULT_OBJECT_DRIVE_TIMEOUT_S)
 
 
 def _parse_detection_descriptor(value: str | None) -> tuple[str | None, str | None, float | None]:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 
-from flatdisk_sim.agent_tools import _object_drive_command, _parse_object_drive_status
+from flatdisk_sim.agent_tools import _object_drive_command, _object_drive_timeout_s, _parse_object_drive_status
 
 
 def test_parse_object_drive_status_no_detection() -> None:
@@ -63,3 +63,13 @@ def test_mlx_object_drive_command_keeps_current_python() -> None:
 
     assert cmd[0] == sys.executable
     assert cmd[-1].endswith("object_drive_zenoh.py")
+
+
+def test_object_drive_timeout_allows_cold_model_load() -> None:
+    assert _object_drive_timeout_s(2.0) >= 300.0
+
+
+def test_object_drive_timeout_env_override_is_bounded(monkeypatch) -> None:
+    monkeypatch.setenv("FLATDISK_OBJECT_DRIVE_TIMEOUT_S", "30")
+
+    assert _object_drive_timeout_s(40.0) == 45.0
