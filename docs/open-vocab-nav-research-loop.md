@@ -314,6 +314,8 @@ The dispatch manifest is a redacted, durable review artifact; attach it to
 `SubAgentResult.evidenceArtifacts` or cite it from an `AgentNote` so future
 agents can reconstruct which Warmhub tasks were selected, skipped, and launched
 from which git ref.
+It also includes bounded running and blocked `AgentTask` samples so reviewers
+can see active queue pressure before adding more Runpod workers.
 The dispatcher reads a larger Warmhub task page before local filtering so older
 matching planned tasks are not missed in a busy queue.
 By default it skips tasks whose `notes.prerequisites` are not complete; pass

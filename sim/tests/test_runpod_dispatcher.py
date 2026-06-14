@@ -4,7 +4,13 @@ import json
 from types import SimpleNamespace
 
 from flatdisk_sim import runpod_dispatcher
-from flatdisk_sim.runpod_dispatcher import AgentTaskSummary, filter_tasks, select_tasks_for_dispatch, task_stage
+from flatdisk_sim.runpod_dispatcher import (
+    AgentTaskSummary,
+    filter_tasks,
+    query_queue_health,
+    select_tasks_for_dispatch,
+    task_stage,
+)
 
 
 def test_filter_tasks_defaults_to_trial_slices_and_applies_tags() -> None:
@@ -125,44 +131,131 @@ def test_select_tasks_for_dispatch_auto_uses_ready_stage_order() -> None:
     assert task_stage(tasks[1]) == "failure-analysis"
 
 
+def test_query_queue_health_summarizes_active_tasks(monkeypatch) -> None:
+    def fake_query_agent_tasks(_repo, *, status, limit):  # noqa: ANN001
+        assert limit == 100
+        if status == "running":
+            return [
+                AgentTaskSummary(
+                    wref="AgentTask/run-active-a",
+                    name="run-active-a",
+                    status="running",
+                    owner="agent-a",
+                    objective="Run active A",
+                    tags=("trial-slice", "runpod"),
+                    related_experiment="NavExperiment/exp@v1",
+                ),
+                AgentTaskSummary(
+                    wref="AgentTask/run-active-b",
+                    name="run-active-b",
+                    status="running",
+                    owner="agent-b",
+                    objective="Run active B",
+                    tags=("trial-slice", "runpod"),
+                    related_experiment="NavExperiment/exp@v1",
+                ),
+                AgentTaskSummary(
+                    wref="AgentTask/run-other",
+                    name="run-other",
+                    status="running",
+                    owner="agent-c",
+                    objective="Other experiment",
+                    tags=("trial-slice",),
+                    related_experiment="NavExperiment/other@v1",
+                ),
+            ]
+        if status == "blocked":
+            return [
+                AgentTaskSummary(
+                    wref="AgentTask/run-blocked",
+                    name="run-blocked",
+                    status="blocked",
+                    owner="agent-d",
+                    objective="Blocked run",
+                    tags=("trial-slice", "runpod"),
+                    prerequisites=("AgentTask/preflight",),
+                    related_experiment="NavExperiment/exp@v1",
+                )
+            ]
+        raise AssertionError(status)
+
+    monkeypatch.setattr(runpod_dispatcher, "query_agent_tasks", fake_query_agent_tasks)
+
+    health = query_queue_health("repo/example", sample_limit=1, query_limit=100, related_experiment="exp")
+
+    assert health["running_task_count"] == 2
+    assert [task["task"] for task in health["running_tasks"]] == ["AgentTask/run-active-a"]
+    assert health["blocked_task_count"] == 1
+    assert health["blocked_tasks"][0]["prerequisites"] == ["AgentTask/preflight"]
+    assert "Inspect 2 running AgentTask(s)" in health["next_actions"][0]
+
+
 def test_main_dry_run_dispatches_selected_runpod_workers(monkeypatch, capsys, tmp_path) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(runpod_dispatcher, "current_git_remote", lambda _cwd: "https://github.com/BenCaunt/flat-disk-robot-code.git")
     monkeypatch.setattr(runpod_dispatcher, "current_git_ref", lambda _cwd: "abc123")
     monkeypatch.setattr(runpod_dispatcher, "worktree_dirty", lambda _cwd: True)
     monkeypatch.setattr(runpod_dispatcher, "query_completed_task_refs", lambda *_args, **_kwargs: {"AgentTask/plan-preflight"})
-    monkeypatch.setattr(
-        runpod_dispatcher,
-        "query_agent_tasks",
-        lambda *_args, **_kwargs: [
-            AgentTaskSummary(
-                wref="AgentTask/plan-run-a",
-                name="plan-run-a",
-                status="planned",
-                owner="unassigned",
-                objective="Run A",
-                tags=("trial-slice", "runpod", "qwen"),
-                prerequisites=("AgentTask/plan-preflight",),
-            ),
-            AgentTaskSummary(
-                wref="AgentTask/plan-run-b",
-                name="plan-run-b",
-                status="planned",
-                owner="unassigned",
-                objective="Run B",
-                tags=("trial-slice", "runpod", "qwen"),
-                prerequisites=("AgentTask/plan-missing-preflight",),
-            ),
-            AgentTaskSummary(
-                wref="AgentTask/plan-preflight",
-                name="plan-preflight",
-                status="planned",
-                owner="unassigned",
-                objective="Preflight",
-                tags=("runpod", "qwen"),
-            ),
-        ],
-    )
+    def fake_query_agent_tasks(_repo, *, status, limit):  # noqa: ANN001
+        if status == "planned":
+            return [
+                AgentTaskSummary(
+                    wref="AgentTask/plan-run-a",
+                    name="plan-run-a",
+                    status="planned",
+                    owner="unassigned",
+                    objective="Run A",
+                    tags=("trial-slice", "runpod", "qwen"),
+                    prerequisites=("AgentTask/plan-preflight",),
+                    related_experiment="NavExperiment/exp@v1",
+                ),
+                AgentTaskSummary(
+                    wref="AgentTask/plan-run-b",
+                    name="plan-run-b",
+                    status="planned",
+                    owner="unassigned",
+                    objective="Run B",
+                    tags=("trial-slice", "runpod", "qwen"),
+                    prerequisites=("AgentTask/plan-missing-preflight",),
+                    related_experiment="NavExperiment/exp@v1",
+                ),
+                AgentTaskSummary(
+                    wref="AgentTask/plan-preflight",
+                    name="plan-preflight",
+                    status="planned",
+                    owner="unassigned",
+                    objective="Preflight",
+                    tags=("runpod", "qwen"),
+                    related_experiment="NavExperiment/exp@v1",
+                ),
+            ]
+        if status == "running":
+            return [
+                AgentTaskSummary(
+                    wref="AgentTask/active-run",
+                    name="active-run",
+                    status="running",
+                    owner="runpod-agent",
+                    objective="Active Runpod trial",
+                    tags=("trial-slice", "runpod", "qwen"),
+                    related_experiment="NavExperiment/exp@v1",
+                )
+            ]
+        if status == "blocked":
+            return [
+                AgentTaskSummary(
+                    wref="AgentTask/blocked-run",
+                    name="blocked-run",
+                    status="blocked",
+                    owner="agent-blocked",
+                    objective="Blocked trial",
+                    tags=("trial-slice", "runpod", "qwen"),
+                    related_experiment="NavExperiment/exp@v1",
+                )
+            ]
+        return []
+
+    monkeypatch.setattr(runpod_dispatcher, "query_agent_tasks", fake_query_agent_tasks)
     monkeypatch.setattr(
         "sys.argv",
         [
@@ -182,6 +275,8 @@ def test_main_dry_run_dispatches_selected_runpod_workers(monkeypatch, capsys, tm
             "WARMHUB_API_KEY=secret",
             "--dispatch-manifest",
             str(tmp_path / "dispatch.json"),
+            "--related-experiment",
+            "exp",
         ],
     )
 
@@ -195,6 +290,10 @@ def test_main_dry_run_dispatches_selected_runpod_workers(monkeypatch, capsys, tm
     assert payload["selected_stage"] == "trial-slice"
     assert payload["selected_task_count"] == 1
     assert payload["worker_count"] == 1
+    assert payload["queue_health"]["running_task_count"] == 1
+    assert payload["queue_health"]["running_tasks"][0]["task"] == "AgentTask/active-run"
+    assert payload["queue_health"]["blocked_task_count"] == 1
+    assert payload["queue_health"]["blocked_tasks"][0]["task"] == "AgentTask/blocked-run"
     assert payload["skipped_for_prerequisites_count"] == 1
     assert payload["skipped_for_prerequisites"][0]["task"] == "AgentTask/plan-run-b"
     assert [worker["task"] for worker in payload["workers"]] == ["AgentTask/plan-run-a"]
@@ -211,6 +310,8 @@ def test_main_dry_run_dispatches_selected_runpod_workers(monkeypatch, capsys, tm
     assert manifest["git_ref"] == "abc123"
     assert manifest["selected_stage"] == "trial-slice"
     assert manifest["selected_task_count"] == 1
+    assert manifest["queue_health"]["running_tasks"][0]["owner"] == "runpod-agent"
+    assert manifest["queue_health"]["blocked_tasks"][0]["owner"] == "agent-blocked"
     assert manifest["workers"][0]["task"] == "AgentTask/plan-run-a"
     manifest_command = manifest["workers"][0]["runpodctl_command"]
     manifest_env = json.loads(manifest_command[manifest_command.index("--env") + 1])

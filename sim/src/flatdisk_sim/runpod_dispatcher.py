@@ -47,6 +47,8 @@ TASK_STAGE_ORDER = (
     "other",
 )
 TASK_STAGE_CHOICES = ("auto", "any", *TASK_STAGE_ORDER)
+ACTIVE_QUEUE_STATUSES = ("running", "blocked")
+DEFAULT_QUEUE_HEALTH_LIMIT = 5
 
 
 @dataclass(frozen=True)
@@ -190,6 +192,65 @@ def skipped_for_prerequisites(tasks: list[AgentTaskSummary], *, completed_task_r
     return skipped
 
 
+def query_queue_health(
+    repo: str,
+    *,
+    sample_limit: int = DEFAULT_QUEUE_HEALTH_LIMIT,
+    query_limit: int = 100,
+    related_experiment: str | None = None,
+) -> dict[str, Any]:
+    sample_count = max(1, sample_limit)
+    read_count = max(sample_count, query_limit, 1)
+    tasks_by_status: dict[str, list[AgentTaskSummary]] = {}
+    for status in ACTIVE_QUEUE_STATUSES:
+        tasks = query_agent_tasks(repo, status=status, limit=read_count)
+        if related_experiment:
+            tasks = [
+                task
+                for task in tasks
+                if _related_experiment_matches(task.related_experiment, related_experiment)
+            ]
+        tasks_by_status[status] = tasks
+
+    running = tasks_by_status["running"]
+    blocked = tasks_by_status["blocked"]
+    actions: list[str] = []
+    if running:
+        actions.append(f"Inspect {len(running)} running AgentTask(s) before dispatching more workers.")
+    if blocked:
+        actions.append(f"Review {len(blocked)} blocked AgentTask(s) before launching recovery work.")
+    if not actions:
+        actions.append("No running or blocked AgentTasks visible for this dispatch filter.")
+
+    return {
+        "statuses": list(ACTIVE_QUEUE_STATUSES),
+        "query_limit_per_status": read_count,
+        "sample_limit_per_status": sample_count,
+        "related_experiment_filter": related_experiment,
+        "running_task_count": len(running),
+        "running_tasks": [_task_payload(task) for task in running[:sample_count]],
+        "blocked_task_count": len(blocked),
+        "blocked_tasks": [_task_payload(task) for task in blocked[:sample_count]],
+        "next_actions": actions,
+    }
+
+
+def _task_payload(task: AgentTaskSummary) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "task": task.wref,
+        "name": task.name,
+        "status": task.status,
+        "owner": task.owner,
+        "objective": task.objective,
+        "tags": list(task.tags),
+    }
+    if task.related_experiment:
+        payload["related_experiment"] = task.related_experiment
+    if task.prerequisites:
+        payload["prerequisites"] = list(task.prerequisites)
+    return payload
+
+
 def task_stage(task: AgentTaskSummary) -> str:
     tags = set(task.tags)
     name = task.name
@@ -306,6 +367,7 @@ def annotate_dispatch_payload(
     queried_task_count: int,
     selected_task_count: int,
     skipped_prerequisites: list[dict[str, Any]] | None,
+    queue_health: dict[str, Any],
 ) -> dict[str, Any]:
     annotated = dict(payload)
     annotated.update(
@@ -325,6 +387,7 @@ def annotate_dispatch_payload(
             "ignore_prerequisites": bool(args.ignore_prerequisites),
             "queried_task_count": queried_task_count,
             "selected_task_count": selected_task_count,
+            "queue_health": queue_health,
         }
     )
     if skipped_prerequisites is not None:
@@ -385,6 +448,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--name-prefix", default=None, help="Only dispatch tasks whose AgentTask name starts with this prefix.")
     parser.add_argument("--tag", action="append", default=[], help="Require a tag. Repeat for AND filtering.")
     parser.add_argument("--related-experiment", default=None)
+    parser.add_argument(
+        "--queue-health-limit",
+        type=int,
+        default=DEFAULT_QUEUE_HEALTH_LIMIT,
+        help="Maximum running and blocked AgentTasks to include in the dispatch review payload.",
+    )
     parser.add_argument(
         "--stage",
         choices=TASK_STAGE_CHOICES,
@@ -474,6 +543,12 @@ def main() -> int:
         respect_prerequisites=not args.ignore_prerequisites,
     )
     selected, selected_stage = select_tasks_for_dispatch(ready, stage=effective_stage, max_workers=args.max_workers)
+    queue_health = query_queue_health(
+        args.repo,
+        sample_limit=args.queue_health_limit,
+        query_limit=max(args.limit, 100),
+        related_experiment=args.related_experiment,
+    )
     specs = make_dispatch_specs(args, selected, git_url=git_url, git_ref=git_ref)
     base_payload = dispatch_payload(specs, launch=args.launch, dirty_worktree=dirty)
     prerequisite_skips = None
@@ -489,6 +564,7 @@ def main() -> int:
         queried_task_count=len(queried),
         selected_task_count=len(selected),
         skipped_prerequisites=prerequisite_skips,
+        queue_health=queue_health,
     )
     if args.dispatch_manifest is not None:
         payload["dispatch_manifest"] = str(args.dispatch_manifest)
