@@ -129,19 +129,30 @@ Current handoff for GRPO training smoke, 2026-06-14:
   smoke run, create a fresh `/workspace/flat-disk-robot-code-smoke` checkout of
   `codex/open-vocab-nav-research-loop` rather than modifying the existing
   directory.
-- The ready local offline replay GRPO job is
-  `sim/scratch/open_vocab_nav_research_loop/qwen_grpo_jobs/bathroom_cross_run`.
-  Local planning reported `status=ready`, `sample_count=98`,
-  `trainable_group_count=1`, `missing_image_count=0`, and no forbidden model
-  token hits. Local runner dry-run with `--skip-dependency-check` succeeded.
-- Next action is to transfer only the generated job files plus dataset-referenced
-  images to the pod, run `flatdisk-sim-run-qwen-grpo-training --dry-run` with
-  real dependency checks, then attempt a tiny real run. Do not claim training
-  success until `qwen_grpo_training_result.json` exists.
-- Expected blockers to verify on the pod: `transformers`, `trl`, `datasets`,
-  `accelerate`, `peft`, and `pillow` are not installed by default; `uv` may not
-  see the globally installed Torch; the generated processor load may reject
-  `padding_side`; Hugging Face model download/cache state may matter.
+- A one-step Qwen3-VL 8B GRPO smoke completed on that pod in
+  `/workspace/flat-disk-robot-code-smoke-20260614-grpo`. The result manifest is
+  `sim/scratch/open_vocab_nav_research_loop/qwen_grpo_jobs/bathroom_cross_run/qwen_grpo_training_result.json`
+  with `status=complete`, `returncode=0`, and `duration_s=626.335`.
+- The saved adapter is under
+  `sim/scratch/open_vocab_nav_research_loop/qwen_grpo_jobs/bathroom_cross_run/adapter`;
+  `adapter_model.safetensors` is about 87 MB.
+- The working pod venv is `/workspace/flatdisk-grpo-venv`, created with
+  `--system-site-packages` so it can see image Torch `2.9.1+cu128`; install
+  `torchvision==0.24.1 --no-deps` to match that Torch build. Do not let pip pull
+  a second Torch/CUDA stack.
+- The generated GRPO script must keep prompts conversational, leave images in
+  the separate `images` column, use PEFT LoRA, and cap generation length for
+  smoke jobs. Full-model Adam OOMs on A40; uncapped generation makes "tiny"
+  smoke runs unreasonably long.
+- Next action is to run a longer capped LoRA job or tune the GRPO data/reward
+  setup; the basic Runpod training path is now proven.
+- Future continuation should treat this as past verification, not a blocker.
+  There is no known Runpod auth issue when `.env` is loaded as above, and no
+  user action is needed before launching the next capped LoRA training attempt.
+  Start from the pushed `codex/open-vocab-nav-research-loop` ref, regenerate the
+  GRPO job with an explicit `--max-completion-length`, transfer only the job
+  files plus dataset-referenced images, and run through
+  `/workspace/flatdisk-grpo-venv`.
 
 To fan out several planned trial-slice tasks, use the dispatcher. It is also
 dry-run by default and skips incomplete prerequisites unless

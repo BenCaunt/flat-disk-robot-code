@@ -80,6 +80,7 @@ def test_plan_qwen_dpo_training_writes_ready_job_and_trl_script(tmp_path: Path) 
     assert job["dataset"]["forbidden_model_token_hits"] == {}
     assert job["training_args"]["max_steps"] == 7
     assert "trl" in job["required_packages"]
+    assert "torchvision" in job["required_packages"]
     assert "accelerate launch" in job["launch_command"]
     assert job["launch_argv"][:3] == ["accelerate", "launch", str(tmp_path / "dpo_job" / "train_qwen_dpo_trl.py")]
     assert job["runtime"]["dependency_check"].startswith("importlib.util.find_spec")

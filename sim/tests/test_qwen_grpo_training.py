@@ -288,8 +288,13 @@ def test_plan_qwen_grpo_training_uses_existing_manifest_and_writes_job(tmp_path:
     assert job["dataset"]["forbidden_model_token_hits"] == []
     assert job["training_args"]["max_steps"] == 7
     assert job["training_args"]["num_generations"] == 3
+    assert job["training_args"]["max_completion_length"] == 96
+    assert job["adapter"]["method"] == "peft_lora"
+    assert job["adapter"]["r"] == 8
     assert "trl" in job["required_packages"]
+    assert "torchvision" in job["required_packages"]
     assert "accelerate launch" in job["launch_command"]
+    assert "--max-completion-length 96" in job["launch_command"]
     assert job["launch_argv"][:3] == ["accelerate", "launch", str(tmp_path / "grpo_job" / "train_qwen_grpo_trl.py")]
     assert job["runtime"]["dependency_check"].startswith("importlib.util.find_spec")
     assert len(job["train_script_sha256"]) == 64
@@ -309,8 +314,12 @@ def test_plan_qwen_grpo_training_uses_existing_manifest_and_writes_job(tmp_path:
     script_text = train_script.read_text(encoding="utf-8")
     assert "GRPOTrainer" in script_text
     assert "AutoModelForImageTextToText" in script_text
+    assert "LoraConfig" in script_text
+    assert "get_peft_model" in script_text
     assert "navigation_tool_reward" in script_text
-    assert "apply_chat_template" in script_text
+    assert "conversational_text_messages" in script_text
+    assert "record[\"prompt\"] = conversational_text_messages(messages)" in script_text
+    assert "apply_chat_template" not in script_text
 
 
 def test_plan_qwen_grpo_training_blocks_not_ready_manifest(tmp_path: Path) -> None:

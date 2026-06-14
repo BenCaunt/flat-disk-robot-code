@@ -25,6 +25,7 @@ DEFAULT_REQUIRED_PACKAGES = [
     "peft",
     "pillow",
     "torch",
+    "torchvision",
     "transformers",
     "trl",
 ]

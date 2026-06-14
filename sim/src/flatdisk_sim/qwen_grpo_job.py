@@ -33,6 +33,7 @@ def plan_qwen_grpo_training(
     gradient_accumulation_steps: int = 8,
     learning_rate: float = 5e-6,
     num_generations: int = 2,
+    max_completion_length: int = 96,
     reward_scale: float = 1.0,
     require_existing_images: bool = True,
 ) -> dict[str, Any]:
@@ -70,6 +71,7 @@ def plan_qwen_grpo_training(
         gradient_accumulation_steps=gradient_accumulation_steps,
         learning_rate=learning_rate,
         num_generations=num_generations,
+        max_completion_length=max_completion_length,
         reward_scale=reward_scale,
     )
     _write_train_script(train_script_path)
@@ -107,8 +109,16 @@ def plan_qwen_grpo_training(
             "gradient_accumulation_steps": gradient_accumulation_steps,
             "learning_rate": learning_rate,
             "num_generations": num_generations,
+            "max_completion_length": max_completion_length,
             "reward_scale": reward_scale,
             "remove_unused_columns": False,
+        },
+        "adapter": {
+            "method": "peft_lora",
+            "r": 8,
+            "lora_alpha": 16,
+            "lora_dropout": 0.05,
+            "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
         },
         "dataset": validation["dataset"],
         "audit": {
@@ -425,6 +435,7 @@ def _launch_argv(
     gradient_accumulation_steps: int,
     learning_rate: float,
     num_generations: int,
+    max_completion_length: int,
     reward_scale: float,
 ) -> list[str]:
     return [
@@ -447,6 +458,8 @@ def _launch_argv(
         str(learning_rate),
         "--num-generations",
         str(num_generations),
+        "--max-completion-length",
+        str(max_completion_length),
         "--reward-scale",
         str(reward_scale),
     ]
@@ -546,6 +559,7 @@ from pathlib import Path
 
 from datasets import Dataset
 from PIL import Image
+from peft import LoraConfig, TaskType, get_peft_model
 from transformers import AutoModelForImageTextToText, AutoProcessor
 from trl import GRPOConfig, GRPOTrainer
 
@@ -602,6 +616,28 @@ def parse_action(text: str) -> dict:
     return {}
 
 
+def content_to_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return str(content or "")
+    parts = []
+    for item in content:
+        if isinstance(item, dict):
+            if item.get("type") == "image":
+                continue
+            text = item.get("text") or item.get("content")
+            if text:
+                parts.append(str(text))
+        elif item:
+            parts.append(str(item))
+    return "\\n".join(parts)
+
+
+def conversational_text_messages(messages: list[dict]) -> list[dict]:
+    return [{**message, "content": content_to_text(message.get("content"))} for message in messages]
+
+
 def navigation_tool_reward(completions, reference_action_canonical=None, candidate_step_reward=None, reward_scale=None, **kwargs):
     scale = float(reward_scale[0] if isinstance(reward_scale, list) and reward_scale else reward_scale or 1.0)
     rewards = []
@@ -619,17 +655,6 @@ def navigation_tool_reward(completions, reference_action_canonical=None, candida
     return rewards
 
 
-def format_prompt(processor, messages: list[dict]) -> str:
-    if hasattr(processor, "apply_chat_template"):
-        return processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    text_parts = []
-    for message in messages:
-        for item in message.get("content", []):
-            if isinstance(item, dict) and item.get("type") == "text":
-                text_parts.append(str(item.get("text") or ""))
-    return "\\n".join(text_parts)
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", type=Path, required=True)
@@ -640,6 +665,7 @@ def main() -> None:
     parser.add_argument("--gradient-accumulation-steps", type=int, default=8)
     parser.add_argument("--learning-rate", type=float, default=5e-6)
     parser.add_argument("--num-generations", type=int, default=2)
+    parser.add_argument("--max-completion-length", type=int, default=96)
     parser.add_argument("--reward-scale", type=float, default=1.0)
     args = parser.parse_args()
 
@@ -647,11 +673,28 @@ def main() -> None:
     records = read_jsonl(args.dataset)
     for record in records:
         messages = record.get("prompt_messages") or record.get("prompt") or []
-        record["prompt"] = format_prompt(processor, messages)
         record["images"] = [load_image(path) for path in record.get("image_paths", [])]
+        record["prompt"] = conversational_text_messages(messages)
         record["reward_scale"] = args.reward_scale
     dataset = Dataset.from_list(records)
     model = AutoModelForImageTextToText.from_pretrained(args.model_id, torch_dtype="auto", device_map="auto")
+    if hasattr(model.config, "use_cache"):
+        model.config.use_cache = False
+    if hasattr(model, "gradient_checkpointing_enable"):
+        model.gradient_checkpointing_enable()
+    if hasattr(model, "enable_input_require_grads"):
+        model.enable_input_require_grads()
+    lora_config = LoraConfig(
+        task_type=TaskType.CAUSAL_LM,
+        r=8,
+        lora_alpha=16,
+        lora_dropout=0.05,
+        bias="none",
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+    )
+    model = get_peft_model(model, lora_config)
+    if hasattr(model, "print_trainable_parameters"):
+        model.print_trainable_parameters()
     training_args = GRPOConfig(
         output_dir=str(args.output_dir),
         max_steps=args.max_steps,
@@ -659,6 +702,7 @@ def main() -> None:
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         learning_rate=args.learning_rate,
         num_generations=args.num_generations,
+        max_completion_length=args.max_completion_length,
         remove_unused_columns=False,
         report_to=[],
     )
@@ -689,6 +733,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gradient-accumulation-steps", type=int, default=8)
     parser.add_argument("--learning-rate", type=float, default=5e-6)
     parser.add_argument("--num-generations", type=int, default=2)
+    parser.add_argument("--max-completion-length", type=int, default=96)
     parser.add_argument("--reward-scale", type=float, default=1.0)
     parser.add_argument("--allow-missing-images", action="store_true")
     parser.add_argument("--fail-on-not-ready", action="store_true")
@@ -707,6 +752,7 @@ def main() -> int:
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         learning_rate=args.learning_rate,
         num_generations=args.num_generations,
+        max_completion_length=args.max_completion_length,
         reward_scale=args.reward_scale,
         require_existing_images=not args.allow_missing_images,
     )

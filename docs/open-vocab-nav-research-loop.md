@@ -413,11 +413,49 @@ uv run --project sim --extra dev \
   --dry-run
 ```
 
-If that passes, attempt the tiny real run from the same checkout. Do not mark
-training as successful until `qwen_grpo_training_result.json` exists. Known
-things to check if it fails: `uv` may not see the image's globally installed
-Torch, the generated processor load may reject `padding_side`, and the pod may
-need a Hugging Face cache or model download time for `Qwen/Qwen3-VL-8B-Instruct`.
+The one-step smoke completed on 2026-06-14 in
+`/workspace/flat-disk-robot-code-smoke-20260614-grpo` using
+`/workspace/flatdisk-grpo-venv`:
+
+- Result:
+  `sim/scratch/open_vocab_nav_research_loop/qwen_grpo_jobs/bathroom_cross_run/qwen_grpo_training_result.json`
+- Status `complete`, return code `0`, duration `626.335` seconds.
+- Launch used `--max-steps 1`, `--num-generations 2`, and
+  `--max-completion-length 64`.
+- Adapter:
+  `sim/scratch/open_vocab_nav_research_loop/qwen_grpo_jobs/bathroom_cross_run/adapter/adapter_model.safetensors`
+  at about 87 MB.
+- Training reported `21,823,488` trainable params out of `8,788,947,184`
+  total params, about `0.2483%`.
+
+Resume status for a future continuation:
+
+- This is no longer a verification-only blocker. Runpod auth works when
+  `RUNPOD_API_KEY` is loaded from the repo root `.env`, the A40 pod can run the
+  training stack, and a one-step LoRA adapter was saved successfully.
+- No user action is currently required to start the next training attempt.
+- Use the pushed `codex/open-vocab-nav-research-loop` ref for a clean checkout;
+  the original `/workspace/flat-disk-robot-code` directory on the pod is not a
+  git repo.
+- The next useful experiment is a longer capped LoRA run, or a reward/data
+  tuning pass before that run. Keep `--max-completion-length` explicit so smoke
+  and short training jobs cannot spend most of their time generating long
+  completions.
+
+The fixes needed to make the smoke complete were:
+
+- Install the training stack in a venv with `--system-site-packages` so it can
+  use the image's global Torch `2.9.1+cu128`.
+- Install `torchvision==0.24.1 --no-deps` to match that Torch build; installing
+  unconstrained latest `torchvision` tries to pull a second Torch/CUDA stack.
+- Keep GRPO prompts conversational. Do not pre-apply the Qwen chat template.
+- Convert structured message content to text strings before `Dataset.from_list`
+  and keep loaded PIL images in the separate `images` column so TRL can insert
+  image placeholders itself.
+- Use PEFT LoRA adapters; full-model Adam OOMs on the A40 at the first optimizer
+  step.
+- Cap `max_completion_length` for smoke jobs; uncapped generation made a tiny
+  run take too long.
 
 With `--start-qwen-server`, the generated worker claims the Warmhub task, starts
 `Qwen/Qwen3-VL-8B-Instruct` through vLLM, waits for `/v1/models`, and then runs
