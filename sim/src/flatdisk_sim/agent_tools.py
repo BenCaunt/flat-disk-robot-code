@@ -364,6 +364,8 @@ def _parse_object_drive_status(stdout: str, *, returncode: int) -> dict[str, Any
     pub_values = [_int_or_zero(record.get("pub")) for record in status_records]
     command_values = [record.get("cmd", "none") for record in status_records]
     det_values = [record.get("det", "none") for record in status_records]
+    detection_status_count = sum(1 for det in det_values if det and det != "none")
+    detection_coverage_fraction = detection_status_count / len(status_records) if status_records else 0.0
     final_detection = last.get("det", "none")
     final_command = last.get("cmd", "none")
     detection_label, detection_source, detection_score = _parse_detection_descriptor(final_detection)
@@ -385,10 +387,21 @@ def _parse_object_drive_status(stdout: str, *, returncode: int) -> dict[str, Any
         servo_status = "moved"
     else:
         servo_status = failure_reason or "no_motion"
+    grounding_stability = _grounding_stability(
+        status_count=len(status_records),
+        detection_status_count=detection_status_count,
+        detection_coverage_fraction=detection_coverage_fraction,
+        ever_detected=ever_detected,
+    )
+    planner_note = _planner_note_for_grounding(target_detected=target_detected, grounding_stability=grounding_stability)
     return {
         "servo_status": servo_status,
         "target_detected": target_detected,
         "ever_detected": ever_detected,
+        "status_sample_count": len(status_records),
+        "detection_status_count": detection_status_count,
+        "detection_coverage_fraction": round(detection_coverage_fraction, 3),
+        "grounding_stability": grounding_stability,
         "moved": moved,
         "motor_commands_sent": motor_commands_sent,
         "last_command": final_command,
@@ -397,12 +410,7 @@ def _parse_object_drive_status(stdout: str, *, returncode: int) -> dict[str, Any
         "last_detection_source": detection_source,
         "last_detection_score": detection_score,
         "semantic_identity": "unverified_phrase_grounding" if target_detected else "none",
-        "planner_note": (
-            "visual_servo_object moved toward a detector/tracker match for the prompt; "
-            "this does not prove the visible object is the final goal class."
-            if target_detected
-            else "visual_servo_object did not provide a visible phrase-grounded track."
-        ),
+        "planner_note": planner_note,
         "prediction_count": _int_or_zero(last.get("pred")),
         "track_count": _int_or_zero(last.get("track")),
         "imu_prediction_count": _int_or_zero(last.get("imu_pred")),
@@ -447,6 +455,36 @@ def _parse_object_drive_status_fields(line: str) -> dict[str, str]:
         value_end = matches[index + 1].start() if index + 1 < len(matches) else len(line)
         fields[key] = line[value_start:value_end].strip()
     return fields
+
+
+def _grounding_stability(
+    *,
+    status_count: int,
+    detection_status_count: int,
+    detection_coverage_fraction: float,
+    ever_detected: bool,
+) -> str:
+    if not ever_detected:
+        return "no_detection"
+    if status_count < 3:
+        return "insufficient_status_history"
+    if detection_status_count < 2 or detection_coverage_fraction < 0.35:
+        return "sparse_detection_coverage"
+    return "status_track_present"
+
+
+def _planner_note_for_grounding(*, target_detected: bool, grounding_stability: str) -> str:
+    if not target_detected:
+        return "visual_servo_object did not provide a visible phrase-grounded track."
+    if grounding_stability != "status_track_present":
+        return (
+            "visual_servo_object moved after sparse or unstable phrase grounding; "
+            "do not repeat the same prompt without checking the grounding audit and latest RGB frame."
+        )
+    return (
+        "visual_servo_object moved toward a detector/tracker match for the prompt; "
+        "this does not prove the visible object is the final goal class."
+    )
 
 
 def _parse_detection_descriptor(value: str | None) -> tuple[str | None, str | None, float | None]:

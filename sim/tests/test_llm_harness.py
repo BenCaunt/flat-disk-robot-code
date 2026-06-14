@@ -194,6 +194,7 @@ def test_actor_prompt_declares_camera_image_authoritative_and_strips_legacy_dete
     assert "visual_servo_object reports moved=false or failure_reason" in prompt
     assert "fill grounding_audit before choosing an action" in prompt
     assert "Only repeat the same visual_servo_object prompt" in prompt
+    assert "grounding_stability is sparse_detection_coverage" in prompt
     assert "detections" not in prompt
     assert "toilet" not in prompt
 
@@ -213,6 +214,7 @@ def test_critic_prompt_declares_camera_image_authoritative_and_stop_requires_rep
     assert "final-goal phrase" in prompt
     assert "non-goal visible landmark" in prompt
     assert "did not audit the previous detector box" in prompt
+    assert "grounding_stability is not status_track_present" in prompt
     assert "Reject stop unless repeated observations show" in prompt
 
 
