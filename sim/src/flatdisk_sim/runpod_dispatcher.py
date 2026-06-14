@@ -367,7 +367,13 @@ def select_tasks_for_dispatch(
     return staged[:limit], stage if staged else stage
 
 
-def make_dispatch_specs(args: argparse.Namespace, tasks: list[AgentTaskSummary], *, git_url: str, git_ref: str | None) -> list[RunpodLaunchSpec]:
+def make_dispatch_specs(
+    args: argparse.Namespace,
+    tasks: list[AgentTaskSummary],
+    *,
+    git_url: str,
+    git_ref: str | None,
+) -> list[RunpodLaunchSpec]:
     env = parse_env_assignments(args.env)
     specs: list[RunpodLaunchSpec] = []
     for index, task in enumerate(tasks):
@@ -399,6 +405,7 @@ def make_dispatch_specs(args: argparse.Namespace, tasks: list[AgentTaskSummary],
                 evidence_artifacts=tuple(args.evidence_artifact),
                 env=env,
                 start_qwen_server=args.start_qwen_server,
+                start_thor_xorg=not args.no_start_thor_xorg,
                 qwen_model=args.qwen_model,
                 qwen_host=args.qwen_host,
                 qwen_port=args.qwen_port,
@@ -547,7 +554,11 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--include-non-slice", action="store_true", help="Allow non-trial-slice tasks such as preflight or analysis.")
-    parser.add_argument("--ignore-prerequisites", action="store_true", help="Dispatch matching tasks even when prerequisite AgentTasks are incomplete.")
+    parser.add_argument(
+        "--ignore-prerequisites",
+        action="store_true",
+        help="Dispatch matching tasks even when prerequisite AgentTasks are incomplete.",
+    )
     parser.add_argument("--agent", default=None, help="Exact agent name to use for every launched task.")
     parser.add_argument("--agent-prefix", default="runpod-open-vocab-nav")
     parser.add_argument("--command-index", type=int, default=0)
@@ -570,8 +581,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-file", default=DEFAULT_LOG_FILE)
     parser.add_argument("--task-timeout-s", type=float, default=None)
     parser.add_argument("--evidence-artifact", action="append", default=[])
-    parser.add_argument("--env", action="append", default=[], help="Additional pod env as KEY=VALUE. Secrets are redacted in dry-run output.")
-    parser.add_argument("--start-qwen-server", action="store_true", help="Start a local vLLM Qwen endpoint before running each task command.")
+    parser.add_argument(
+        "--env",
+        action="append",
+        default=[],
+        help="Additional pod env as KEY=VALUE. Secrets are redacted in dry-run output.",
+    )
+    parser.add_argument(
+        "--start-qwen-server",
+        action="store_true",
+        help="Start a local vLLM Qwen endpoint before running each task command.",
+    )
+    parser.add_argument(
+        "--no-start-thor-xorg",
+        action="store_true",
+        help="Skip starting the AI2-THOR Xorg display before running task commands.",
+    )
     parser.add_argument("--qwen-model", default=DEFAULT_QWEN_MODEL)
     parser.add_argument("--qwen-host", default=DEFAULT_QWEN_HOST)
     parser.add_argument("--qwen-port", type=int, default=DEFAULT_QWEN_PORT)

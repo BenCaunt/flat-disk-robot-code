@@ -4,15 +4,20 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+import hashlib
+import importlib.util
 import json
 from pathlib import Path
-from time import gmtime, strftime
+import shlex
+import subprocess
+from time import gmtime, monotonic, strftime
 from typing import Any, Iterable
 
 from .qwen_tool_training import DEFAULT_FORBIDDEN_MODEL_TOKENS
 
 
 QWEN_DPO_TRAINING_JOB_SCHEMA = "flatdisk.qwen_dpo_training_job.v1"
+QWEN_DPO_TRAINING_RESULT_SCHEMA = "flatdisk.qwen_dpo_training_result.v1"
 DEFAULT_MODEL_ID = "Qwen/Qwen3-VL-8B-Instruct"
 DEFAULT_REQUIRED_PACKAGES = [
     "accelerate",
@@ -58,7 +63,7 @@ def plan_qwen_dpo_training(
         expected_count=_optional_int(manifest.get("dpo_preference_count")),
         dpo_path=dpo_path,
     )
-    launch_command = _launch_command(
+    launch_argv = _launch_argv(
         train_script_path=train_script_path,
         dataset_path=dpo_path,
         model_id=model_id,
@@ -70,6 +75,7 @@ def plan_qwen_dpo_training(
         beta=beta,
     )
     _write_train_script(train_script_path)
+    train_script_sha256 = _sha256_file(train_script_path)
     job = {
         "schema": QWEN_DPO_TRAINING_JOB_SCHEMA,
         "created_at": strftime("%Y-%m-%dT%H:%M:%SZ", gmtime()),
@@ -82,11 +88,19 @@ def plan_qwen_dpo_training(
         "output_dir": str(output_dir),
         "adapter_output_dir": str(adapter_output_dir),
         "train_script": str(train_script_path),
-        "launch_command": launch_command,
+        "train_script_sha256": train_script_sha256,
+        "launch_argv": launch_argv,
+        "launch_command": _argv_to_command(launch_argv),
         "training_method": "offline_dpo",
         "trainer": "trl.DPOTrainer",
         "model_id": model_id,
         "required_packages": DEFAULT_REQUIRED_PACKAGES,
+        "runtime": {
+            "python_entrypoint": str(train_script_path),
+            "launcher": "accelerate",
+            "dependency_check": "importlib.util.find_spec without importing GPU training libraries",
+            "required_packages": DEFAULT_REQUIRED_PACKAGES,
+        },
         "training_args": {
             "max_steps": max_steps,
             "per_device_train_batch_size": per_device_train_batch_size,
@@ -106,6 +120,82 @@ def plan_qwen_dpo_training(
     }
     job_path.write_text(json.dumps(job, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return job
+
+
+def run_qwen_dpo_training_job(
+    job_input: Path,
+    *,
+    result_dir: Path | None = None,
+    dry_run: bool = False,
+    check_dependencies: bool = True,
+    timeout_s: float | None = None,
+    launch_command: str | None = None,
+    tail_chars: int = 4000,
+) -> dict[str, Any]:
+    job_path = _resolve_dpo_training_job(job_input)
+    job = json.loads(job_path.read_text(encoding="utf-8"))
+    result_dir = result_dir or Path(str(job.get("output_dir") or job_path.parent))
+    result_dir.mkdir(parents=True, exist_ok=True)
+    result_path = result_dir / "qwen_dpo_training_result.json"
+    launch_argv = _job_launch_argv(job, launch_command_override=launch_command)
+    command = _argv_to_command(launch_argv)
+    blockers = _training_job_blockers(job, job_path=job_path, check_dependencies=check_dependencies)
+    if not launch_argv:
+        blockers.append("missing launch_command")
+
+    result: dict[str, Any] = {
+        "schema": QWEN_DPO_TRAINING_RESULT_SCHEMA,
+        "created_at": strftime("%Y-%m-%dT%H:%M:%SZ", gmtime()),
+        "completed_at": None,
+        "status": "not_ready",
+        "dry_run": dry_run,
+        "job_manifest": str(job_path),
+        "result_path": str(result_path),
+        "model_id": job.get("model_id"),
+        "sample_count": (job.get("dataset") or {}).get("sample_count"),
+        "adapter_output_dir": job.get("adapter_output_dir"),
+        "launch_command": command,
+        "launch_argv": launch_argv,
+        "returncode": None,
+        "stdout_tail": "",
+        "stderr_tail": "",
+        "duration_s": None,
+        "blockers": blockers,
+        "dependency_check": _dependency_check_payload(job, enabled=check_dependencies),
+    }
+    if blockers:
+        result["completed_at"] = strftime("%Y-%m-%dT%H:%M:%SZ", gmtime())
+        _write_result(result_path, result)
+        return result
+    if dry_run:
+        result["status"] = "dry_run"
+        result["completed_at"] = strftime("%Y-%m-%dT%H:%M:%SZ", gmtime())
+        _write_result(result_path, result)
+        return result
+
+    start = monotonic()
+    try:
+        completed = subprocess.run(
+            launch_argv,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=timeout_s,
+        )
+        result["returncode"] = completed.returncode
+        result["stdout_tail"] = _tail(completed.stdout, tail_chars)
+        result["stderr_tail"] = _tail(completed.stderr, tail_chars)
+        result["status"] = "complete" if completed.returncode == 0 else "failed"
+    except subprocess.TimeoutExpired as exc:
+        result["status"] = "failed"
+        result["blockers"] = [f"training command timed out after {timeout_s} second(s)"]
+        result["stdout_tail"] = _tail(_decode_timeout_output(exc.stdout), tail_chars)
+        result["stderr_tail"] = _tail(_decode_timeout_output(exc.stderr), tail_chars)
+    finally:
+        result["duration_s"] = round(monotonic() - start, 3)
+        result["completed_at"] = strftime("%Y-%m-%dT%H:%M:%SZ", gmtime())
+    _write_result(result_path, result)
+    return result
 
 
 def _resolve_qwen_training_manifest(input_path: Path) -> Path:
@@ -146,6 +236,20 @@ def _resolve_manifest_path(manifest: dict[str, Any], key: str, *, default: Path)
         if candidate.exists():
             return candidate
     return default if default.exists() else path
+
+
+def _resolve_dpo_training_job(job_input: Path) -> Path:
+    path = job_input.expanduser()
+    if path.is_file() and path.name == "qwen_dpo_training_job.json":
+        return path
+    candidates = [
+        path / "qwen_dpo_training_job.json",
+        path / "qwen_dpo_training" / "qwen_dpo_training_job.json",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(f"could not find qwen_dpo_training_job.json under {job_input}")
 
 
 def _relocated_absolute_path(path: Path, *, local_qwen_training_dir: Path) -> Path | None:
@@ -228,6 +332,60 @@ def _forbidden_tokens(payloads: Iterable[Any]) -> list[str]:
     return [token for token in DEFAULT_FORBIDDEN_MODEL_TOKENS if token.lower() in text]
 
 
+def _training_job_blockers(
+    job: dict[str, Any],
+    *,
+    job_path: Path,
+    check_dependencies: bool,
+) -> list[str]:
+    blockers: list[str] = []
+    if job.get("schema") != QWEN_DPO_TRAINING_JOB_SCHEMA:
+        blockers.append(f"unexpected job schema: {job.get('schema')}")
+    if job.get("status") != "ready":
+        blockers.append(f"training job is not ready: {job.get('status')}")
+    train_script = _job_path(job, "train_script", relative_to=job_path.parent)
+    if train_script is None or not train_script.exists():
+        blockers.append(f"missing train_script: {job.get('train_script')}")
+    dataset_path = _job_path(job, "qwen_dpo_messages_jsonl", relative_to=job_path.parent)
+    if dataset_path is None or not dataset_path.exists():
+        blockers.append(f"missing qwen_dpo_messages_jsonl: {job.get('qwen_dpo_messages_jsonl')}")
+    if check_dependencies:
+        missing_packages = _missing_required_packages(job)
+        if missing_packages:
+            blockers.append("missing required training package(s): " + ", ".join(missing_packages))
+    return blockers
+
+
+def _job_path(job: dict[str, Any], key: str, *, relative_to: Path) -> Path | None:
+    value = job.get(key)
+    if not value:
+        return None
+    path = Path(str(value))
+    return path if path.is_absolute() else relative_to / path if (relative_to / path).exists() else path
+
+
+def _dependency_check_payload(job: dict[str, Any], *, enabled: bool) -> dict[str, Any]:
+    required = [str(package) for package in job.get("required_packages", [])]
+    missing = _missing_required_packages(job) if enabled else []
+    return {
+        "enabled": enabled,
+        "required_packages": required,
+        "missing_packages": missing,
+    }
+
+
+def _missing_required_packages(job: dict[str, Any]) -> list[str]:
+    missing: list[str] = []
+    for package in [str(value) for value in job.get("required_packages", [])]:
+        if importlib.util.find_spec(_import_module_for_package(package)) is None:
+            missing.append(package)
+    return missing
+
+
+def _import_module_for_package(package: str) -> str:
+    return {"pillow": "PIL"}.get(package.lower(), package.replace("-", "_"))
+
+
 def _read_jsonl_if_exists(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
@@ -247,7 +405,7 @@ def _optional_int(value: Any) -> int | None:
         return None
 
 
-def _launch_command(
+def _launch_argv(
     *,
     train_script_path: Path,
     dataset_path: Path,
@@ -258,23 +416,70 @@ def _launch_command(
     gradient_accumulation_steps: int,
     learning_rate: float,
     beta: float,
-) -> str:
-    return (
-        "accelerate launch "
-        f"{train_script_path} "
-        f"--dataset {dataset_path} "
-        f"--model-id {model_id} "
-        f"--output-dir {adapter_output_dir} "
-        f"--max-steps {max_steps} "
-        f"--per-device-train-batch-size {per_device_train_batch_size} "
-        f"--gradient-accumulation-steps {gradient_accumulation_steps} "
-        f"--learning-rate {learning_rate} "
-        f"--beta {beta}"
-    )
+) -> list[str]:
+    return [
+        "accelerate",
+        "launch",
+        str(train_script_path),
+        "--dataset",
+        str(dataset_path),
+        "--model-id",
+        model_id,
+        "--output-dir",
+        str(adapter_output_dir),
+        "--max-steps",
+        str(max_steps),
+        "--per-device-train-batch-size",
+        str(per_device_train_batch_size),
+        "--gradient-accumulation-steps",
+        str(gradient_accumulation_steps),
+        "--learning-rate",
+        str(learning_rate),
+        "--beta",
+        str(beta),
+    ]
+
+
+def _argv_to_command(argv: list[str]) -> str:
+    return " ".join(shlex.quote(part) for part in argv)
+
+
+def _job_launch_argv(job: dict[str, Any], *, launch_command_override: str | None) -> list[str]:
+    if launch_command_override:
+        return shlex.split(launch_command_override)
+    launch_argv = job.get("launch_argv")
+    if isinstance(launch_argv, list) and all(isinstance(part, str) and part for part in launch_argv):
+        return [str(part) for part in launch_argv]
+    launch_command = str(job.get("launch_command") or "")
+    return shlex.split(launch_command) if launch_command else []
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _write_train_script(path: Path) -> None:
     path.write_text(_TRAIN_SCRIPT, encoding="utf-8")
+
+
+def _write_result(path: Path, result: dict[str, Any]) -> None:
+    path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _tail(text: str, chars: int) -> str:
+    return text[-chars:] if chars > 0 and len(text) > chars else text
+
+
+def _decode_timeout_output(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
 
 
 _TRAIN_SCRIPT = '''"""Run TRL DPO over flatdisk Qwen VLM preference records."""
@@ -363,6 +568,18 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def parse_run_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run or dry-run a planned Qwen DPO training job.")
+    parser.add_argument("--job", type=Path, required=True, help="qwen_dpo_training dir or qwen_dpo_training_job.json")
+    parser.add_argument("--result-dir", type=Path, default=None)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--skip-dependency-check", action="store_true")
+    parser.add_argument("--timeout-s", type=float, default=None)
+    parser.add_argument("--launch-command", default=None, help="Override launch_command; intended for tests or manual recovery.")
+    parser.add_argument("--tail-chars", type=int, default=4000)
+    return parser.parse_args()
+
+
 def main() -> int:
     args = parse_args()
     job = plan_qwen_dpo_training(
@@ -395,6 +612,37 @@ def main() -> int:
     if args.fail_on_not_ready and job["status"] != "ready":
         return 2
     return 0
+
+
+def run_main() -> int:
+    args = parse_run_args()
+    result = run_qwen_dpo_training_job(
+        args.job,
+        result_dir=args.result_dir,
+        dry_run=args.dry_run,
+        check_dependencies=not args.skip_dependency_check,
+        timeout_s=args.timeout_s,
+        launch_command=args.launch_command,
+        tail_chars=args.tail_chars,
+    )
+    print(
+        json.dumps(
+            {
+                "status": result["status"],
+                "returncode": result["returncode"],
+                "blockers": result["blockers"],
+                "result_path": result["result_path"],
+                "launch_command": result["launch_command"],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    if result["status"] in {"complete", "dry_run"}:
+        return 0
+    if result["status"] == "not_ready":
+        return 2
+    return 1
 
 
 if __name__ == "__main__":

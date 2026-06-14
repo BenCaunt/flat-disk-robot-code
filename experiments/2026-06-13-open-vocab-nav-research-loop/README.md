@@ -188,3 +188,14 @@ uv run --project sim flatdisk-sim-plan-qwen-dpo-training \
   --input sim/scratch/open_vocab_nav_research_loop/<run>/qwen_tool_training \
   --output-dir sim/scratch/open_vocab_nav_research_loop/<run>/qwen_dpo_training
 ```
+
+On a training-capable worker with `accelerate`, `datasets`, `peft`, `pillow`,
+`torch`, `transformers`, and `trl` installed, run the generated job:
+
+```bash
+uv run --project sim flatdisk-sim-run-qwen-dpo-training \
+  --job sim/scratch/open_vocab_nav_research_loop/<run>/qwen_dpo_training/qwen_dpo_training_job.json
+```
+
+Use `--dry-run --skip-dependency-check` for queue or path validation without
+starting the generated `accelerate launch ...` command.

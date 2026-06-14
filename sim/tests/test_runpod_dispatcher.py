@@ -8,10 +8,12 @@ from flatdisk_sim import runpod_dispatcher
 from flatdisk_sim.runpod_dispatcher import (
     AgentTaskSummary,
     filter_tasks,
+    make_dispatch_specs,
     query_queue_health,
     select_tasks_for_dispatch,
     task_stage,
 )
+from flatdisk_sim.runpod_launcher import build_runpodctl_command
 
 
 def test_filter_tasks_defaults_to_trial_slices_and_applies_tags() -> None:
@@ -143,6 +145,66 @@ def test_task_stage_classifies_preference_training_tasks() -> None:
     )
 
     assert task_stage(task) == "preference-training"
+
+
+def test_preference_training_dispatch_can_skip_thor_xorg() -> None:
+    task = AgentTaskSummary(
+        wref="AgentTask/plan-qwen-dpo-train-worker",
+        name="plan-qwen-dpo-train-worker",
+        status="planned",
+        owner="unassigned",
+        objective="Run Qwen DPO training",
+        tags=("gpu-training-worker", "preference-training", "qwen-dpo"),
+    )
+    args = SimpleNamespace(
+        env=[],
+        agent=None,
+        agent_prefix="runpod-open-vocab-nav",
+        command_index=0,
+        all_commands=False,
+        repo="bencaunt-2/open-vocab-nav-research-loop",
+        project_dir="/workspace/flat-disk-robot-code",
+        image=runpod_dispatcher.DEFAULT_IMAGE,
+        gpu_id=runpod_dispatcher.DEFAULT_GPU_ID,
+        gpu_count=1,
+        name=[],
+        cloud_type="SECURE",
+        container_disk_gb=80,
+        volume_gb=80,
+        volume_mount_path="/workspace",
+        ports="22/tcp,8888/http,8000/http",
+        stop_after=None,
+        terminate_after=None,
+        min_cuda_version="12.8",
+        log_file="/workspace/open_vocab_nav_worker.log",
+        task_timeout_s=None,
+        evidence_artifact=[],
+        start_qwen_server=False,
+        no_start_thor_xorg=True,
+        qwen_model="Qwen/Qwen3-VL-8B-Instruct",
+        qwen_host="127.0.0.1",
+        qwen_port=8000,
+        qwen_server_log="/workspace/qwen_vllm.log",
+        qwen_server_timeout_s=900,
+        qwen_vllm_package="vllm",
+        qwen_vllm_extra_args="--max-model-len 16384",
+    )
+
+    specs = make_dispatch_specs(
+        args,
+        [task],
+        git_url="https://github.com/BenCaunt/flat-disk-robot-code.git",
+        git_ref="abc123",
+    )
+    command = build_runpodctl_command(specs[0])
+    env = json.loads(command[command.index("--env") + 1])
+    docker_args = command[command.index("--docker-args") + 1]
+
+    assert specs[0].start_thor_xorg is False
+    assert specs[0].start_qwen_server is False
+    assert env["START_THOR_XORG"] == "0"
+    assert "scripts/runpod_start_thor_xorg.sh" not in docker_args
+    assert "scripts/runpod_start_qwen_vllm.sh" not in docker_args
 
 
 def test_query_queue_health_summarizes_active_tasks(monkeypatch) -> None:

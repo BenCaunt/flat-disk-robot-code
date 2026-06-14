@@ -252,7 +252,10 @@ The downstream `qwen-dpo-train-plan` task runs
 `flatdisk-sim-plan-qwen-dpo-training` to validate the DPO handoff and write a
 `qwen_dpo_training_job.json` plus a generated TRL script. That task is a
 training handoff only; actual GPU fine-tuning should run in a later worker with
-an isolated TRL/Transformers/Accelerate/PEFT environment.
+an isolated TRL/Transformers/Accelerate/PEFT environment. The following
+`qwen-dpo-train-worker` task runs `flatdisk-sim-run-qwen-dpo-training`, which
+checks the manifest, dataset, script, and training packages before executing
+the generated `accelerate launch ...` command.
 
 ## Runpod Worker
 
@@ -378,6 +381,14 @@ By default it skips tasks whose `notes.prerequisites` are not complete; pass
   `qwen_dpo_messages.jsonl`, generate a `qwen_dpo_training_job.json`, and emit a
   Runpod-oriented TRL script without importing GPU training dependencies in the
   local sim test environment.
+- Use `flatdisk-sim-run-qwen-dpo-training --job <qwen_dpo_training_job.json>`
+  only on a training-capable worker. The wrapper records
+  `qwen_dpo_training_result.json`, checks required packages via import discovery
+  before launch, and leaves the heavy Transformers/TRL imports inside the
+  generated script.
+- Dispatch preference-training GPU workers with `--stage preference-training`
+  and `--tag gpu-training-worker --no-start-thor-xorg`; do not pass
+  `--start-qwen-server` because DPO training loads the model directly.
 - Use `training_export/policy_review_traces.jsonl` first for failure triage and
   parallel-agent handoff; it records tool calls and contact-sheet paths without
   hidden target distances or THOR object metadata.

@@ -458,9 +458,13 @@ def make_task_plan_ops(
             },
         )
     )
+    dpo_train_plan_task_id = f"{plan_name}-qwen-dpo-train-plan"
+    dpo_train_plan_ref = _task_wref(dpo_train_plan_task_id)
+    dpo_training_dir = output_dir / "qwen_dpo_training" / plan_name
+    dpo_training_job = dpo_training_dir / "qwen_dpo_training_job.json"
     ops.append(
         _planned_task_op(
-            task_id=f"{plan_name}-qwen-dpo-train-plan",
+            task_id=dpo_train_plan_task_id,
             objective=f"Plan a Qwen DPO preference-training job for {config.experiment_id} without starting GPU training.",
             owner=owner,
             priority=priority,
@@ -474,7 +478,7 @@ def make_task_plan_ops(
                         f"{output_dir / 'qwen_tool_training' / plan_name / 'qwen_tool_training_manifest.json'}; then "
                         "uv run --project sim flatdisk-sim-plan-qwen-dpo-training "
                         f"--input {output_dir / 'qwen_tool_training' / plan_name} "
-                        f"--output-dir {output_dir / 'qwen_dpo_training' / plan_name} "
+                        f"--output-dir {dpo_training_dir} "
                         f"--model-id {_qwen_training_model_id(config)} "
                         "--fail-on-not-ready; "
                         "else echo '[qwen-dpo] missing qwen_tool_training manifest; no trainable preference data yet'; exit 2; fi"
@@ -489,6 +493,45 @@ def make_task_plan_ops(
                     "DPO training job manifest validates prompt/chosen/rejected/images columns.",
                     "Generated TRL script is a handoff artifact only; actual GPU training is a later worker step.",
                     "Exit code 2 means no trainable preference data yet, not an infrastructure failure.",
+                ],
+                "policy_constraints": _policy_constraints(),
+            },
+        )
+    )
+    ops.append(
+        _planned_task_op(
+            task_id=f"{plan_name}-qwen-dpo-train-worker",
+            objective=f"Run the planned Qwen DPO preference-training job for {config.experiment_id} on a training-capable worker.",
+            owner=owner,
+            priority=priority,
+            related_experiment=experiment_ref,
+            tags=[*common_tags, "qwen-dpo", "preference-training", "training-worker", "gpu-training-worker"],
+            prerequisites=[dpo_train_plan_ref],
+            notes={
+                "commands": [
+                    (
+                        f"if test -f {dpo_training_job}; then "
+                        "set +e; "
+                        "uv run --project sim flatdisk-sim-run-qwen-dpo-training "
+                        f"--job {dpo_training_job} "
+                        f"--result-dir {dpo_training_dir}; "
+                        "code=$?; set -e; "
+                        "if test \"$code\" -eq 2; then exit 1; fi; "
+                        "exit \"$code\"; "
+                        "else echo '[qwen-dpo-train] missing qwen_dpo_training job; no training run to start'; exit 2; fi"
+                    )
+                ],
+                "accepted_exit_codes": [0, 2],
+                "expected_artifacts": [
+                    f"qwen_dpo_training/{plan_name}/qwen_dpo_training_job.json",
+                    f"qwen_dpo_training/{plan_name}/train_qwen_dpo_trl.py",
+                    f"qwen_dpo_training/{plan_name}/qwen_dpo_training_result.json",
+                    f"qwen_dpo_training/{plan_name}/adapter",
+                ],
+                "checks": [
+                    "Runner validates the job manifest, dataset, train script, and required training packages before launch.",
+                    "The generated TRL command is the only process that imports Transformers/TRL training dependencies.",
+                    "Exit code 2 from the runner is a real not-ready worker failure and should not be treated as complete.",
                 ],
                 "policy_constraints": _policy_constraints(),
             },

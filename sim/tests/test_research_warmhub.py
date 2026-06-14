@@ -261,6 +261,20 @@ def test_task_plan_config_creates_planned_slice_tasks(tmp_path) -> None:
     assert "qwen_dpo_training/plan-001/qwen_dpo_training_job.json" in dpo_notes["expected_artifacts"]
     assert "qwen_dpo_training/plan-001/train_qwen_dpo_trl.py" in dpo_notes["expected_artifacts"]
     assert any("actual GPU training is a later worker step" in check for check in dpo_notes["checks"])
+    dpo_train = next(op for op in ops if op["name"] == "AgentTask/plan-001-qwen-dpo-train-worker")
+    assert "preference-training" in dpo_train["data"]["tags"]
+    assert "gpu-training-worker" in dpo_train["data"]["tags"]
+    dpo_train_notes = json.loads(dpo_train["data"]["notes"])
+    assert dpo_train_notes["prerequisites"] == ["AgentTask/plan-001-qwen-dpo-train-plan"]
+    assert dpo_train_notes["accepted_exit_codes"] == [0, 2]
+    assert "flatdisk-sim-run-qwen-dpo-training" in dpo_train_notes["commands"][0]
+    assert "--job sim/scratch/open_vocab_nav_research_loop/qwen_dpo_training/plan-001/qwen_dpo_training_job.json" in dpo_train_notes["commands"][0]
+    assert "--result-dir sim/scratch/open_vocab_nav_research_loop/qwen_dpo_training/plan-001" in dpo_train_notes["commands"][0]
+    assert 'if test "$code" -eq 2; then exit 1; fi' in dpo_train_notes["commands"][0]
+    assert "qwen_dpo_training/plan-001/qwen_dpo_training_job.json" in dpo_train_notes["expected_artifacts"]
+    assert "qwen_dpo_training/plan-001/train_qwen_dpo_trl.py" in dpo_train_notes["expected_artifacts"]
+    assert "qwen_dpo_training/plan-001/qwen_dpo_training_result.json" in dpo_train_notes["expected_artifacts"]
+    assert any("required training packages" in check for check in dpo_train_notes["checks"])
 
 
 def test_task_finish_ops_write_subagent_result() -> None:

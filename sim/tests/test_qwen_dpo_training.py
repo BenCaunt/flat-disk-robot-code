@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import shlex
+import sys
 
-from flatdisk_sim.qwen_dpo_training import main, plan_qwen_dpo_training
+from flatdisk_sim.qwen_dpo_training import main, plan_qwen_dpo_training, run_main, run_qwen_dpo_training_job
 
 
 def _write_qwen_dpo_fixture(tmp_path: Path, *, prompt_text: str = "Drive safely.") -> Path:
@@ -79,10 +81,13 @@ def test_plan_qwen_dpo_training_writes_ready_job_and_trl_script(tmp_path: Path) 
     assert job["training_args"]["max_steps"] == 7
     assert "trl" in job["required_packages"]
     assert "accelerate launch" in job["launch_command"]
+    assert job["launch_argv"][:3] == ["accelerate", "launch", str(tmp_path / "dpo_job" / "train_qwen_dpo_trl.py")]
+    assert job["runtime"]["dependency_check"].startswith("importlib.util.find_spec")
     job_path = tmp_path / "dpo_job" / "qwen_dpo_training_job.json"
     train_script = tmp_path / "dpo_job" / "train_qwen_dpo_trl.py"
     assert job_path.exists()
     assert train_script.exists()
+    assert len(job["train_script_sha256"]) == 64
     script_text = train_script.read_text(encoding="utf-8")
     assert "DPOTrainer" in script_text
     assert "AutoModelForImageTextToText" in script_text
@@ -118,3 +123,72 @@ def test_plan_qwen_dpo_training_cli_can_fail_on_not_ready(tmp_path: Path, monkey
         (tmp_path / "dpo_job" / "qwen_dpo_training_job.json").read_text(encoding="utf-8")
     )
     assert job["status"] == "not_ready"
+
+
+def test_run_qwen_dpo_training_job_dry_run_writes_result(tmp_path: Path) -> None:
+    qwen_dir = _write_qwen_dpo_fixture(tmp_path)
+    plan_qwen_dpo_training(qwen_dir, output_dir=tmp_path / "dpo_job")
+
+    result = run_qwen_dpo_training_job(tmp_path / "dpo_job", dry_run=True, check_dependencies=False)
+
+    assert result["schema"] == "flatdisk.qwen_dpo_training_result.v1"
+    assert result["status"] == "dry_run"
+    assert result["returncode"] is None
+    assert result["blockers"] == []
+    assert result["dependency_check"]["enabled"] is False
+    assert result["launch_argv"][0] == "accelerate"
+    assert result["sample_count"] == 1
+    result_path = tmp_path / "dpo_job" / "qwen_dpo_training_result.json"
+    assert result_path.exists()
+
+
+def test_run_qwen_dpo_training_job_reports_missing_dependencies(tmp_path: Path) -> None:
+    qwen_dir = _write_qwen_dpo_fixture(tmp_path)
+    plan_qwen_dpo_training(qwen_dir, output_dir=tmp_path / "dpo_job")
+    job_path = tmp_path / "dpo_job" / "qwen_dpo_training_job.json"
+    job = json.loads(job_path.read_text(encoding="utf-8"))
+    job["required_packages"] = ["definitely_missing_flatdisk_training_package"]
+    job_path.write_text(json.dumps(job, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    result = run_qwen_dpo_training_job(job_path, dry_run=True)
+
+    assert result["status"] == "not_ready"
+    assert result["dependency_check"]["missing_packages"] == ["definitely_missing_flatdisk_training_package"]
+    assert any("missing required training package" in blocker for blocker in result["blockers"])
+
+
+def test_run_qwen_dpo_training_job_executes_ready_job(tmp_path: Path) -> None:
+    qwen_dir = _write_qwen_dpo_fixture(tmp_path)
+    plan_qwen_dpo_training(qwen_dir, output_dir=tmp_path / "dpo_job")
+    fake_train = tmp_path / "dpo_job" / "fake_train.py"
+    fake_train.write_text("print('trained-ok')\n", encoding="utf-8")
+    job_path = tmp_path / "dpo_job" / "qwen_dpo_training_job.json"
+    job = json.loads(job_path.read_text(encoding="utf-8"))
+    job["required_packages"] = []
+    job["train_script"] = str(fake_train)
+    job["launch_command"] = f"{shlex.quote(sys.executable)} {shlex.quote(str(fake_train))}"
+    job["launch_argv"] = [sys.executable, str(fake_train)]
+    job_path.write_text(json.dumps(job, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    result = run_qwen_dpo_training_job(job_path)
+
+    assert result["status"] == "complete"
+    assert result["returncode"] == 0
+    assert "trained-ok" in result["stdout_tail"]
+
+
+def test_run_qwen_dpo_training_cli_dry_run(tmp_path: Path, monkeypatch) -> None:
+    qwen_dir = _write_qwen_dpo_fixture(tmp_path)
+    plan_qwen_dpo_training(qwen_dir, output_dir=tmp_path / "dpo_job")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "flatdisk-sim-run-qwen-dpo-training",
+            "--job",
+            str(tmp_path / "dpo_job"),
+            "--dry-run",
+            "--skip-dependency-check",
+        ],
+    )
+
+    assert run_main() == 0

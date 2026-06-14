@@ -4,7 +4,14 @@ import json
 from pathlib import Path
 
 from flatdisk_sim import runpod_launcher
-from flatdisk_sim.runpod_launcher import RunpodLaunchSpec, build_runpodctl_command, compact_safe_id, parse_env_assignments, redacted_command, remote_worker_script
+from flatdisk_sim.runpod_launcher import (
+    RunpodLaunchSpec,
+    build_runpodctl_command,
+    compact_safe_id,
+    parse_env_assignments,
+    redacted_command,
+    remote_worker_script,
+)
 
 
 def test_build_runpodctl_command_contains_worker_env_and_docker_args() -> None:
@@ -87,6 +94,23 @@ def test_start_qwen_server_defaults_to_larger_context() -> None:
     env = json.loads(command[command.index("--env") + 1])
 
     assert env["QWEN_VLLM_EXTRA_ARGS"] == "--max-model-len 16384"
+
+
+def test_no_start_thor_xorg_omits_thor_bootstrap() -> None:
+    spec = RunpodLaunchSpec(
+        task="AgentTask/qwen-dpo-train-worker",
+        agent="agent-a",
+        git_url="https://github.com/BenCaunt/flat-disk-robot-code.git",
+        start_thor_xorg=False,
+    )
+
+    command = build_runpodctl_command(spec)
+    env = json.loads(command[command.index("--env") + 1])
+    docker_args = command[command.index("--docker-args") + 1]
+
+    assert env["START_THOR_XORG"] == "0"
+    assert "scripts/runpod_start_thor_xorg.sh" not in docker_args
+    assert "scripts/runpod_start_qwen_vllm.sh" not in docker_args
 
 
 def test_redacted_command_hides_sensitive_env_values() -> None:
