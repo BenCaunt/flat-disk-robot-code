@@ -8,6 +8,7 @@ import pytest
 
 from flatdisk_sim.llm_harness import (
     CodexExecRunner,
+    CriticDecision,
     DeterministicHarnessRunner,
     HarnessAction,
     HarnessConfig,
@@ -15,6 +16,7 @@ from flatdisk_sim.llm_harness import (
     OpenAICompatibleVisionRunner,
     SafetyCriticRunner,
     ScriptedOpenVocabRunner,
+    apply_actor_consistency_guard,
     build_actor_prompt,
     build_critic_prompt,
     parse_critic_decision,
@@ -383,6 +385,11 @@ def test_actor_side_effect_parser_sanitizes_memory_and_frame_requests() -> None:
         json.dumps(
             {
                 "action": {"tool": "wait", "args": {"duration_s": 0.2}},
+                "grounding_audit": {
+                    "previous_visual_servo_box_matches_intended_object": False,
+                    "next_prompt_should_change": True,
+                    "evidence": "box was on cabinet",
+                },
                 "memory_update": {"belief": "sofa left", "pose": {"x": 1}},
                 "save_frames": [{"id": "sofa left", "source": "previous_motion", "frame_index": 3, "note": "best view"}],
             }
@@ -390,7 +397,28 @@ def test_actor_side_effect_parser_sanitizes_memory_and_frame_requests() -> None:
     )
 
     assert side_effects["memory_update"] == {"belief": "sofa left"}
+    assert side_effects["grounding_audit"]["next_prompt_should_change"] is True
     assert side_effects["save_frames"][0]["source"] == "previous_motion"
+
+
+def test_actor_consistency_guard_rejects_unchanged_prompt_after_failed_audit() -> None:
+    decision = apply_actor_consistency_guard(
+        CriticDecision("approve", "ok"),
+        HarnessAction("visual_servo_object", {"prompt": "the white toilet"}, "repeat"),
+        {
+            "grounding_audit": {
+                "previous_visual_servo_box_matches_intended_object": False,
+                "next_prompt_should_change": True,
+                "evidence": "box was on cabinet",
+            }
+        },
+        [{"executed_action": {"tool": "visual_servo_object", "args": {"prompt": "the white toilet"}}}],
+    )
+
+    assert decision.verdict == "reject"
+    assert decision.replacement is not None
+    assert decision.replacement.tool == "wait"
+    assert "requested a changed visual-servo prompt" in decision.reason
 
 
 def test_invalid_harness_action_falls_back_to_wait() -> None:
