@@ -256,6 +256,11 @@ an isolated TRL/Transformers/Accelerate/PEFT environment. The following
 `qwen-dpo-train-worker` task runs `flatdisk-sim-run-qwen-dpo-training`, which
 checks the manifest, dataset, script, and training packages before executing
 the generated `accelerate launch ...` command.
+The sibling `qwen-grpo-train-plan` task runs
+`flatdisk-sim-prepare-qwen-grpo-training` to materialize grouped rollout
+candidates for future GRPO/PPO work. It marks only trajectories whose actor
+actions were actually executed as trainable and keeps evaluator rewards outside
+model-facing messages.
 
 ## Runpod Worker
 
@@ -386,6 +391,11 @@ By default it skips tasks whose `notes.prerequisites` are not complete; pass
   `qwen_dpo_training_result.json`, checks required packages via import discovery
   before launch, and leaves the heavy Transformers/TRL imports inside the
   generated script.
+- Use `flatdisk-sim-prepare-qwen-grpo-training` after readiness to convert
+  `rollout_groups.jsonl` into `qwen_grpo_rollout_groups.jsonl`, with per-step
+  Qwen prompt/assistant targets and trajectory rewards held in a separate
+  evaluator channel for later GRPO/PPO training. Pass repeated `--input`
+  values to merge split one-rollout Runpod exports into a comparable group.
 - Dispatch preference-training GPU workers with `--stage preference-training`
   and `--tag gpu-training-worker --no-start-thor-xorg`; do not pass
   `--start-qwen-server` because DPO training loads the model directly.

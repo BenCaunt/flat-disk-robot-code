@@ -462,6 +462,7 @@ def make_task_plan_ops(
     dpo_train_plan_ref = _task_wref(dpo_train_plan_task_id)
     dpo_training_dir = output_dir / "qwen_dpo_training" / plan_name
     dpo_training_job = dpo_training_dir / "qwen_dpo_training_job.json"
+    grpo_training_dir = output_dir / "qwen_grpo_training" / plan_name
     ops.append(
         _planned_task_op(
             task_id=dpo_train_plan_task_id,
@@ -493,6 +494,42 @@ def make_task_plan_ops(
                     "DPO training job manifest validates prompt/chosen/rejected/images columns.",
                     "Generated TRL script is a handoff artifact only; actual GPU training is a later worker step.",
                     "Exit code 2 means no trainable preference data yet, not an infrastructure failure.",
+                ],
+                "policy_constraints": _policy_constraints(),
+            },
+        )
+    )
+    ops.append(
+        _planned_task_op(
+            task_id=f"{plan_name}-qwen-grpo-train-plan",
+            objective=f"Materialize Qwen GRPO grouped-rollout handoff data for {config.experiment_id}.",
+            owner=owner,
+            priority=priority,
+            related_experiment=experiment_ref,
+            tags=[*common_tags, "qwen-grpo", "grpo", "training-worker"],
+            prerequisites=[training_review_ref],
+            notes={
+                "commands": [
+                    (
+                        "if test -f "
+                        f"{output_dir / 'training_export' / 'training_manifest.json'}; then "
+                        "uv run --project sim flatdisk-sim-prepare-qwen-grpo-training "
+                        f"--input {output_dir} "
+                        f"--output-dir {grpo_training_dir} "
+                        "--fail-on-not-ready; "
+                        "else echo '[qwen-grpo] missing training_export manifest; no grouped rollouts yet'; exit 2; fi"
+                    )
+                ],
+                "accepted_exit_codes": [0, 2],
+                "expected_artifacts": [
+                    f"qwen_grpo_training/{plan_name}/qwen_grpo_training_manifest.json",
+                    f"qwen_grpo_training/{plan_name}/qwen_grpo_rollout_groups.jsonl",
+                    f"qwen_grpo_training/{plan_name}/qwen_ppo_step_samples.jsonl",
+                ],
+                "checks": [
+                    "GRPO handoff keeps evaluator rewards outside model-facing prompt and completion messages.",
+                    "Only rollout candidates where actor action equals executed action are marked trainable.",
+                    "Each trainable group has at least two Qwen trajectory candidates with comparable rewards.",
                 ],
                 "policy_constraints": _policy_constraints(),
             },
@@ -1032,6 +1069,8 @@ def _training_readiness_item_summary(item: dict[str, Any]) -> dict[str, Any]:
         "qwen_sft_sample_count": data.get("qwenSftSampleCount"),
         "qwen_action_preference_count": data.get("qwenActionPreferenceCount"),
         "qwen_dpo_preference_count": data.get("qwenDpoPreferenceCount"),
+        "qwen_grpo_trainable_group_count": data.get("qwenGrpoTrainableGroupCount"),
+        "qwen_ppo_step_sample_count": data.get("qwenPpoStepSampleCount"),
         "blockers": data.get("blockers") if isinstance(data.get("blockers"), list) else [],
         "warnings": data.get("warnings") if isinstance(data.get("warnings"), list) else [],
         "report_path": data.get("reportPath"),
@@ -1924,7 +1963,9 @@ def _format_status_text(snapshot: dict[str, Any]) -> str:
                 "  - "
                 f"{readiness.get('status')}: SFT={readiness.get('sft_ready')}, "
                 f"pref={readiness.get('preference_tuning_ready')}, "
-                f"PPO={readiness.get('ppo_ready')}, GRPO={readiness.get('grpo_ready')}"
+                f"PPO={readiness.get('ppo_ready')}, GRPO={readiness.get('grpo_ready')}, "
+                f"qwen_grpo_groups={readiness.get('qwen_grpo_trainable_group_count')}, "
+                f"qwen_ppo_steps={readiness.get('qwen_ppo_step_sample_count')}"
             )
     lines.append("")
     lines.append("Next actions:")

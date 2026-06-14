@@ -199,3 +199,17 @@ uv run --project sim flatdisk-sim-run-qwen-dpo-training \
 
 Use `--dry-run --skip-dependency-check` for queue or path validation without
 starting the generated `accelerate launch ...` command.
+
+For PPO/GRPO work, materialize the grouped rollout handoff. This reads
+`rollout_groups.jsonl`, can merge repeated `--input` exports for the same
+episode prompt, keeps evaluator rewards out of Qwen prompt/completion messages,
+and marks only actor-equals-executed trajectories as trainable.
+
+```bash
+uv run --project sim flatdisk-sim-prepare-qwen-grpo-training \
+  --input sim/scratch/open_vocab_nav_research_loop/<run> \
+  --output-dir sim/scratch/open_vocab_nav_research_loop/<run>/qwen_grpo_training
+```
+
+For split Runpod artifacts, repeat `--input` once per artifact directory and
+write a merged output directory such as `qwen_grpo_training/bathroom_cross_run`.

@@ -31,13 +31,16 @@ def analyze_training_readiness(
     if not manifests:
         raise FileNotFoundError("no training_manifest.json files found")
     qwen_manifests = [_load_training_manifest(path) for path in _discover_qwen_tool_training_manifests(input_path_list)]
+    qwen_grpo_manifests = [_load_training_manifest(path) for path in _discover_qwen_grpo_training_manifests(input_path_list)]
 
     output_dir.mkdir(parents=True, exist_ok=True)
     analysis_id = _safe_id(analysis_id or _default_analysis_id(manifests))
     runs = [_summarize_manifest(manifest) for manifest in manifests]
     qwen_tool_training_runs = [_summarize_qwen_tool_training_manifest(manifest) for manifest in qwen_manifests]
+    qwen_grpo_training_runs = [_summarize_qwen_grpo_training_manifest(manifest) for manifest in qwen_grpo_manifests]
     aggregate = _aggregate(runs)
     aggregate = _aggregate_with_qwen_tool_training(aggregate, qwen_tool_training_runs)
+    aggregate = _aggregate_with_qwen_grpo_training(aggregate, qwen_grpo_training_runs)
     readiness = _readiness_decision(aggregate)
     report = {
         "schema": TRAINING_READINESS_SCHEMA,
@@ -47,6 +50,7 @@ def analyze_training_readiness(
         "input_count": len(manifests),
         "runs": runs,
         "qwen_tool_training_runs": qwen_tool_training_runs,
+        "qwen_grpo_training_runs": qwen_grpo_training_runs,
         "aggregate": aggregate,
         "readiness": readiness,
         "policy_constraints": [
@@ -97,6 +101,22 @@ def _discover_qwen_tool_training_manifests(input_paths: Iterable[Path]) -> list[
             ]
             found.extend(candidate for candidate in candidates if candidate.exists())
             found.extend(path.glob("**/qwen_tool_training_manifest.json"))
+    return sorted(set(found))
+
+
+def _discover_qwen_grpo_training_manifests(input_paths: Iterable[Path]) -> list[Path]:
+    found: list[Path] = []
+    for input_path in input_paths:
+        path = input_path.expanduser()
+        if path.is_file() and path.name == "qwen_grpo_training_manifest.json":
+            found.append(path)
+        elif path.is_dir():
+            candidates = [
+                path / "qwen_grpo_training_manifest.json",
+                path / "qwen_grpo_training" / "qwen_grpo_training_manifest.json",
+            ]
+            found.extend(candidate for candidate in candidates if candidate.exists())
+            found.extend(path.glob("**/qwen_grpo_training_manifest.json"))
     return sorted(set(found))
 
 
@@ -195,6 +215,35 @@ def _summarize_qwen_tool_training_manifest(manifest: dict[str, Any]) -> dict[str
     }
 
 
+def _summarize_qwen_grpo_training_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
+    manifest_path = Path(str(manifest["_manifest_path"]))
+    groups_path = _resolve_manifest_path(manifest, "qwen_grpo_rollout_groups_jsonl")
+    ppo_steps_path = _resolve_manifest_path(manifest, "qwen_ppo_step_samples_jsonl")
+    groups = _read_jsonl_if_exists(groups_path)
+    ppo_steps = _read_jsonl_if_exists(ppo_steps_path)
+    required_artifacts = {
+        "qwen_grpo_training_manifest": manifest_path,
+        "qwen_grpo_rollout_groups_jsonl": groups_path,
+        "qwen_ppo_step_samples_jsonl": ppo_steps_path,
+    }
+    return {
+        "manifest_path": str(manifest_path),
+        "output_dir": manifest.get("output_dir"),
+        "status": manifest.get("status"),
+        "qwen_grpo_group_count": len(groups),
+        "qwen_grpo_trainable_group_count": _int(manifest.get("trainable_group_count")),
+        "qwen_grpo_candidate_count": _int(manifest.get("candidate_count")),
+        "qwen_grpo_trainable_candidate_count": _int(manifest.get("trainable_candidate_count")),
+        "qwen_grpo_step_sample_count": _int(manifest.get("step_sample_count")),
+        "qwen_ppo_step_sample_count": len(ppo_steps),
+        "qwen_grpo_missing_image_count": _int(manifest.get("missing_image_count")),
+        "forbidden_qwen_grpo_message_token_hits": _forbidden_hits_from_manifest(manifest),
+        "missing_required_artifacts": [name for name, path in required_artifacts.items() if path is None or not path.exists()],
+        "blockers": manifest.get("blockers", []),
+        "warnings": manifest.get("warnings", []),
+    }
+
+
 def _aggregate(runs: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "run_count": len(runs),
@@ -265,6 +314,53 @@ def _aggregate_with_qwen_tool_training(aggregate: dict[str, Any], qwen_runs: lis
     return result
 
 
+def _aggregate_with_qwen_grpo_training(aggregate: dict[str, Any], qwen_grpo_runs: list[dict[str, Any]]) -> dict[str, Any]:
+    result = dict(aggregate)
+    result.update(
+        {
+            "qwen_grpo_training_manifest_count": len(qwen_grpo_runs),
+            "qwen_grpo_group_count": sum(int(run["qwen_grpo_group_count"]) for run in qwen_grpo_runs),
+            "qwen_grpo_trainable_group_count": sum(int(run["qwen_grpo_trainable_group_count"]) for run in qwen_grpo_runs),
+            "qwen_grpo_candidate_count": sum(int(run["qwen_grpo_candidate_count"]) for run in qwen_grpo_runs),
+            "qwen_grpo_trainable_candidate_count": sum(int(run["qwen_grpo_trainable_candidate_count"]) for run in qwen_grpo_runs),
+            "qwen_grpo_step_sample_count": sum(int(run["qwen_grpo_step_sample_count"]) for run in qwen_grpo_runs),
+            "qwen_ppo_step_sample_count": sum(int(run["qwen_ppo_step_sample_count"]) for run in qwen_grpo_runs),
+            "qwen_grpo_missing_image_count": sum(int(run["qwen_grpo_missing_image_count"]) for run in qwen_grpo_runs),
+            "qwen_grpo_blockers": sorted(
+                {
+                    blocker
+                    for run in qwen_grpo_runs
+                    for blocker in run.get("blockers", [])
+                    if isinstance(blocker, str)
+                }
+            ),
+            "forbidden_qwen_grpo_message_token_hits": sorted(
+                {
+                    token
+                    for run in qwen_grpo_runs
+                    for token in run.get("forbidden_qwen_grpo_message_token_hits", [])
+                    if isinstance(token, str)
+                }
+            ),
+        }
+    )
+    qwen_grpo_missing_artifacts = sorted(
+        {
+            artifact
+            for run in qwen_grpo_runs
+            for artifact in run.get("missing_required_artifacts", [])
+            if isinstance(artifact, str)
+        }
+    )
+    result["missing_required_artifacts"] = sorted(
+        {
+            *result.get("missing_required_artifacts", []),
+            *qwen_grpo_missing_artifacts,
+        }
+    )
+    return result
+
+
 def _readiness_decision(aggregate: dict[str, Any]) -> dict[str, Any]:
     blockers: list[str] = []
     warnings: list[str] = []
@@ -276,6 +372,17 @@ def _readiness_decision(aggregate: dict[str, Any]) -> dict[str, Any]:
         blockers.append("Qwen training messages contain forbidden privileged token(s): " + ", ".join(aggregate["forbidden_qwen_message_token_hits"]))
     if aggregate["qwen_missing_image_count"] > 0:
         blockers.append(f"{aggregate['qwen_missing_image_count']} Qwen training image reference(s) are missing")
+    if aggregate["qwen_grpo_blockers"]:
+        blockers.append("Qwen GRPO handoff is not ready: " + "; ".join(aggregate["qwen_grpo_blockers"]))
+    elif aggregate["qwen_grpo_missing_image_count"] > 0:
+        warnings.append(
+            f"{aggregate['qwen_grpo_missing_image_count']} Qwen GRPO image reference(s) were missing during optional validation"
+        )
+    if aggregate["forbidden_qwen_grpo_message_token_hits"]:
+        blockers.append(
+            "Qwen GRPO messages contain forbidden privileged token(s): "
+            + ", ".join(aggregate["forbidden_qwen_grpo_message_token_hits"])
+        )
     if aggregate["missing_evaluator_label_count"] > 0:
         blockers.append(f"{aggregate['missing_evaluator_label_count']} policy sample(s) lack evaluator labels")
     if not aggregate["all_policy_dataset_labels_privileged"]:
@@ -288,7 +395,12 @@ def _readiness_decision(aggregate: dict[str, Any]) -> dict[str, Any]:
     preference_tuning_ready = preference_basis_count > 0 and not blockers
     ppo_ready = aggregate["evaluator_label_count"] > 0 and aggregate["step_count"] > 0 and not blockers
     grpo_ready = (
-        (aggregate["trajectory_preference_count"] > 0 or aggregate["max_rollouts_per_group"] >= 2 or aggregate["grpo_eligible_sample_count"] > 0)
+        (
+            aggregate["qwen_grpo_trainable_group_count"] > 0
+            or aggregate["trajectory_preference_count"] > 0
+            or aggregate["max_rollouts_per_group"] >= 2
+            or aggregate["grpo_eligible_sample_count"] > 0
+        )
         and not blockers
     )
     if qwen_materialized and aggregate["qwen_sft_sample_count"] == 0 and not blockers:
@@ -339,7 +451,7 @@ def _resolve_manifest_path(manifest: dict[str, Any], key: str) -> Path | None:
 
 def _relocated_absolute_path(path: Path, *, local_training_export_dir: Path) -> Path | None:
     parts = path.parts
-    for marker in ("training_export", "qwen_tool_training"):
+    for marker in ("training_export", "qwen_tool_training", "qwen_grpo_training"):
         if marker not in parts:
             continue
         index = len(parts) - 1 - list(reversed(parts)).index(marker)
@@ -399,6 +511,15 @@ def _forbidden_qwen_message_hits(records: list[dict[str, Any]]) -> list[str]:
     return sorted({token for token in DEFAULT_FORBIDDEN_MODEL_TOKENS if token.lower() in text})
 
 
+def _forbidden_hits_from_manifest(manifest: dict[str, Any]) -> list[str]:
+    value = manifest.get("forbidden_qwen_message_token_hits")
+    if isinstance(value, dict):
+        return sorted(str(token) for token, count in value.items() if _int(count) > 0)
+    if isinstance(value, list):
+        return sorted(str(token) for token in value)
+    return []
+
+
 def _int(value: Any) -> int:
     try:
         return int(value or 0)
@@ -456,10 +577,20 @@ def _warmhub_ops(report: dict[str, Any], *, about: str | None, author: str) -> l
                 "qwenActionPreferenceCount": int(aggregate["qwen_action_preference_count"]),
                 "qwenDpoPreferenceCount": int(aggregate["qwen_dpo_preference_count"]),
                 "qwenMissingImageCount": int(aggregate["qwen_missing_image_count"]),
+                "qwenGrpoTrainingManifestCount": int(aggregate["qwen_grpo_training_manifest_count"]),
+                "qwenGrpoGroupCount": int(aggregate["qwen_grpo_group_count"]),
+                "qwenGrpoTrainableGroupCount": int(aggregate["qwen_grpo_trainable_group_count"]),
+                "qwenGrpoCandidateCount": int(aggregate["qwen_grpo_candidate_count"]),
+                "qwenGrpoTrainableCandidateCount": int(aggregate["qwen_grpo_trainable_candidate_count"]),
+                "qwenGrpoStepSampleCount": int(aggregate["qwen_grpo_step_sample_count"]),
+                "qwenPpoStepSampleCount": int(aggregate["qwen_ppo_step_sample_count"]),
+                "qwenGrpoMissingImageCount": int(aggregate["qwen_grpo_missing_image_count"]),
                 "grpoEligibleSampleCount": int(aggregate["grpo_eligible_sample_count"]),
                 "missingRequiredArtifacts": aggregate["missing_required_artifacts"],
                 "forbiddenPolicySampleTokenHits": aggregate["forbidden_policy_sample_token_hits"],
                 "forbiddenQwenMessageTokenHits": aggregate["forbidden_qwen_message_token_hits"],
+                "forbiddenQwenGrpoMessageTokenHits": aggregate["forbidden_qwen_grpo_message_token_hits"],
+                "qwenGrpoBlockers": aggregate["qwen_grpo_blockers"],
                 "blockers": readiness["blockers"],
                 "warnings": readiness["warnings"],
                 "reportPath": report["report_path"],
@@ -497,7 +628,7 @@ def _markdown_report(report: dict[str, Any]) -> str:
         f"| SFT | `{readiness['sft_ready']}` | {_sft_evidence(aggregate)} |",
         f"| Preference tuning | `{readiness['preference_tuning_ready']}` | {aggregate['qwen_dpo_preference_count']} DPO handoff records; {aggregate['qwen_action_preference_count']} Qwen guard-replacement action preferences |",
         f"| PPO | `{readiness['ppo_ready']}` | {aggregate['evaluator_label_count']} evaluator labels over {aggregate['step_count']} steps |",
-        f"| GRPO | `{readiness['grpo_ready']}` | {aggregate['rollout_group_count']} rollout groups, {aggregate['trajectory_preference_count']} preferences |",
+        f"| GRPO | `{readiness['grpo_ready']}` | {_grpo_evidence(aggregate)} |",
         "",
         "Blockers:",
     ]
@@ -516,6 +647,14 @@ def _sft_evidence(aggregate: dict[str, Any]) -> str:
     if aggregate.get("qwen_tool_training_manifest_count"):
         return f"{aggregate['qwen_sft_sample_count']} Qwen SFT samples; {aggregate['policy_sample_count']} raw policy samples"
     return f"{aggregate['policy_sample_count']} raw policy samples; no Qwen tool-training manifest found"
+
+
+def _grpo_evidence(aggregate: dict[str, Any]) -> str:
+    return (
+        f"{aggregate['rollout_group_count']} raw rollout groups, "
+        f"{aggregate['trajectory_preference_count']} trajectory preferences, "
+        f"{aggregate['qwen_grpo_trainable_group_count']} Qwen trainable GRPO groups"
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -556,6 +695,8 @@ def main() -> int:
                 "qwen_sft_sample_count": report["aggregate"]["qwen_sft_sample_count"],
                 "qwen_action_preference_count": report["aggregate"]["qwen_action_preference_count"],
                 "qwen_dpo_preference_count": report["aggregate"]["qwen_dpo_preference_count"],
+                "qwen_grpo_trainable_group_count": report["aggregate"]["qwen_grpo_trainable_group_count"],
+                "qwen_ppo_step_sample_count": report["aggregate"]["qwen_ppo_step_sample_count"],
                 "report_path": report["report_path"],
                 "markdown_path": report["markdown_path"],
                 "warmhub_ops_path": report["warmhub_ops_path"],
