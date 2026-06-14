@@ -694,7 +694,13 @@ def test_warmhub_status_snapshot_summarizes_queue_runs_and_next_actions(monkeypa
                     {
                         "wref": "FailureObservation/run-a",
                         "aboutWref": "NavEvalRun/run-a",
-                        "data": {"observation": "stalled", "confidence": 0.7},
+                        "data": {
+                            "category": "navigation_failure",
+                            "severity": "medium",
+                            "symptom": "stalled near doorway",
+                            "nextAction": "try waypoint-assisted exploration",
+                            "confidence": 0.7,
+                        },
                     }
                 ]
             }
@@ -743,7 +749,10 @@ def test_warmhub_status_snapshot_summarizes_queue_runs_and_next_actions(monkeypa
 
     assert snapshot["task_counts"]["planned"] == 2
     assert snapshot["run_counts"] == {"total": 1, "success": 0, "failed": 1}
-    assert snapshot["recent_failures"][0]["summary"] == "stalled"
+    assert snapshot["recent_failures"][0]["summary"] == "stalled near doorway"
+    assert snapshot["recent_failures"][0]["category"] == "navigation_failure"
+    assert snapshot["recent_failures"][0]["severity"] == "medium"
+    assert snapshot["recent_failures"][0]["next_action"] == "try waypoint-assisted exploration"
     assert snapshot["recent_promotion_decisions"][0]["status"] == "reject"
     assert snapshot["recent_promotion_decisions"][0]["candidate_variants"] == ["qwen_candidate"]
     assert snapshot["recent_training_readiness"][0]["sft_ready"] is True
@@ -806,6 +815,35 @@ def test_warmhub_status_snapshot_prioritizes_ready_promotion_gate(monkeypatch) -
     snapshot = research_warmhub.warmhub_status_snapshot("repo/example", related_experiment="exp")
 
     assert snapshot["next_actions"][0] == "Run planned promotion gate next: AgentTask/plan-promotion-gate."
+
+
+def test_warmhub_status_text_includes_failure_diagnostics() -> None:
+    text = research_warmhub._format_status_text(
+        {
+            "repo": "repo/example",
+            "related_experiment": None,
+            "task_counts": {"planned": 0, "running": 0, "complete": 0, "failed": 0, "blocked": 0},
+            "tasks": {"planned": [], "running": [], "complete": [], "failed": [], "blocked": []},
+            "recent_runs": [],
+            "run_counts": {"total": 0, "success": 0, "failed": 0},
+            "recent_failures": [
+                {
+                    "about": "NavEvalRun/run-a",
+                    "category": "navigation_failure",
+                    "severity": "medium",
+                    "summary": "stalled near doorway",
+                    "next_action": "try waypoint-assisted exploration",
+                }
+            ],
+            "recent_subagent_results": [],
+            "recent_promotion_decisions": [],
+            "recent_training_readiness": [],
+            "next_actions": [],
+        }
+    )
+
+    assert "navigation_failure | medium | stalled near doorway" in text
+    assert "next: try waypoint-assisted exploration" in text
 
 
 def test_warmhub_status_cli_prints_json(monkeypatch, capsys) -> None:

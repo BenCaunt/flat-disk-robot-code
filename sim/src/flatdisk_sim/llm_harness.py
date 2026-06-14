@@ -1134,6 +1134,7 @@ def build_actor_prompt(
     rules = [
         "Use only the provided camera/IMU observation, memory, and tool results.",
         "When an image is attached, treat it as the authoritative latest RGB camera frame.",
+        "After each executed action, the sanitized tool_result is fed back in recent_memory on the next step; inspect it before repeating or changing tools.",
         "Image attachments are ordered as: latest RGB frame; previous check_object_grounding detector overlay if present; previous raw/detector paired grounding audit strip if present; previous raw motion strip if present; previous detector debug overlay strip if present; topomap contact sheet if present.",
         "When a previous raw/detector paired grounding audit strip is attached, read columns left-to-right; each column shows the same moment as raw camera above and detector overlay below.",
         "When a previous raw motion strip is attached, read it left-to-right as evenly spaced frames from the last tool call.",

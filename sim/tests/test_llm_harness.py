@@ -106,6 +106,33 @@ class _ServoAuditActor:
         return json.dumps({"thought": "audit previous overlay", "action": {"tool": "wait", "args": {"duration_s": 0.2}}})
 
 
+class _ToolResultFeedbackActor:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def run(self, prompt: str, *, role: str, image_paths=None) -> str:  # noqa: ANN001
+        del prompt, role, image_paths
+        self.calls += 1
+        if self.calls == 1:
+            return json.dumps(
+                {
+                    "thought": "move toward a visible landmark",
+                    "action": {
+                        "tool": "visual_servo_object",
+                        "args": {"prompt": "visible landmark", "duration_s": 1.0, "forward_power": 18.0},
+                    },
+                    "grounding_audit": {},
+                }
+            )
+        return json.dumps(
+            {
+                "thought": "inspect the prior tool result before changing tools",
+                "action": {"tool": "wait", "args": {"duration_s": 0.2}},
+                "grounding_audit": {},
+            }
+        )
+
+
 class _GroundingCheckActor:
     def __init__(self) -> None:
         self.calls = 0
@@ -195,6 +222,7 @@ def test_actor_prompt_keeps_static_context_before_dynamic_state(tmp_path) -> Non
     assert prompt.index("STATIC_HARNESS_CONTEXT") < prompt.index("DYNAMIC_TASK_STATE")
     assert "tool_contract" in prompt
     assert str(tmp_path / "memory.jsonl") in prompt
+    assert "the sanitized tool_result is fed back in recent_memory on the next step" in prompt
     assert "hidden_score" not in prompt
     assert "distance_m" not in prompt
     assert "target_pose" not in prompt
@@ -806,6 +834,30 @@ def test_session_attaches_visual_servo_grounding_audit_after_latest_frame(tmp_pa
     assert len(actor.image_paths_by_call[0]) == 1
     assert len(actor.image_paths_by_call[1]) == 2
     assert actor.image_paths_by_call[1][1].name.endswith("_grounding_audit.jpg")
+
+
+def test_second_actor_prompt_contains_previous_sanitized_tool_result(tmp_path) -> None:
+    actor = _ToolResultFeedbackActor()
+    session = HarnessSession(
+        config=HarnessConfig(run_dir=tmp_path, max_steps=2),
+        tools=FakeHarnessTools(run_dir=tmp_path, environment="living_room"),
+        actor=actor,
+        critic=_AlwaysApproveCritic(),
+    )
+
+    session.start_goal("Drive to the goal object.")
+    first = session.run_auto_step()
+    second = session.run_auto_step()
+    session.close()
+
+    assert first is not None and second is not None
+    second_prompt = (tmp_path / "prompts" / "001_actor.txt").read_text(encoding="utf-8")
+    assert '"tool_result"' in second_prompt
+    assert '"action": "visual_servo_object"' in second_prompt
+    assert '"servo_status": "moved"' in second_prompt
+    assert '"failure_reason": null' in second_prompt
+    assert "hidden_score" not in second_prompt
+    assert "distance_m" not in second_prompt
 
 
 def test_session_logs_llm_outputs_to_rerun_sink(tmp_path) -> None:

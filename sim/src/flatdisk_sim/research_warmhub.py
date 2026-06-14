@@ -843,7 +843,11 @@ def _assertion_item_summary(item: dict[str, Any]) -> dict[str, Any]:
         "about": item.get("aboutWref") or item.get("about"),
         "status": data.get("status"),
         "agent": data.get("agent"),
-        "summary": data.get("summary") or data.get("observation") or data.get("note"),
+        "summary": data.get("summary") or data.get("symptom") or data.get("observation") or data.get("note"),
+        "category": data.get("category"),
+        "severity": data.get("severity"),
+        "symptom": data.get("symptom"),
+        "next_action": data.get("nextAction") or data.get("next_action"),
         "reason": data.get("reason"),
         "created_at": data.get("createdAt"),
         "confidence": data.get("confidence"),
@@ -1602,7 +1606,19 @@ def _format_status_text(snapshot: dict[str, Any]) -> str:
         lines.append("")
         lines.append("Recent failures:")
         for failure in snapshot["recent_failures"][:5]:
-            lines.append(f"  - {failure.get('about') or failure.get('wref')}: {failure.get('summary') or failure.get('reason')}")
+            detail_parts = [
+                str(part)
+                for part in [
+                    failure.get("category"),
+                    failure.get("severity"),
+                    failure.get("summary") or failure.get("reason"),
+                ]
+                if part
+            ]
+            line = f"  - {failure.get('about') or failure.get('wref')}: {' | '.join(detail_parts)}"
+            if failure.get("next_action"):
+                line += f" | next: {failure.get('next_action')}"
+            lines.append(line)
     if snapshot.get("recent_promotion_decisions"):
         lines.append("")
         lines.append("Recent promotion decisions:")
