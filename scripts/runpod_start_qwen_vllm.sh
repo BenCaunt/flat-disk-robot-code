@@ -12,12 +12,14 @@ QWEN_VLLM_PACKAGE="${QWEN_VLLM_PACKAGE:-vllm}"
 QWEN_VLLM_VENV="${QWEN_VLLM_VENV:-/workspace/open_vocab_nav_qwen_vllm_venv}"
 QWEN_VLLM_EXTRA_ARGS="${QWEN_VLLM_EXTRA_ARGS:---max-model-len 16384}"
 QWEN_HF_HOME="${QWEN_HF_HOME:-/workspace/huggingface}"
+QWEN_PIP_CACHE_DIR="${QWEN_PIP_CACHE_DIR:-/workspace/pip-cache}"
 QWEN_TMPDIR="${QWEN_TMPDIR:-/workspace/tmp}"
 
 models_url="http://${QWEN_HOST}:${QWEN_PORT}/v1/models"
-mkdir -p "$(dirname "${QWEN_SERVER_LOG}")" "${QWEN_HF_HOME}" "${QWEN_TMPDIR}"
+mkdir -p "$(dirname "${QWEN_SERVER_LOG}")" "${QWEN_HF_HOME}" "${QWEN_PIP_CACHE_DIR}" "${QWEN_TMPDIR}"
 export HF_HOME="${HF_HOME:-${QWEN_HF_HOME}}"
 export HF_HUB_DISABLE_XET="${HF_HUB_DISABLE_XET:-1}"
+export PIP_CACHE_DIR="${PIP_CACHE_DIR:-${QWEN_PIP_CACHE_DIR}}"
 export TMPDIR="${TMPDIR:-${QWEN_TMPDIR}}"
 
 endpoint_ready() {
