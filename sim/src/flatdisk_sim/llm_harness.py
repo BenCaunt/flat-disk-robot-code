@@ -343,25 +343,34 @@ class OpenAICompatibleVisionRunner:
         content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
         for image_path in image_paths or []:
             content.append({"type": "image_url", "image_url": {"url": _image_data_url(image_path)}})
-        payload = {
-            "model": self.model,
-            "messages": [{"role": "user", "content": content}],
-            "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
-            "response_format": {"type": "json_object"},
-        }
-        request = urllib.request.Request(
-            self.endpoint,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout_s) as response:  # noqa: S310 - local/user-configured endpoint.
-                data = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:  # pragma: no cover - live endpoint path.
-            body = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"Qwen endpoint returned HTTP {exc.code}: {body[:1000]}") from exc
+        data: dict[str, Any] | None = None
+        last_context_body = ""
+        for max_tokens in _qwen_completion_token_budgets(self.max_tokens):
+            payload = {
+                "model": self.model,
+                "messages": [{"role": "user", "content": content}],
+                "temperature": self.temperature,
+                "max_tokens": max_tokens,
+                "response_format": {"type": "json_object"},
+            }
+            request = urllib.request.Request(
+                self.endpoint,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout_s) as response:  # noqa: S310 - local/user-configured endpoint.
+                    data = json.loads(response.read().decode("utf-8"))
+                    break
+            except urllib.error.HTTPError as exc:  # pragma: no cover - live endpoint path.
+                body = exc.read().decode("utf-8", errors="replace")
+                if exc.code == 400 and _is_qwen_context_budget_error(body) and max_tokens > 128:
+                    last_context_body = body
+                    continue
+                raise RuntimeError(f"Qwen endpoint returned HTTP {exc.code}: {body[:1000]}") from exc
+        if data is None:
+            raise RuntimeError(f"Qwen endpoint returned context-window errors after token budget retries: {last_context_body[:1000]}")
         choices = data.get("choices")
         if not isinstance(choices, list) or not choices:
             raise RuntimeError(f"Qwen endpoint response has no choices: {data!r}")
@@ -373,6 +382,20 @@ class OpenAICompatibleVisionRunner:
         if not isinstance(content_text, str) or not content_text.strip():
             raise RuntimeError(f"Qwen endpoint response has empty content: {data!r}")
         return content_text.strip()
+
+
+def _qwen_completion_token_budgets(max_tokens: int) -> list[int]:
+    requested = max(1, int(max_tokens))
+    budgets = [requested]
+    for fallback in (384, 256, 128):
+        if fallback < requested and fallback not in budgets:
+            budgets.append(fallback)
+    return budgets
+
+
+def _is_qwen_context_budget_error(body: str) -> bool:
+    text = body.lower()
+    return "context length" in text and "maximum input length" in text and "max_tokens" not in text
 
 
 class DeterministicHarnessRunner:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import io
 import json
+import urllib.error
 
 from flatdisk_sim.llm_harness import (
     CodexExecRunner,
@@ -590,3 +592,35 @@ def test_qwen_runner_formats_openai_compatible_image_payload(tmp_path, monkeypat
     assert content[0] == {"type": "text", "text": "prompt"}
     assert content[1]["type"] == "image_url"
     assert content[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
+
+def test_qwen_runner_retries_context_budget_errors_with_smaller_completion(monkeypatch) -> None:
+    payloads = []
+
+    class _Response:
+        def __enter__(self):  # noqa: ANN001
+            return self
+
+        def __exit__(self, *_args):  # noqa: ANN001
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps({"choices": [{"message": {"content": "{\"tool\": \"wait\"}"}}]}).encode("utf-8")
+
+    def fake_urlopen(request, timeout):  # noqa: ANN001
+        del timeout
+        payload = json.loads(request.data.decode("utf-8"))
+        payloads.append(payload)
+        if len(payloads) == 1:
+            body = (
+                '{"error":{"message":"You passed 7681 input tokens and requested 512 output tokens. '
+                "However, the model's context length is only 8192 tokens, resulting in a maximum input length of 7680 tokens.\"}}"
+            ).encode("utf-8")
+            raise urllib.error.HTTPError(request.full_url, 400, "Bad Request", {}, io.BytesIO(body))
+        return _Response()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    runner = OpenAICompatibleVisionRunner(endpoint="http://localhost", max_tokens=512)
+
+    assert runner.run("prompt", role="actor") == '{"tool": "wait"}'
+    assert [payload["max_tokens"] for payload in payloads] == [512, 384]
