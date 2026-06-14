@@ -329,6 +329,96 @@ runpodctl user
 `runpodctl user` returning account JSON means Runpod auth is available. If it
 says `api key not configured`, the variable was not loaded into that shell.
 
+### 2026-06-14 GRPO Smoke Handoff
+
+Use the existing pod before spending time launching a second one. Verified
+Runpod state:
+
+- Pod id `pbjlh2zytzulte`, name `flatdisk-openloris-scene-full`.
+- Image `runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404`.
+- GPU `NVIDIA A40`, about 46 GB VRAM.
+- SSH:
+
+```bash
+ssh -i /Users/bencaunt/.runpod/ssh/runpodctl-ssh-key root@69.30.85.150 -p 22031
+```
+
+The pod's `/workspace/flat-disk-robot-code` directory is not a git checkout.
+Create a fresh smoke checkout instead of trying to recover that directory:
+
+```bash
+ssh -i /Users/bencaunt/.runpod/ssh/runpodctl-ssh-key root@69.30.85.150 -p 22031 \
+  'cd /workspace && git clone https://github.com/BenCaunt/flat-disk-robot-code.git flat-disk-robot-code-smoke && cd flat-disk-robot-code-smoke && git checkout codex/open-vocab-nav-research-loop && git rev-parse --short HEAD'
+```
+
+Local GRPO artifacts that are ready to smoke:
+
+- Handoff:
+  `sim/scratch/open_vocab_nav_research_loop/qwen_grpo_training/bathroom_cross_run/qwen_grpo_training_manifest.json`
+- Job:
+  `sim/scratch/open_vocab_nav_research_loop/qwen_grpo_jobs/bathroom_cross_run/qwen_grpo_training_job.json`
+- Dataset:
+  `sim/scratch/open_vocab_nav_research_loop/qwen_grpo_jobs/bathroom_cross_run/qwen_grpo_trl_dataset.jsonl`
+- Generated script:
+  `sim/scratch/open_vocab_nav_research_loop/qwen_grpo_jobs/bathroom_cross_run/train_qwen_grpo_trl.py`
+
+The local planner reported `status=ready`, `sample_count=98`,
+`trainable_group_count=1`, `missing_image_count=0`, and no forbidden model-token
+hits. The local runner dry-run succeeded with:
+
+```bash
+PYTHONPATH=/tmp/codex_no_readline:sim/src uv run --project sim --extra dev \
+  flatdisk-sim-run-qwen-grpo-training \
+  --job sim/scratch/open_vocab_nav_research_loop/qwen_grpo_jobs/bathroom_cross_run \
+  --dry-run \
+  --skip-dependency-check
+```
+
+To transfer a minimal artifact bundle, include only the generated job files and
+the image paths referenced by `qwen_grpo_trl_dataset.jsonl`:
+
+```bash
+python - <<'PY'
+import json
+from pathlib import Path
+
+dataset = Path("sim/scratch/open_vocab_nav_research_loop/qwen_grpo_jobs/bathroom_cross_run/qwen_grpo_trl_dataset.jsonl")
+files = {
+    "sim/scratch/open_vocab_nav_research_loop/qwen_grpo_jobs/bathroom_cross_run/qwen_grpo_training_job.json",
+    "sim/scratch/open_vocab_nav_research_loop/qwen_grpo_jobs/bathroom_cross_run/qwen_grpo_trl_dataset.jsonl",
+    "sim/scratch/open_vocab_nav_research_loop/qwen_grpo_jobs/bathroom_cross_run/train_qwen_grpo_trl.py",
+}
+for line in dataset.read_text().splitlines():
+    if not line.strip():
+        continue
+    record = json.loads(line)
+    files.update(record.get("image_paths", []))
+Path("/tmp/qwen_grpo_smoke_files.txt").write_text("\n".join(sorted(files)) + "\n")
+print(len(files))
+PY
+tar -czf /tmp/qwen_grpo_bathroom_cross_run_minimal.tgz -T /tmp/qwen_grpo_smoke_files.txt
+scp -P 22031 -i /Users/bencaunt/.runpod/ssh/runpodctl-ssh-key \
+  /tmp/qwen_grpo_bathroom_cross_run_minimal.tgz \
+  root@69.30.85.150:/workspace/
+```
+
+Extract it into `/workspace/flat-disk-robot-code-smoke`, then run the real
+dependency-checking dry-run before any training:
+
+```bash
+uv run --project sim --extra dev \
+  --with accelerate --with datasets --with peft --with pillow --with transformers --with trl \
+  flatdisk-sim-run-qwen-grpo-training \
+  --job sim/scratch/open_vocab_nav_research_loop/qwen_grpo_jobs/bathroom_cross_run \
+  --dry-run
+```
+
+If that passes, attempt the tiny real run from the same checkout. Do not mark
+training as successful until `qwen_grpo_training_result.json` exists. Known
+things to check if it fails: `uv` may not see the image's globally installed
+Torch, the generated processor load may reject `padding_side`, and the pod may
+need a Hugging Face cache or model download time for `Qwen/Qwen3-VL-8B-Instruct`.
+
 With `--start-qwen-server`, the generated worker claims the Warmhub task, starts
 `Qwen/Qwen3-VL-8B-Instruct` through vLLM, waits for `/v1/models`, and then runs
 the planned command with `--no-claim`. The Qwen server log is attached as task

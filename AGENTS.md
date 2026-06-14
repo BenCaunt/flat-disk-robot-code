@@ -117,6 +117,32 @@ runpodctl user
 `api key not configured` error means the variable was not loaded into that
 shell, not necessarily that the key is invalid.
 
+Current handoff for GRPO training smoke, 2026-06-14:
+
+- The repo root `.env` `RUNPOD_API_KEY` was verified with `runpodctl user` when
+  loaded by the command above. Do not print the key.
+- Reuse the existing Runpod pod before launching another one:
+  `pbjlh2zytzulte` / `flatdisk-openloris-scene-full`, A40 46 GB, SSH
+  `root@69.30.85.150 -p 22031` with
+  `/Users/bencaunt/.runpod/ssh/runpodctl-ssh-key`.
+- `/workspace/flat-disk-robot-code` on that pod is not a git checkout. For a
+  smoke run, create a fresh `/workspace/flat-disk-robot-code-smoke` checkout of
+  `codex/open-vocab-nav-research-loop` rather than modifying the existing
+  directory.
+- The ready local offline replay GRPO job is
+  `sim/scratch/open_vocab_nav_research_loop/qwen_grpo_jobs/bathroom_cross_run`.
+  Local planning reported `status=ready`, `sample_count=98`,
+  `trainable_group_count=1`, `missing_image_count=0`, and no forbidden model
+  token hits. Local runner dry-run with `--skip-dependency-check` succeeded.
+- Next action is to transfer only the generated job files plus dataset-referenced
+  images to the pod, run `flatdisk-sim-run-qwen-grpo-training --dry-run` with
+  real dependency checks, then attempt a tiny real run. Do not claim training
+  success until `qwen_grpo_training_result.json` exists.
+- Expected blockers to verify on the pod: `transformers`, `trl`, `datasets`,
+  `accelerate`, `peft`, and `pillow` are not installed by default; `uv` may not
+  see the globally installed Torch; the generated processor load may reject
+  `padding_side`; Hugging Face model download/cache state may matter.
+
 To fan out several planned trial-slice tasks, use the dispatcher. It is also
 dry-run by default and skips incomplete prerequisites unless
 `--ignore-prerequisites` is supplied:
