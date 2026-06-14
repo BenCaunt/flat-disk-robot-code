@@ -192,6 +192,8 @@ def test_actor_prompt_declares_camera_image_authoritative_and_strips_legacy_dete
     assert "visible waypoint" in prompt
     assert "not proof of semantic identity" in prompt
     assert "visual_servo_object reports moved=false or failure_reason" in prompt
+    assert "fill grounding_audit before choosing an action" in prompt
+    assert "Only repeat the same visual_servo_object prompt" in prompt
     assert "detections" not in prompt
     assert "toilet" not in prompt
 
@@ -210,6 +212,7 @@ def test_critic_prompt_declares_camera_image_authoritative_and_stop_requires_rep
     assert "low-level camera summary that may be wrong or incomplete" in prompt
     assert "final-goal phrase" in prompt
     assert "non-goal visible landmark" in prompt
+    assert "did not audit the previous detector box" in prompt
     assert "Reject stop unless repeated observations show" in prompt
 
 
@@ -451,6 +454,7 @@ def test_codex_exec_runner_uses_supported_low_reasoning_config_and_images(tmp_pa
     actor_schema = (tmp_path / "codex_schemas" / "actor_output_schema.json").read_text(encoding="utf-8")
     actor_schema_json = json.loads(actor_schema)
     assert '"required": [' in actor_schema
+    assert "grounding_audit" in actor_schema_json["required"]
     arg_properties = actor_schema_json["properties"]["action"]["properties"]["args"]["properties"]
     assert {"degrees", "power_percent", "duration_s", "goal_query"} <= set(arg_properties)
     assert ["--image", str(image)] == command[command.index("--image") : command.index("--image") + 2]

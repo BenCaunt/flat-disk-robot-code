@@ -351,7 +351,7 @@ def _parse_object_drive_status(stdout: str, *, returncode: int) -> dict[str, Any
     for line in stdout.splitlines():
         if not line.startswith("object-drive armed="):
             continue
-        status_records.append(dict(re.findall(r"\b([A-Za-z_]+)=([^ \n]+)", line)))
+        status_records.append(_parse_object_drive_status_fields(line))
     last = status_records[-1] if status_records else {}
     pub_values = [_int_or_zero(record.get("pub")) for record in status_records]
     command_values = [record.get("cmd", "none") for record in status_records]
@@ -428,6 +428,17 @@ def _object_drive_timeout_s(duration_s: float) -> float:
         except ValueError:
             pass
     return max(DEFAULT_OBJECT_DRIVE_TIMEOUT_S, float(duration_s) + DEFAULT_OBJECT_DRIVE_TIMEOUT_S)
+
+
+def _parse_object_drive_status_fields(line: str) -> dict[str, str]:
+    matches = list(re.finditer(r"\b([A-Za-z_]+)=", line))
+    fields: dict[str, str] = {}
+    for index, match in enumerate(matches):
+        key = match.group(1)
+        value_start = match.end()
+        value_end = matches[index + 1].start() if index + 1 < len(matches) else len(line)
+        fields[key] = line[value_start:value_end].strip()
+    return fields
 
 
 def _parse_detection_descriptor(value: str | None) -> tuple[str | None, str | None, float | None]:

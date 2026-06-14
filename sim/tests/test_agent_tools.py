@@ -46,6 +46,20 @@ def test_parse_object_drive_status_moved_with_detection() -> None:
     assert summary["failure_reason"] is None
 
 
+def test_parse_object_drive_status_preserves_phrase_detection() -> None:
+    summary = _parse_object_drive_status(
+        "object-drive armed=True pred=1 track=0 imu_pred=0 filter=off "
+        "pub=22 cmd=12/22% heading_error=-17.7deg "
+        "det=the white toilet on the left:florence-transformers:1.00 pending=False lost=0\n",
+        returncode=0,
+    )
+
+    assert summary["last_detection"] == "the white toilet on the left:florence-transformers:1.00"
+    assert summary["last_detection_label"] == "the white toilet on the left"
+    assert summary["last_detection_source"] == "florence-transformers"
+    assert summary["last_detection_score"] == 1.0
+
+
 def test_transformers_object_drive_command_runs_with_optional_detector_deps() -> None:
     cmd = _object_drive_command(detector="florence-transformers")
 

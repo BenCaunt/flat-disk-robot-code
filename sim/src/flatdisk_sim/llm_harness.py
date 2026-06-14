@@ -135,7 +135,7 @@ PROMPT_TOOL_RESULT_KEYS = {
 
 ACTION_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "required": ["thought", "action"],
+    "required": ["thought", "action", "grounding_audit"],
     "additionalProperties": False,
     "properties": {
         "thought": {"type": "string"},
@@ -163,6 +163,15 @@ ACTION_OUTPUT_SCHEMA: dict[str, Any] = {
         "memory_update": {
             "type": ["object", "null"],
             "additionalProperties": True,
+        },
+        "grounding_audit": {
+            "type": ["object", "null"],
+            "additionalProperties": False,
+            "properties": {
+                "previous_visual_servo_box_matches_intended_object": {"type": ["boolean", "null"]},
+                "evidence": {"type": ["string", "null"]},
+                "next_prompt_should_change": {"type": ["boolean", "null"]},
+            },
         },
         "save_frames": {
             "type": ["array", "null"],
@@ -1021,6 +1030,9 @@ def build_actor_prompt(
         "When a previous raw/detector paired grounding audit strip is attached, read columns left-to-right; each column shows the same moment as raw camera above and detector overlay below.",
         "When a previous raw motion strip is attached, read it left-to-right as evenly spaced frames from the last tool call.",
         "When a previous detector debug overlay strip is attached, inspect the boxes/labels yourself; if the box is on the wrong object, treat moved=true as a detector grounding failure and switch strategy or use a more precise visible phrase.",
+        "After any visual_servo_object result with a grounding_audit_contact_sheet, fill grounding_audit before choosing an action: state whether the previous detector box overlapped the intended object instance.",
+        "Only repeat the same visual_servo_object prompt when grounding_audit.previous_visual_servo_box_matches_intended_object is true and the latest RGB frame still supports that same target.",
+        "If the detector box is on a nearby surface, cabinet, wall, or other object instead of the intended instance, set next_prompt_should_change=true and choose a different bounded action or a more specific visible phrase.",
         "For visual_servo_object in clutter, prefer a precise visible phrase that identifies the intended instance by category plus color/material, part, or image location, not a bare category prompt.",
         "If a grounding audit or overlay shows the detector box on a nearby wrong object, do not repeat the same prompt; change viewpoint or use a more specific visible phrase selected from the latest RGB frame.",
         "Treat brightness_center as a low-level camera summary that may be wrong or incomplete.",
@@ -1051,6 +1063,7 @@ def build_actor_prompt(
         "output_schema": {
             "thought": "short private control rationale",
             "action": {"tool": "one of turn_by_angle, drive_straight, visual_servo_object, query_topomap_memory, stop, wait", "args": "object"},
+            "grounding_audit": "required after visual_servo_object history; object with previous_visual_servo_box_matches_intended_object, evidence, next_prompt_should_change",
             "memory_update": "optional object with observation_note, beliefs, next_strategy, or other non-privileged scratchpad facts",
             "save_frames": "optional list of {id, source, frame_index, note} requests",
         },
@@ -1090,6 +1103,7 @@ def build_critic_prompt(
         "Image attachments are ordered as: latest RGB frame; previous raw/detector paired grounding audit strip if present; previous raw motion strip if present; previous detector debug overlay strip if present; topomap contact sheet if present.",
         "When a previous raw/detector paired grounding audit strip is attached, compare each raw frame with its detector overlay before trusting moved=true or last_detection.",
         "When a previous detector debug overlay strip is attached, check whether the detector box is actually on the named object before trusting moved=true or last_detection.",
+        "Warn or reject repeating the same visual_servo_object prompt when the actor did not audit the previous detector box or the audit evidence is ambiguous.",
         "Treat brightness_center as a low-level camera summary that may be wrong or incomplete.",
         "Reject unsafe, looping, ungrounded, or impossible commands.",
         "Reject visual_servo_object with the final-goal phrase when the actor is using it merely to search and the latest image lacks clear final-goal evidence.",
