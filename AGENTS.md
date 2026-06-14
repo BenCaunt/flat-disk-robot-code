@@ -117,7 +117,7 @@ runpodctl user
 `api key not configured` error means the variable was not loaded into that
 shell, not necessarily that the key is invalid.
 
-Current handoff for GRPO training smoke, 2026-06-14:
+Current handoff for GRPO training, 2026-06-14:
 
 - The repo root `.env` `RUNPOD_API_KEY` was verified with `runpodctl user` when
   loaded by the command above. Do not print the key.
@@ -136,6 +136,19 @@ Current handoff for GRPO training smoke, 2026-06-14:
 - The saved adapter is under
   `sim/scratch/open_vocab_nav_research_loop/qwen_grpo_jobs/bathroom_cross_run/adapter`;
   `adapter_model.safetensors` is about 87 MB.
+- A longer 4-step capped LoRA GRPO run also completed on the same pod in
+  `/workspace/flat-disk-robot-code-train-20260614-grpo4`, from pushed commit
+  `70df4be`. The job directory is
+  `sim/scratch/open_vocab_nav_research_loop/qwen_grpo_jobs/bathroom_cross_run_lora_4step_cap48`.
+  The result manifest has `status=complete`, `returncode=0`, and
+  `duration_s=1783.814`; it trained 4 steps with `--max-completion-length 48`.
+  The final adapter is
+  `sim/scratch/open_vocab_nav_research_loop/qwen_grpo_jobs/bathroom_cross_run_lora_4step_cap48/adapter/adapter_model.safetensors`
+  and is about 87 MB.
+- The 4-step run reported train runtime about 1551 s, train loss `0.01178`,
+  reward mean `-0.4789`, reward std `0.1339`, mean completion length `47.25`,
+  clipped ratio `0.9688`, and step time about 383 s. The high clipped ratio is
+  the main signal to address before scaling much further.
 - The working pod venv is `/workspace/flatdisk-grpo-venv`, created with
   `--system-site-packages` so it can see image Torch `2.9.1+cu128`; install
   `torchvision==0.24.1 --no-deps` to match that Torch build. Do not let pip pull
@@ -144,8 +157,9 @@ Current handoff for GRPO training smoke, 2026-06-14:
   the separate `images` column, use PEFT LoRA, and cap generation length for
   smoke jobs. Full-model Adam OOMs on A40; uncapped generation makes "tiny"
   smoke runs unreasonably long.
-- Next action is to run a longer capped LoRA job or tune the GRPO data/reward
-  setup; the basic Runpod training path is now proven.
+- Next action is to inspect or log generated completions, then tune the GRPO
+  prompt/reward/data so the model emits short valid tool calls before launching
+  a larger multi-step run.
 - Future continuation should treat this as past verification, not a blocker.
   There is no known Runpod auth issue when `.env` is loaded as above, and no
   user action is needed before launching the next capped LoRA training attempt.

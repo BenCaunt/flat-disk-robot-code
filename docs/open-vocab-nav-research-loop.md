@@ -428,18 +428,41 @@ The one-step smoke completed on 2026-06-14 in
 - Training reported `21,823,488` trainable params out of `8,788,947,184`
   total params, about `0.2483%`.
 
+The first longer capped run also completed on 2026-06-14 in
+`/workspace/flat-disk-robot-code-train-20260614-grpo4`, from pushed commit
+`70df4be`:
+
+- Job:
+  `sim/scratch/open_vocab_nav_research_loop/qwen_grpo_jobs/bathroom_cross_run_lora_4step_cap48/qwen_grpo_training_job.json`
+- Result:
+  `sim/scratch/open_vocab_nav_research_loop/qwen_grpo_jobs/bathroom_cross_run_lora_4step_cap48/qwen_grpo_training_result.json`
+- Status `complete`, return code `0`, duration `1783.814` seconds.
+- Launch used `--max-steps 4`, `--num-generations 2`, and
+  `--max-completion-length 48`.
+- Adapter:
+  `sim/scratch/open_vocab_nav_research_loop/qwen_grpo_jobs/bathroom_cross_run_lora_4step_cap48/adapter/adapter_model.safetensors`
+  at about 87 MB.
+- Training reported train runtime about `1551` seconds, train loss `0.01178`,
+  `2.654e+05` tokens, reward mean `-0.4789`, reward std `0.1339`, and step time
+  about `382.7` seconds.
+- Mean completion length was `47.25`, max completion length was `48`, and
+  clipped ratio was `0.9688`; this is a useful signal that the next run should
+  improve completion formatting or reward/data before scaling.
+
 Resume status for a future continuation:
 
 - This is no longer a verification-only blocker. Runpod auth works when
   `RUNPOD_API_KEY` is loaded from the repo root `.env`, the A40 pod can run the
-  training stack, and a one-step LoRA adapter was saved successfully.
+  training stack, and both one-step and four-step LoRA adapters were saved
+  successfully.
 - No user action is currently required to start the next training attempt.
 - Use the pushed `codex/open-vocab-nav-research-loop` ref for a clean checkout;
   the original `/workspace/flat-disk-robot-code` directory on the pod is not a
   git repo.
-- The next useful experiment is a longer capped LoRA run, or a reward/data
-  tuning pass before that run. Keep `--max-completion-length` explicit so smoke
-  and short training jobs cannot spend most of their time generating long
+- The next useful experiment is to inspect or log generated completions, then
+  tune the prompt/reward/data so Qwen emits short valid tool calls before
+  launching a larger multi-step run. Keep `--max-completion-length` explicit so
+  smoke and short training jobs cannot spend most of their time generating long
   completions.
 
 The fixes needed to make the smoke complete were:
