@@ -4,6 +4,8 @@ import io
 import json
 import urllib.error
 
+import pytest
+
 from flatdisk_sim.llm_harness import (
     CodexExecRunner,
     DeterministicHarnessRunner,
@@ -20,6 +22,7 @@ from flatdisk_sim.llm_harness import (
     parse_actor_side_effects,
     prompt_safe_tool_result,
     prompt_safe_observation,
+    prompt_memory_tail,
     sanitize_memory,
     validate_harness_action,
 )
@@ -76,6 +79,12 @@ class _MotionAwareActor:
                 ],
             }
         )
+
+
+class _MalformedActor:
+    def run(self, prompt: str, *, role: str, image_paths=None) -> str:  # noqa: ANN001
+        del prompt, role, image_paths
+        return '{"thought":"missing comma" "action":{"tool":"wait","args":{"duration_s":0.2}}}'
 
 
 class _RecordingRerun:
@@ -223,6 +232,52 @@ def test_sanitize_memory_removes_nested_privileged_fields() -> None:
             "observation": {},
         }
     ]
+
+
+def test_prompt_memory_tail_compacts_verbose_records() -> None:
+    records = [
+        {
+            "step": step,
+            "goal": "Drive to the sofa.",
+            "observation": {
+                "path": f"frames/{step:04d}.jpg",
+                "yaw_deg": step,
+                "frame_seq": step,
+                "hidden_score": {"distance_m": 0.1},
+            },
+            "actor_action": {
+                "tool": "drive_straight",
+                "args": {"power_percent": 20, "duration_s": 0.5},
+                "thought": "long repeated private rationale " * 50,
+            },
+            "executed_action": {
+                "tool": "drive_straight",
+                "args": {"power_percent": 20, "duration_s": 0.5},
+                "thought": "long repeated private rationale " * 50,
+            },
+            "actor_memory_update": {"observation_note": "bed visible " * 80, "pose": {"x": 1}},
+            "tool_result": {
+                "action": "drive_straight",
+                "motion_contact_sheet": f"motion_frames/{step:04d}_strip.jpg",
+                "motion_frame_paths": [f"motion_frames/{step:04d}_{index}.jpg" for index in range(5)],
+                "stderr_tail": "stack trace " * 200,
+                "final_yaw_deg": 12.0,
+            },
+        }
+        for step in range(12)
+    ]
+
+    compact = prompt_memory_tail(records)
+
+    assert len(compact) == 8
+    assert compact[0]["step"] == 4
+    assert "goal" not in compact[0]
+    assert "hidden_score" not in json.dumps(compact)
+    assert "thought" not in json.dumps(compact)
+    assert "stderr_tail" not in json.dumps(compact)
+    assert "motion_frame_paths" not in compact[-1]["tool_result"]
+    assert compact[-1]["tool_result"]["motion_contact_sheet"].endswith("_strip.jpg")
+    assert len(compact[-1]["actor_memory_update"]["observation_note"]) <= 220
 
 
 def test_actor_action_parser_accepts_tool_schema_and_clamps() -> None:
@@ -511,6 +566,27 @@ def test_session_logs_llm_outputs_to_rerun_sink(tmp_path) -> None:
     assert "output" in actor_payload
     assert critic_payload["prompt_path"] == "prompts/000_critic.txt"
     assert critic_payload["final_decision"]["verdict"] in {"approve", "warn", "reject"}
+
+
+def test_session_logs_raw_actor_output_on_parse_error(tmp_path) -> None:
+    session = HarnessSession(
+        config=HarnessConfig(run_dir=tmp_path, max_steps=1, rerun_enabled=True),
+        tools=FakeHarnessTools(run_dir=tmp_path, environment="living_room"),
+        actor=_MalformedActor(),
+        critic=_AlwaysApproveCritic(),
+        rerun_logger=_RecordingRerun(),
+    )
+
+    session.start_goal("Drive to the sofa.")
+    with pytest.raises(json.JSONDecodeError):
+        session.run_auto_step()
+    events = session.read_events_tail(20)
+    session.close()
+
+    actor_errors = [event for event in events if event.get("event") == "actor_error"]
+    assert actor_errors
+    assert "missing comma" in actor_errors[-1]["output"]
+    assert actor_errors[-1]["prompt_path"] == "prompts/000_actor.txt"
 
 
 def test_safety_critic_rejects_third_same_direction_turn() -> None:

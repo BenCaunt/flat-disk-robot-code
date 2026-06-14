@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -27,6 +29,8 @@ from flatdisk_robot_client import DEFAULT_CONNECT, FlatDiskRobotClient, MotionRe
 
 
 OBJECT_DRIVE_SCRIPT = SCRIPTS_DIR / "object_drive_zenoh.py"
+TRANSFORMERS_OBJECT_DRIVE_DETECTORS = {"florence-transformers", "grounding-dino"}
+TRANSFORMERS_OBJECT_DRIVE_EXTRAS = ("torch", "transformers", "timm")
 
 
 @dataclass(frozen=True)
@@ -169,9 +173,7 @@ class AgentTools:
         self._motion_count += 1
         overlay_dir = self.motion_frames_dir / f"{self._motion_count:04d}_visual_servo_overlays"
         raw_dir = self.motion_frames_dir / f"{self._motion_count:04d}_visual_servo_raw"
-        cmd = [
-            sys.executable,
-            str(OBJECT_DRIVE_SCRIPT),
+        cmd = _object_drive_command(detector=detector_name) + [
             "--prompt",
             prompt,
             "--duration",
@@ -201,6 +203,7 @@ class AgentTools:
             capture_output=True,
             timeout=max(15.0, duration_s + 90.0),
             check=False,
+            cwd=REPO_ROOT,
         )
         elapsed_s = time.perf_counter() - started
         frame_paths = tuple(sorted(raw_dir.glob("*.jpg"))[-5:])
@@ -352,6 +355,19 @@ def _parse_object_drive_status(stdout: str, *, returncode: int) -> dict[str, Any
         "detector_pending": _bool_or_false(last.get("pending")),
         "failure_reason": failure_reason,
     }
+
+
+def _object_drive_command(*, detector: str) -> list[str]:
+    override = os.environ.get("FLATDISK_OBJECT_DRIVE_COMMAND", "").strip()
+    if override:
+        return shlex.split(override) + [str(OBJECT_DRIVE_SCRIPT)]
+    if detector in TRANSFORMERS_OBJECT_DRIVE_DETECTORS:
+        cmd = ["uv", "run", "--project", "sim"]
+        for package in TRANSFORMERS_OBJECT_DRIVE_EXTRAS:
+            cmd.extend(["--with", package])
+        cmd.extend(["python", str(OBJECT_DRIVE_SCRIPT)])
+        return cmd
+    return [sys.executable, str(OBJECT_DRIVE_SCRIPT)]
 
 
 def _parse_detection_descriptor(value: str | None) -> tuple[str | None, str | None, float | None]:

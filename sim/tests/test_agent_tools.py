@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from flatdisk_sim.agent_tools import _parse_object_drive_status
+import sys
+
+from flatdisk_sim.agent_tools import _object_drive_command, _parse_object_drive_status
 
 
 def test_parse_object_drive_status_no_detection() -> None:
@@ -42,3 +44,22 @@ def test_parse_object_drive_status_moved_with_detection() -> None:
     assert summary["semantic_identity"] == "unverified_phrase_grounding"
     assert "does not prove" in summary["planner_note"]
     assert summary["failure_reason"] is None
+
+
+def test_transformers_object_drive_command_runs_with_optional_detector_deps() -> None:
+    cmd = _object_drive_command(detector="florence-transformers")
+
+    assert cmd[:4] == ["uv", "run", "--project", "sim"]
+    assert cmd.count("--with") >= 3
+    assert "torch" in cmd
+    assert "transformers" in cmd
+    assert "timm" in cmd
+    assert cmd[-2] == "python"
+    assert cmd[-1].endswith("object_drive_zenoh.py")
+
+
+def test_mlx_object_drive_command_keeps_current_python() -> None:
+    cmd = _object_drive_command(detector="florence-mlx")
+
+    assert cmd[0] == sys.executable
+    assert cmd[-1].endswith("object_drive_zenoh.py")

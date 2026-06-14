@@ -89,6 +89,45 @@ POLICY_INPUT_ALLOWLIST = [
     "relative memory log",
     "previous motion strip",
 ]
+PROMPT_MEMORY_RECORD_LIMIT = 8
+PROMPT_TEXT_LIMIT = 220
+PROMPT_LIST_LIMIT = 4
+PROMPT_TOOL_RESULT_KEYS = {
+    "action",
+    "cost",
+    "detector",
+    "duration_s",
+    "elapsed_s",
+    "ever_detected",
+    "failure_reason",
+    "final_yaw_deg",
+    "forward_power",
+    "frame_count",
+    "goal_candidates",
+    "goal_query",
+    "heading_error_deg",
+    "last_command",
+    "map_summary",
+    "matching_mode",
+    "motion_contact_sheet",
+    "motor_commands_sent",
+    "moved",
+    "ok",
+    "planner_note",
+    "prompt",
+    "reason",
+    "route_length",
+    "route_node_ids",
+    "route_truncated",
+    "routes",
+    "semantic_identity",
+    "servo_status",
+    "started_yaw_deg",
+    "target_detected",
+    "target_yaw_deg",
+    "timed_out",
+    "topomap_contact_sheet",
+}
 
 ACTION_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -624,23 +663,36 @@ class HarnessSession:
             prompt_observation = prompt_safe_observation(observation_summary, root=self.run_dir)
             self._record_observation(observation_summary)
             recent_memory = self.read_memory_tail()
-            previous_motion = latest_motion_summary(recent_memory)
+            prompt_memory = prompt_memory_tail(recent_memory)
+            previous_motion = compact_prompt_value(latest_motion_summary(recent_memory))
             prompt = build_actor_prompt(
                 goal=goal,
                 mode="auto",
                 step=step,
                 memory_path=Path(self.memory_path.name),
                 observation=prompt_observation,
-                recent_memory=recent_memory,
+                recent_memory=prompt_memory,
                 previous_motion=previous_motion,
                 prompt_profile=self.config.prompt_profile,
                 extra_rules=self.config.actor_rules,
             )
             self._write_prompt(step, "actor", prompt)
             image_paths = _actor_image_paths(observation_summary, recent_memory, root=self.run_dir)
-            actor_output = self.actor.run(prompt, role="actor", image_paths=image_paths)
-            action = parse_actor_action(actor_output)
-            actor_side_effects = parse_actor_side_effects(actor_output)
+            actor_output = ""
+            try:
+                actor_output = self.actor.run(prompt, role="actor", image_paths=image_paths)
+                action = parse_actor_action(actor_output)
+                actor_side_effects = parse_actor_side_effects(actor_output)
+            except Exception as exc:
+                error_payload = {
+                    "error": str(exc),
+                    "output": actor_output,
+                    "prompt_path": str(Path("prompts") / f"{step:03d}_actor.txt"),
+                    "image_paths": [str(path.relative_to(self.run_dir)) if _path_is_relative_to(path, self.run_dir) else path.name for path in image_paths],
+                }
+                self._log_llm(step, "actor_error", error_payload)
+                self.log_event("actor_error", error_payload)
+                raise
             saved_frames = self._save_requested_frames(
                 actor_side_effects["save_frames"],
                 observation=observation_summary,
@@ -666,7 +718,7 @@ class HarnessSession:
                 observation=prompt_observation,
                 action=action,
                 actor_output=actor_output,
-                recent_memory=recent_memory,
+                recent_memory=prompt_memory,
                 prompt_profile=self.config.prompt_profile,
                 extra_rules=self.config.critic_rules,
             )
@@ -1000,8 +1052,8 @@ def build_actor_prompt(
         "mode": mode,
         "step": step,
         "observation": sanitize_observation(observation),
-        "previous_motion": sanitize_memory(previous_motion or {}),
-        "recent_memory": sanitize_memory(recent_memory[-16:]),
+        "previous_motion": compact_prompt_value(previous_motion or {}),
+        "recent_memory": prompt_memory_tail(recent_memory),
     }
     return (
         "STATIC_HARNESS_CONTEXT\n"
@@ -1048,7 +1100,7 @@ def build_critic_prompt(
         "goal": goal,
         "step": step,
         "observation": sanitize_observation(observation),
-        "recent_memory": sanitize_memory(recent_memory[-16:]),
+        "recent_memory": prompt_memory_tail(recent_memory),
         "actor_output": actor_output,
         "candidate_action": action_to_dict(action),
     }
@@ -1213,6 +1265,86 @@ def prompt_safe_tool_result(value: Any, *, root: Path) -> Any:
                 cleaned[key_text] = prompt_safe_tool_result(item, root=root)
         return cleaned
     return value
+
+
+def prompt_memory_tail(records: list[dict[str, Any]], limit: int = PROMPT_MEMORY_RECORD_LIMIT) -> list[dict[str, Any]]:
+    if limit <= 0:
+        return []
+    return [compact_prompt_record(record) for record in records[-limit:] if isinstance(record, dict)]
+
+
+def compact_prompt_record(record: dict[str, Any]) -> dict[str, Any]:
+    cleaned: dict[str, Any] = {}
+    if "step" in record:
+        cleaned["step"] = record["step"]
+    observation = record.get("observation")
+    if isinstance(observation, dict):
+        cleaned["observation"] = sanitize_observation(observation)
+    actor_action = _compact_action_payload(record.get("actor_action"))
+    executed_action = _compact_action_payload(record.get("executed_action"))
+    if executed_action:
+        cleaned["executed_action"] = executed_action
+    if actor_action and actor_action != executed_action:
+        cleaned["actor_action"] = actor_action
+    memory_update = record.get("actor_memory_update")
+    if isinstance(memory_update, dict):
+        cleaned["actor_memory_update"] = compact_prompt_value(memory_update)
+    saved_frames = record.get("saved_frames")
+    if isinstance(saved_frames, list) and saved_frames:
+        cleaned["saved_frames"] = compact_prompt_value(saved_frames[:PROMPT_LIST_LIMIT])
+    critic = _compact_critic_payload(record.get("critic"))
+    if critic:
+        cleaned["critic"] = critic
+    tool_result = record.get("tool_result")
+    if isinstance(tool_result, dict):
+        cleaned["tool_result"] = _compact_tool_result(tool_result)
+    return cleaned
+
+
+def compact_prompt_value(value: Any) -> Any:
+    value = sanitize_memory(value)
+    if isinstance(value, str):
+        return value[:PROMPT_TEXT_LIMIT]
+    if isinstance(value, list):
+        return [compact_prompt_value(item) for item in value[:PROMPT_LIST_LIMIT]]
+    if isinstance(value, dict):
+        return {str(key): compact_prompt_value(item) for key, item in value.items()}
+    return value
+
+
+def _compact_action_payload(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    tool = str(value.get("tool", value.get("action", ""))).strip()
+    if not tool:
+        return {}
+    args = value.get("args", {})
+    if not isinstance(args, dict):
+        args = {}
+    return {"tool": tool, "args": compact_prompt_value(args)}
+
+
+def _compact_critic_payload(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    compact = {
+        "verdict": str(value.get("verdict", ""))[:40],
+        "reason": str(value.get("reason", ""))[:PROMPT_TEXT_LIMIT],
+    }
+    replacement = _compact_action_payload(value.get("replacement"))
+    if replacement:
+        compact["replacement"] = replacement
+    return {key: item for key, item in compact.items() if item != "" and item != {}}
+
+
+def _compact_tool_result(result: dict[str, Any]) -> dict[str, Any]:
+    cleaned: dict[str, Any] = {}
+    safe = sanitize_memory(result)
+    for key, item in safe.items():
+        key_text = str(key)
+        if key_text in PROMPT_TOOL_RESULT_KEYS:
+            cleaned[key_text] = compact_prompt_value(item)
+    return cleaned
 
 
 def sanitize_memory(value: Any) -> Any:
