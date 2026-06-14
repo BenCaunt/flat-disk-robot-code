@@ -20,6 +20,8 @@ def evaluate_promotion(
     baseline_inputs: Iterable[Path],
     candidate_inputs: Iterable[Path],
     output_dir: Path,
+    baseline_variants: Iterable[str] = (),
+    candidate_variants: Iterable[str] = (),
     decision_id: str | None = None,
     experiment_id: str | None = None,
     about: str | None = None,
@@ -28,8 +30,10 @@ def evaluate_promotion(
     require_prompt_audit_pass: bool = False,
     author: str = "flatdisk-sim-promotion-gate",
 ) -> dict[str, Any]:
-    baseline_records = load_nav_summaries(baseline_inputs)
-    candidate_records = load_nav_summaries(candidate_inputs)
+    baseline_variant_filter = _variant_filter_set(baseline_variants)
+    candidate_variant_filter = _variant_filter_set(candidate_variants)
+    baseline_records = _filter_records_by_variant(load_nav_summaries(baseline_inputs), baseline_variant_filter)
+    candidate_records = _filter_records_by_variant(load_nav_summaries(candidate_inputs), candidate_variant_filter)
     if not baseline_records:
         raise FileNotFoundError("no baseline navigation summaries found")
     if not candidate_records:
@@ -58,6 +62,10 @@ def evaluate_promotion(
             "min_best_improvement_m": min_best_improvement_m,
             "max_final_regression_m": max_final_regression_m,
             "require_prompt_audit_pass": require_prompt_audit_pass,
+        },
+        "filters": {
+            "baseline_variants": sorted(baseline_variant_filter),
+            "candidate_variants": sorted(candidate_variant_filter),
         },
         "decision": decision,
         "policy_constraints": [
@@ -121,6 +129,17 @@ def summarize_records(records: list[dict[str, Any]]) -> dict[str, Any]:
         "sources": sorted({str(record.get("source_summary_path") or "") for record in records if record.get("source_summary_path")}),
         "runs": [_compact_run_record(record) for record in records],
     }
+
+
+def _filter_records_by_variant(records: list[dict[str, Any]], variants: Iterable[str]) -> list[dict[str, Any]]:
+    allowed = _variant_filter_set(variants)
+    if not allowed:
+        return records
+    return [record for record in records if str(record.get("variant") or "") in allowed]
+
+
+def _variant_filter_set(variants: Iterable[str]) -> set[str]:
+    return {str(variant).strip() for variant in variants if str(variant).strip()}
 
 
 def _promotion_decision(
@@ -393,6 +412,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline", type=Path, action="append", required=True, help="Baseline research summary, trial summary, or directory.")
     parser.add_argument("--candidate", type=Path, action="append", required=True, help="Candidate research summary, trial summary, or directory.")
+    parser.add_argument("--baseline-variant", action="append", default=[], help="Only include baseline records with this variant name. Repeatable.")
+    parser.add_argument("--candidate-variant", action="append", default=[], help="Only include candidate records with this variant name. Repeatable.")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--decision-id", default=None)
     parser.add_argument("--experiment-id", default=None)
@@ -413,6 +434,8 @@ def main() -> int:
         baseline_inputs=args.baseline,
         candidate_inputs=args.candidate,
         output_dir=args.output_dir,
+        baseline_variants=args.baseline_variant,
+        candidate_variants=args.candidate_variant,
         decision_id=args.decision_id,
         experiment_id=args.experiment_id,
         about=args.about,

@@ -332,6 +332,46 @@ def make_task_plan_ops(
                 },
             )
         )
+    promotion_gate_refs: list[str] = []
+    promotion_gate_commands = _promotion_gate_commands(
+        config,
+        plan_name=plan_name,
+        output_dir=output_dir,
+        experiment_ref=experiment_ref,
+    )
+    if promotion_gate_commands:
+        promotion_gate_task_id = f"{plan_name}-promotion-gate"
+        promotion_gate_ref = _task_wref(promotion_gate_task_id)
+        promotion_gate_refs.append(promotion_gate_ref)
+        ops.append(
+            _planned_task_op(
+                task_id=promotion_gate_task_id,
+                objective=f"Compare completed {config.experiment_id} candidate variants against the baseline before promotion.",
+                owner=owner,
+                priority=priority,
+                related_experiment=experiment_ref,
+                tags=[*common_tags, "promotion-gate", "baseline-preservation"],
+                prerequisites=run_task_refs,
+                notes={
+                    "commands": promotion_gate_commands,
+                    "accepted_exit_codes": [0, 2],
+                    "baseline_variant": _baseline_variant_name(config),
+                    "candidate_variants": _candidate_variant_names(config),
+                    "thresholds": {
+                        "min_best_improvement_m": 0.05,
+                        "max_final_regression_m": 0.10,
+                        "require_prompt_audit_pass": False,
+                    },
+                    "success_criteria": [
+                        "Each candidate variant has a promotion_decision.json and promotion_decision.md artifact.",
+                        "Rejected candidates are logged as complete task evidence using accepted exit code 2, not treated as worker infrastructure failure.",
+                        "No candidate is promoted unless it improves success rate or best distance without unacceptable final-distance regression.",
+                    ],
+                    "policy_constraints": _policy_constraints(),
+                },
+            )
+        )
+    analysis_prerequisites = promotion_gate_refs or run_task_refs
     ops.append(
         _planned_task_op(
             task_id=f"{plan_name}-failure-analysis",
@@ -340,7 +380,7 @@ def make_task_plan_ops(
             priority=priority,
             related_experiment=experiment_ref,
             tags=[*common_tags, "failure-analysis", "prompt-design"],
-            prerequisites=run_task_refs,
+            prerequisites=analysis_prerequisites,
             notes={
                 "commands": [
                     (
@@ -521,7 +561,8 @@ def run_task_command(
     selected_commands = list(enumerate(commands)) if all_commands else [(command_index, str(payload["command"]))]
     cwd = cwd or Path.cwd()
     artifacts = [*(evidence_artifacts or [])]
-    accepted_codes = sorted(set(complete_exit_codes or [0]))
+    notes = payload.get("notes") if isinstance(payload.get("notes"), dict) else {}
+    accepted_codes = sorted(set(complete_exit_codes if complete_exit_codes is not None else _accepted_exit_codes_from_notes(notes)))
     if log_file is not None:
         artifacts.append(str(log_file))
     if dry_run:
@@ -651,6 +692,21 @@ def _run_shell_task_command(
         )
         stream.write(f"\n[exit] {completed.returncode}\n[end] {_now()}\n")
         return completed
+
+
+def _accepted_exit_codes_from_notes(notes: dict[str, Any]) -> list[int]:
+    values = notes.get("accepted_exit_codes")
+    if not isinstance(values, list):
+        values = notes.get("acceptedExitCodes")
+    if not isinstance(values, list):
+        return [0]
+    accepted: list[int] = []
+    for value in values:
+        try:
+            accepted.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    return accepted or [0]
 
 
 def warmhub_status_snapshot(
@@ -798,12 +854,18 @@ def _status_next_actions(tasks_by_status: dict[str, list[dict[str, Any]]], runs:
     preflight = [task for task in ready_planned if "preflight" in set(task.get("tags", [])) or str(task.get("name", "")).endswith("-preflight")]
     fixtures = [task for task in ready_planned if "fixture" in set(task.get("tags", []))]
     trial_slices = [task for task in ready_planned if "trial-slice" in set(task.get("tags", []))]
+    promotion_gates = [task for task in ready_planned if "promotion-gate" in set(task.get("tags", []))]
+    failure_analysis = [task for task in ready_planned if "failure-analysis" in set(task.get("tags", []))]
     if preflight:
         actions.append(f"Run planned preflight task next: {preflight[0].get('wref')}.")
     elif fixtures:
         actions.append(f"Build or validate topomap fixtures next: {fixtures[0].get('wref')}.")
     elif trial_slices:
         actions.append(f"Dispatch ready planned trial slices with flatdisk-sim-runpod-dispatch; {len(trial_slices)} visible in this page.")
+    elif promotion_gates:
+        actions.append(f"Run planned promotion gate next: {promotion_gates[0].get('wref')}.")
+    elif failure_analysis:
+        actions.append(f"Run planned failure analysis next: {failure_analysis[0].get('wref')}.")
     elif blocked_by_prereqs:
         actions.append(f"{len(blocked_by_prereqs)} planned task(s) are waiting on prerequisites; complete their prerequisite AgentTasks first.")
     if runs and failures:
@@ -1076,6 +1138,86 @@ def _policy_constraints() -> list[str]:
         "Hidden THOR target distance/object metadata may be used only for evaluator scoring, debugging artifacts, and training labels.",
         "Florence/GroundingDINO phrase grounding and topomap memory are tool evidence, not proof of semantic goal completion.",
     ]
+
+
+def _baseline_variant_name(config: ResearchConfig) -> str:
+    for variant in config.variants:
+        if "baseline" in variant.name:
+            return variant.name
+    return config.variants[0].name if config.variants else "baseline"
+
+
+def _candidate_variant_names(config: ResearchConfig) -> list[str]:
+    baseline = _baseline_variant_name(config)
+    return [variant.name for variant in config.variants if variant.name != baseline]
+
+
+def _promotion_gate_commands(
+    config: ResearchConfig,
+    *,
+    plan_name: str,
+    output_dir: Path,
+    experiment_ref: str,
+) -> list[str]:
+    baseline = _baseline_variant_name(config)
+    commands: list[str] = []
+    for candidate in _candidate_variant_names(config):
+        decision_id = _safe_id(f"{plan_name}-{baseline}-vs-{candidate}")
+        gate_dir = output_dir / "promotion_gate" / decision_id
+        commands.append(
+            _promotion_gate_command(
+                baseline=baseline,
+                candidate=candidate,
+                output_dir=output_dir,
+                gate_dir=gate_dir,
+                decision_id=decision_id,
+                experiment_id=config.experiment_id,
+                experiment_ref=experiment_ref,
+                repo=config.warmhub_repo or DEFAULT_WARMHUB_REPO,
+            )
+        )
+    return commands
+
+
+def _promotion_gate_command(
+    *,
+    baseline: str,
+    candidate: str,
+    output_dir: Path,
+    gate_dir: Path,
+    decision_id: str,
+    experiment_id: str,
+    experiment_ref: str,
+    repo: str,
+) -> str:
+    parts = [
+        "uv",
+        "run",
+        "--project",
+        "sim",
+        "flatdisk-sim-nav-promotion-gate",
+        "--baseline",
+        str(output_dir),
+        "--candidate",
+        str(output_dir),
+        "--baseline-variant",
+        baseline,
+        "--candidate-variant",
+        candidate,
+        "--output-dir",
+        str(gate_dir),
+        "--decision-id",
+        decision_id,
+        "--experiment-id",
+        experiment_id,
+        "--about",
+        experiment_ref,
+        "--repo",
+        repo,
+        "--commit-warmhub",
+        "--fail-on-reject",
+    ]
+    return " ".join(_shell_quote(part) for part in parts)
 
 
 def _config_uses_topomap_memory(config: ResearchConfig) -> bool:

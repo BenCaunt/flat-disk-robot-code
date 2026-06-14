@@ -150,6 +150,34 @@ def test_load_nav_summaries_derives_generality_from_episode_prompt_audit(tmp_pat
     assert records[0]["no_hardcoded_labels_or_colors"] is True
 
 
+def test_evaluate_promotion_filters_records_by_variant(tmp_path: Path) -> None:
+    sweep_path = tmp_path / "sweep" / "research_loop_summary.json"
+    _write_research_summary(
+        sweep_path,
+        run_id="sweep-run",
+        summaries=[
+            _run_summary(variant="qwen_baseline", best_distance_m=1.0, final_distance_m=1.0),
+            _run_summary(variant="qwen_bad_candidate", best_distance_m=1.5, final_distance_m=1.5),
+            _run_summary(variant="qwen_good_candidate", best_distance_m=0.8, final_distance_m=0.9),
+        ],
+    )
+
+    report = evaluate_promotion(
+        baseline_inputs=[sweep_path],
+        candidate_inputs=[sweep_path],
+        baseline_variants=["qwen_baseline"],
+        candidate_variants=["qwen_good_candidate"],
+        output_dir=tmp_path / "gate",
+        decision_id="filtered",
+    )
+
+    assert report["decision"]["promote"] is True
+    assert report["baseline"]["variants"] == ["qwen_baseline"]
+    assert report["candidate"]["variants"] == ["qwen_good_candidate"]
+    assert report["filters"]["baseline_variants"] == ["qwen_baseline"]
+    assert report["filters"]["candidate_variants"] == ["qwen_good_candidate"]
+
+
 def test_cli_writes_report_and_can_fail_on_reject(tmp_path: Path, monkeypatch) -> None:
     baseline_path = tmp_path / "baseline" / "research_loop_summary.json"
     candidate_path = tmp_path / "candidate" / "research_loop_summary.json"
@@ -171,6 +199,10 @@ def test_cli_writes_report_and_can_fail_on_reject(tmp_path: Path, monkeypatch) -
             str(baseline_path),
             "--candidate",
             str(candidate_path),
+            "--baseline-variant",
+            "qwen_baseline",
+            "--candidate-variant",
+            "qwen_candidate",
             "--output-dir",
             str(tmp_path / "gate"),
             "--decision-id",

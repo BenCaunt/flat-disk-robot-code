@@ -215,8 +215,19 @@ def test_task_plan_config_creates_planned_slice_tasks(tmp_path) -> None:
     assert "--preflight-only" in fixture_notes["commands"][1]
     failure_analysis = next(op for op in ops if op["name"] == "AgentTask/plan-001-failure-analysis")
     analysis_notes = json.loads(failure_analysis["data"]["notes"])
-    assert "AgentTask/plan-001-run-qwen_baseline-living_room_sofa" in analysis_notes["prerequisites"]
-    assert "AgentTask/plan-001-run-qwen_topomap-living_room_sofa" in analysis_notes["prerequisites"]
+    promotion_gate = next(op for op in ops if op["name"] == "AgentTask/plan-001-promotion-gate")
+    promotion_notes = json.loads(promotion_gate["data"]["notes"])
+    assert "AgentTask/plan-001-run-qwen_baseline-living_room_sofa" in promotion_notes["prerequisites"]
+    assert "AgentTask/plan-001-run-qwen_topomap-living_room_sofa" in promotion_notes["prerequisites"]
+    assert promotion_notes["baseline_variant"] == "qwen_baseline"
+    assert promotion_notes["candidate_variants"] == ["qwen_topomap"]
+    assert promotion_notes["accepted_exit_codes"] == [0, 2]
+    assert promotion_notes["commands"][0].startswith("uv run --project sim flatdisk-sim-nav-promotion-gate")
+    assert "--baseline-variant qwen_baseline" in promotion_notes["commands"][0]
+    assert "--candidate-variant qwen_topomap" in promotion_notes["commands"][0]
+    assert "--commit-warmhub" in promotion_notes["commands"][0]
+    assert "--fail-on-reject" in promotion_notes["commands"][0]
+    assert analysis_notes["prerequisites"] == ["AgentTask/plan-001-promotion-gate"]
     assert analysis_notes["commands"][0].startswith("uv run --project sim flatdisk-sim-analyze-nav-failures")
     assert "--input sim/scratch/open_vocab_nav_research_loop" in analysis_notes["commands"][0]
     assert "--commit-warmhub" in analysis_notes["commands"][0]
@@ -519,7 +530,7 @@ def test_run_task_command_can_treat_research_exit_two_as_complete(monkeypatch, t
             "command": f"{sys.executable} -c \"raise SystemExit(2)\"",
             "command_index": 0,
             "data": {},
-            "notes": {},
+            "notes": {"accepted_exit_codes": [0, 2]},
         },
     )
     monkeypatch.setattr(
@@ -546,7 +557,6 @@ def test_run_task_command_can_treat_research_exit_two_as_complete(monkeypatch, t
         agent="agent-c",
         log_file=tmp_path / "worker.log",
         cwd=tmp_path,
-        complete_exit_codes=[0, 2],
     )
 
     assert code == 0
@@ -694,6 +704,63 @@ def test_warmhub_status_snapshot_summarizes_queue_runs_and_next_actions(monkeypa
     assert snapshot["run_counts"] == {"total": 1, "success": 0, "failed": 1}
     assert snapshot["recent_failures"][0]["summary"] == "stalled"
     assert any("preflight" in action for action in snapshot["next_actions"])
+
+
+def test_warmhub_status_snapshot_prioritizes_ready_promotion_gate(monkeypatch) -> None:
+    def fake_read(command):  # noqa: ANN001
+        if command[:3] == ["wh", "thing", "query"] and "AgentTask" in command:
+            status = next(part.split("=", 1)[1] for part in command if isinstance(part, str) and part.startswith("status="))
+            if status == "planned":
+                return {
+                    "items": [
+                        {
+                            "wref": "AgentTask/plan-promotion-gate",
+                            "name": "plan-promotion-gate",
+                            "data": {
+                                "status": "planned",
+                                "owner": "unassigned",
+                                "objective": "Run gate",
+                                "relatedExperiment": "NavExperiment/exp",
+                                "tags": ["promotion-gate"],
+                                "notes": '{"prerequisites":["AgentTask/run-a"]}',
+                            },
+                        },
+                        {
+                            "wref": "AgentTask/plan-failure-analysis",
+                            "name": "plan-failure-analysis",
+                            "data": {
+                                "status": "planned",
+                                "owner": "unassigned",
+                                "objective": "Analyze",
+                                "relatedExperiment": "NavExperiment/exp",
+                                "tags": ["failure-analysis"],
+                                "notes": '{"prerequisites":["AgentTask/plan-promotion-gate"]}',
+                            },
+                        },
+                    ]
+                }
+            if status == "complete":
+                return {
+                    "items": [
+                        {
+                            "wref": "AgentTask/run-a",
+                            "name": "run-a",
+                            "data": {"status": "complete", "relatedExperiment": "NavExperiment/exp"},
+                        }
+                    ]
+                }
+            return {"items": []}
+        if command[:3] == ["wh", "thing", "query"] and "NavEvalRun" in command:
+            return {"items": []}
+        if command[:3] == ["wh", "assertion", "list"]:
+            return {"items": []}
+        raise AssertionError(command)
+
+    monkeypatch.setattr(research_warmhub, "_read_warmhub_json", fake_read)
+
+    snapshot = research_warmhub.warmhub_status_snapshot("repo/example", related_experiment="exp")
+
+    assert snapshot["next_actions"][0] == "Run planned promotion gate next: AgentTask/plan-promotion-gate."
 
 
 def test_warmhub_status_cli_prints_json(monkeypatch, capsys) -> None:
