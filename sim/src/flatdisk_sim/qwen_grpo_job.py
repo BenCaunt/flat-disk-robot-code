@@ -50,6 +50,7 @@ def plan_qwen_grpo_training(
     dataset_path = output_dir / "qwen_grpo_trl_dataset.jsonl"
     train_script_path = output_dir / "train_qwen_grpo_trl.py"
     job_path = output_dir / "qwen_grpo_training_job.json"
+    completion_log_path = adapter_output_dir / "completion_samples.jsonl"
     dataset_records = _trl_dataset_records(ppo_step_records)
     _write_jsonl(dataset_path, dataset_records)
     validation = _validate_grpo_job_inputs(
@@ -88,6 +89,7 @@ def plan_qwen_grpo_training(
         "qwen_grpo_trl_dataset_jsonl": str(dataset_path),
         "output_dir": str(output_dir),
         "adapter_output_dir": str(adapter_output_dir),
+        "completion_log_jsonl": str(completion_log_path),
         "train_script": str(train_script_path),
         "train_script_sha256": _sha256_file(train_script_path),
         "launch_argv": launch_argv,
@@ -204,8 +206,15 @@ def run_qwen_grpo_training_job(
     finally:
         result["duration_s"] = round(monotonic() - start, 3)
         result["completed_at"] = strftime("%Y-%m-%dT%H:%M:%SZ", gmtime())
+        _attach_completion_log_summary(result, job, job_path=job_path)
     _write_result(result_path, result)
     return result
+
+
+def _attach_completion_log_summary(result: dict[str, Any], job: dict[str, Any], *, job_path: Path) -> None:
+    completion_log = _job_path(job, "completion_log_jsonl", relative_to=job_path.parent)
+    result["completion_log_jsonl"] = str(completion_log) if completion_log else ""
+    result["completion_log_sample_count"] = _count_lines(completion_log) if completion_log and completion_log.exists() else 0
 
 
 def _trl_dataset_records(ppo_step_records: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -424,6 +433,11 @@ def _import_module_for_package(package: str) -> str:
     return {"pillow": "PIL"}.get(package.lower(), package.replace("-", "_"))
 
 
+def _count_lines(path: Path) -> int:
+    with path.open(encoding="utf-8") as handle:
+        return sum(1 for line in handle if line.strip())
+
+
 def _launch_argv(
     *,
     train_script_path: Path,
@@ -555,13 +569,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
+from time import gmtime, strftime
 
 from datasets import Dataset
 from PIL import Image
 from peft import LoraConfig, TaskType, get_peft_model
 from transformers import AutoModelForImageTextToText, AutoProcessor
 from trl import GRPOConfig, GRPOTrainer
+
+
+_COMPLETION_LOG_BATCH_INDEX = 0
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -638,6 +657,48 @@ def conversational_text_messages(messages: list[dict]) -> list[dict]:
     return [{**message, "content": content_to_text(message.get("content"))} for message in messages]
 
 
+def value_at(value, index: int):
+    if isinstance(value, list):
+        return value[index] if index < len(value) else None
+    return value
+
+
+def log_completion_batch(completions, rewards, reference_action_canonical=None, candidate_step_reward=None, metadata=None) -> None:
+    path_value = os.environ.get("FLATDISK_GRPO_COMPLETION_LOG")
+    if not path_value:
+        return
+    try:
+        max_batches = int(os.environ.get("FLATDISK_GRPO_COMPLETION_LOG_MAX_BATCHES", "200") or "200")
+    except ValueError:
+        max_batches = 200
+    global _COMPLETION_LOG_BATCH_INDEX
+    if _COMPLETION_LOG_BATCH_INDEX >= max_batches:
+        return
+    _COMPLETION_LOG_BATCH_INDEX += 1
+    path = Path(path_value)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    metadata = metadata or {}
+    logged_at = strftime("%Y-%m-%dT%H:%M:%SZ", gmtime())
+    with path.open("a", encoding="utf-8") as handle:
+        for index, completion in enumerate(completions):
+            text = completion_text(completion)
+            record = {
+                "schema": "flatdisk.qwen_grpo_completion_sample.v1",
+                "logged_at": logged_at,
+                "batch_index": _COMPLETION_LOG_BATCH_INDEX,
+                "completion_index": index,
+                "sample_id": value_at(metadata.get("sample_id"), index),
+                "source_rollout_id": value_at(metadata.get("source_rollout_id"), index),
+                "reward": value_at(rewards, index),
+                "candidate_step_reward": value_at(candidate_step_reward, index),
+                "reference_action_canonical": value_at(reference_action_canonical, index),
+                "parsed_action": parse_action(text),
+                "completion_text": text[:4000],
+                "completion_text_truncated": len(text) > 4000,
+            }
+            handle.write(json.dumps(record, sort_keys=True, default=str) + "\\n")
+
+
 def navigation_tool_reward(completions, reference_action_canonical=None, candidate_step_reward=None, reward_scale=None, **kwargs):
     scale = float(reward_scale[0] if isinstance(reward_scale, list) and reward_scale else reward_scale or 1.0)
     rewards = []
@@ -652,6 +713,7 @@ def navigation_tool_reward(completions, reference_action_canonical=None, candida
             rewards.append((base_reward - 0.2) * scale)
         else:
             rewards.append((base_reward - 0.5) * scale)
+    log_completion_batch(completions, rewards, reference_action_canonical, candidate_step_reward, kwargs)
     return rewards
 
 
@@ -668,6 +730,11 @@ def main() -> None:
     parser.add_argument("--max-completion-length", type=int, default=96)
     parser.add_argument("--reward-scale", type=float, default=1.0)
     args = parser.parse_args()
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    default_completion_log = args.output_dir / "completion_samples.jsonl"
+    if not os.environ.get("FLATDISK_GRPO_COMPLETION_LOG"):
+        os.environ["FLATDISK_GRPO_COMPLETION_LOG"] = str(default_completion_log)
+        default_completion_log.unlink(missing_ok=True)
 
     processor = AutoProcessor.from_pretrained(args.model_id, padding_side="left")
     records = read_jsonl(args.dataset)

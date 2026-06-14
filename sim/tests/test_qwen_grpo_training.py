@@ -291,6 +291,7 @@ def test_plan_qwen_grpo_training_uses_existing_manifest_and_writes_job(tmp_path:
     assert job["training_args"]["max_completion_length"] == 96
     assert job["adapter"]["method"] == "peft_lora"
     assert job["adapter"]["r"] == 8
+    assert job["completion_log_jsonl"] == str(tmp_path / "grpo_job" / "adapter" / "completion_samples.jsonl")
     assert "trl" in job["required_packages"]
     assert "torchvision" in job["required_packages"]
     assert "accelerate launch" in job["launch_command"]
@@ -317,6 +318,8 @@ def test_plan_qwen_grpo_training_uses_existing_manifest_and_writes_job(tmp_path:
     assert "LoraConfig" in script_text
     assert "get_peft_model" in script_text
     assert "navigation_tool_reward" in script_text
+    assert "FLATDISK_GRPO_COMPLETION_LOG" in script_text
+    assert "log_completion_batch" in script_text
     assert "conversational_text_messages" in script_text
     assert "record[\"prompt\"] = conversational_text_messages(messages)" in script_text
     assert "apply_chat_template" not in script_text
@@ -413,9 +416,22 @@ def test_run_qwen_grpo_training_job_executes_ready_job(tmp_path: Path) -> None:
     grpo_dir = _write_ready_grpo_handoff(tmp_path)
     qwen_grpo_job.plan_qwen_grpo_training(grpo_dir, output_dir=tmp_path / "grpo_job")
     fake_train = tmp_path / "grpo_job" / "fake_train.py"
-    fake_train.write_text("print('grpo-trained-ok')\n", encoding="utf-8")
     job_path = tmp_path / "grpo_job" / "qwen_grpo_training_job.json"
     job = json.loads(job_path.read_text(encoding="utf-8"))
+    completion_log = Path(job["completion_log_jsonl"])
+    fake_train.write_text(
+        "\n".join(
+            [
+                "from pathlib import Path",
+                f"path = Path({str(completion_log)!r})",
+                "path.parent.mkdir(parents=True, exist_ok=True)",
+                "path.write_text('{\"schema\":\"flatdisk.qwen_grpo_completion_sample.v1\"}\\n{\"schema\":\"flatdisk.qwen_grpo_completion_sample.v1\"}\\n', encoding='utf-8')",
+                "print('grpo-trained-ok')",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     job["required_packages"] = []
     job["train_script"] = str(fake_train)
     job["launch_command"] = f"{shlex.quote(sys.executable)} {shlex.quote(str(fake_train))}"
@@ -427,6 +443,8 @@ def test_run_qwen_grpo_training_job_executes_ready_job(tmp_path: Path) -> None:
     assert result["status"] == "complete"
     assert result["returncode"] == 0
     assert "grpo-trained-ok" in result["stdout_tail"]
+    assert result["completion_log_jsonl"] == str(completion_log)
+    assert result["completion_log_sample_count"] == 2
 
 
 def test_run_qwen_grpo_training_cli_dry_run(tmp_path: Path, monkeypatch) -> None:
