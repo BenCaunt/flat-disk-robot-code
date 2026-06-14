@@ -32,7 +32,28 @@ def ensure_schema(repo: str) -> None:
     shapes = warmhub_shapes()
     for shape_name, spec in shapes.items():
         view = subprocess.run(["wh", "shape", "view", shape_name, "--repo", repo, "--json"], text=True, capture_output=True, check=False)
+        fields_json = json.dumps(spec["fields"], sort_keys=True)
+        description = spec["description"]
         if view.returncode == 0:
+            current = _shape_view_data(view.stdout)
+            if current.get("fields") == spec["fields"] and current.get("description") == description:
+                continue
+            subprocess.run(
+                [
+                    "wh",
+                    "shape",
+                    "revise",
+                    shape_name,
+                    "--repo",
+                    repo,
+                    "--fields",
+                    fields_json,
+                    "--description",
+                    description,
+                ],
+                text=True,
+                check=True,
+            )
             continue
         subprocess.run(
             [
@@ -43,13 +64,27 @@ def ensure_schema(repo: str) -> None:
                 "--repo",
                 repo,
                 "--fields",
-                json.dumps(spec["fields"], sort_keys=True),
+                fields_json,
                 "--description",
-                spec["description"],
+                description,
             ],
             text=True,
             check=True,
         )
+
+
+def _shape_view_data(stdout: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    version = payload.get("version")
+    if isinstance(version, dict) and isinstance(version.get("data"), dict):
+        return version["data"]
+    data = payload.get("data")
+    return data if isinstance(data, dict) else {}
 
 
 def commit_ops(repo: str, ops: list[dict[str, Any]], *, message: str) -> None:

@@ -339,6 +339,7 @@ def warmhub_shapes() -> dict[str, dict[str, Any]]:
                 "topomapMemoryMapDir?": "string",
                 "topomapMemoryUseClip": "boolean",
                 "topomapMemoryAllowSemanticTerms": "boolean",
+                "noHardcodedLabelsOrColors": "boolean",
             },
         },
         "NavEpisodeSpec": {

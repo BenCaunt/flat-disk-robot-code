@@ -6,6 +6,7 @@ import sys
 
 from flatdisk_sim import research_warmhub
 from flatdisk_sim.research_warmhub import (
+    ensure_schema,
     make_agent_note_ops,
     make_task_claim_revision_op,
     make_task_finish_ops,
@@ -15,6 +16,92 @@ from flatdisk_sim.research_warmhub import (
     run_task_command,
     task_command_payload,
 )
+
+
+class _Completed:
+    def __init__(self, returncode: int = 0, stdout: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+
+
+def test_ensure_schema_creates_missing_shape(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_warmhub_shapes():  # noqa: ANN202
+        return {"Example": {"description": "Example shape.", "fields": {"name": "string"}}}
+
+    def fake_run(command, **_kwargs):  # noqa: ANN001, ANN202
+        calls.append(command)
+        if command[:3] == ["wh", "shape", "view"]:
+            return _Completed(returncode=1)
+        return _Completed(returncode=0)
+
+    monkeypatch.setattr(research_warmhub, "warmhub_shapes", fake_warmhub_shapes)
+    monkeypatch.setattr(research_warmhub.subprocess, "run", fake_run)
+
+    ensure_schema("org/repo")
+
+    assert calls[0][:4] == ["wh", "shape", "view", "Example"]
+    assert calls[1][:4] == ["wh", "shape", "create", "Example"]
+    assert calls[1][calls[1].index("--fields") + 1] == '{"name": "string"}'
+
+
+def test_ensure_schema_revises_stale_shape(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_warmhub_shapes():  # noqa: ANN202
+        return {"Example": {"description": "New description.", "fields": {"name": "string", "score": "number"}}}
+
+    def fake_run(command, **_kwargs):  # noqa: ANN001, ANN202
+        calls.append(command)
+        if command[:3] == ["wh", "shape", "view"]:
+            return _Completed(
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "version": {
+                            "data": {
+                                "description": "Old description.",
+                                "fields": {"name": "string"},
+                            }
+                        }
+                    }
+                ),
+            )
+        return _Completed(returncode=0)
+
+    monkeypatch.setattr(research_warmhub, "warmhub_shapes", fake_warmhub_shapes)
+    monkeypatch.setattr(research_warmhub.subprocess, "run", fake_run)
+
+    ensure_schema("org/repo")
+
+    assert len(calls) == 2
+    assert calls[1][:4] == ["wh", "shape", "revise", "Example"]
+    assert calls[1][calls[1].index("--fields") + 1] == '{"name": "string", "score": "number"}'
+    assert calls[1][calls[1].index("--description") + 1] == "New description."
+
+
+def test_ensure_schema_noops_when_shape_matches(monkeypatch) -> None:
+    calls: list[list[str]] = []
+    fields = {"name": "string"}
+
+    def fake_warmhub_shapes():  # noqa: ANN202
+        return {"Example": {"description": "Example shape.", "fields": fields}}
+
+    def fake_run(command, **_kwargs):  # noqa: ANN001, ANN202
+        calls.append(command)
+        return _Completed(
+            returncode=0,
+            stdout=json.dumps({"version": {"data": {"description": "Example shape.", "fields": fields}}}),
+        )
+
+    monkeypatch.setattr(research_warmhub, "warmhub_shapes", fake_warmhub_shapes)
+    monkeypatch.setattr(research_warmhub.subprocess, "run", fake_run)
+
+    ensure_schema("org/repo")
+
+    assert len(calls) == 1
+    assert calls[0][:4] == ["wh", "shape", "view", "Example"]
 
 
 def test_agent_note_ops_target_experiment() -> None:

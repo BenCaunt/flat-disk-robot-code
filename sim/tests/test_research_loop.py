@@ -55,6 +55,7 @@ def test_research_loop_dry_run_writes_trial_matrix_and_warmhub_bundle(tmp_path) 
     assert manifest["trials"][0]["trial_id"] != manifest["trials"][0]["slot_id"]
     shapes = json.loads((tmp_path / "out" / "warmhub_shapes.json").read_text(encoding="utf-8"))
     assert {"NavExperiment", "PromptVariant", "NavEvalRun", "FailureObservation"} <= set(shapes)
+    assert shapes["PromptVariant"]["fields"]["noHardcodedLabelsOrColors"] == "boolean"
     ops = json.loads((tmp_path / "out" / "warmhub_ops.json").read_text(encoding="utf-8"))
     assert any(op["name"] == "NavExperiment/test_open_vocab" for op in ops)
     assert any(op["name"] == "PromptVariant/test_open_vocab_qwen_explore" for op in ops)
