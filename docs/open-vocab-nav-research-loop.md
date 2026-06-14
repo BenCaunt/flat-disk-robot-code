@@ -137,6 +137,9 @@ uv run --project sim flatdisk-sim-research-warmhub status \
 
 The status command summarizes task counts, recent `NavEvalRun` records,
 failure observations, sub-agent results, and recommended next actions.
+It flags running tasks whose `updatedAt` is older than four hours by default;
+use `--stale-running-after-s 0` to disable that check, or lower the threshold
+when auditing short pod jobs.
 Planned tasks may declare `notes.prerequisites`; workers should use
 `task-list --ready-only` or the Runpod dispatcher default so trial slices are
 not claimed before fixture/preflight tasks are complete. `task-claim` also

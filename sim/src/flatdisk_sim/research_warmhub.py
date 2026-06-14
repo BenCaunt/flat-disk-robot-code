@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -27,6 +28,7 @@ from .research_loop import (
 
 DEFAULT_EXPERIMENT_WREF = "NavExperiment/open_vocab_nav_qwen_prompt_sweep_v1"
 TASK_STATUSES = ("planned", "running", "complete", "failed", "blocked")
+DEFAULT_STALE_RUNNING_AFTER_S = 4 * 60 * 60
 
 
 def ensure_schema(repo: str) -> None:
@@ -726,6 +728,8 @@ def warmhub_status_snapshot(
     *,
     limit: int = 20,
     related_experiment: str | None = None,
+    stale_running_after_s: float | None = DEFAULT_STALE_RUNNING_AFTER_S,
+    now_s: float | None = None,
 ) -> dict[str, Any]:
     tasks_by_status: dict[str, list[dict[str, Any]]] = {}
     task_query_limit = max(limit, 100)
@@ -760,11 +764,19 @@ def warmhub_status_snapshot(
         [_training_readiness_item_summary(item) for item in training_payload.get("items", [])],
         related_experiment=related_experiment,
     )
+    now = time.time() if now_s is None else now_s
+    stale_running_tasks = _stale_running_tasks(
+        tasks_by_status.get("running", []),
+        stale_after_s=stale_running_after_s,
+        now_s=now,
+    )
     return {
         "repo": repo,
         "related_experiment": related_experiment,
+        "stale_running_after_s": stale_running_after_s,
         "task_counts": {status: len(tasks_by_status[status]) for status in TASK_STATUSES},
         "tasks": tasks_by_status,
+        "stale_running_tasks": stale_running_tasks,
         "recent_runs": runs,
         "run_counts": {
             "total": len(runs),
@@ -776,7 +788,7 @@ def warmhub_status_snapshot(
         "recent_subagent_results": results,
         "recent_promotion_decisions": promotion_decisions,
         "recent_training_readiness": training_readiness,
-        "next_actions": _status_next_actions(tasks_by_status, runs, failures),
+        "next_actions": _status_next_actions(tasks_by_status, runs, failures, stale_running_tasks=stale_running_tasks),
     }
 
 
@@ -962,14 +974,64 @@ def _filter_artifacts_for_runs(
     return [item for item in items if _normalize_wref(str(item.get("run") or ""), "NavEvalRun") in run_refs]
 
 
-def _status_next_actions(tasks_by_status: dict[str, list[dict[str, Any]]], runs: list[dict[str, Any]], failures: list[dict[str, Any]]) -> list[str]:
+def _stale_running_tasks(
+    tasks: list[dict[str, Any]],
+    *,
+    stale_after_s: float | None,
+    now_s: float,
+) -> list[dict[str, Any]]:
+    if stale_after_s is None or stale_after_s <= 0:
+        return []
+    stale: list[dict[str, Any]] = []
+    for task in tasks:
+        age_s = _task_updated_age_s(task, now_s=now_s)
+        if age_s is None or age_s < stale_after_s:
+            continue
+        payload = dict(task)
+        payload["updated_age_s"] = round(age_s, 1)
+        stale.append(payload)
+    return stale
+
+
+def _task_updated_age_s(task: dict[str, Any], *, now_s: float) -> float | None:
+    updated_s = _timestamp_s(task.get("updated_at"))
+    if updated_s is None:
+        return None
+    return max(0.0, now_s - updated_s)
+
+
+def _timestamp_s(value: Any) -> float | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def _status_next_actions(
+    tasks_by_status: dict[str, list[dict[str, Any]]],
+    runs: list[dict[str, Any]],
+    failures: list[dict[str, Any]],
+    *,
+    stale_running_tasks: list[dict[str, Any]] | None = None,
+) -> list[str]:
     actions: list[str] = []
+    stale_running = stale_running_tasks or []
     running = tasks_by_status.get("running", [])
     planned = tasks_by_status.get("planned", [])
     failed = tasks_by_status.get("failed", [])
     completed_wrefs = {_normalize_task_ref(str(task.get("wref") or "")) for task in tasks_by_status.get("complete", [])}
     ready_planned = [task for task in planned if _prerequisites_satisfied(task.get("prerequisites", []), completed_wrefs)]
     blocked_by_prereqs = [task for task in planned if task not in ready_planned]
+    if stale_running:
+        actions.append(f"Review {len(stale_running)} stale-looking running AgentTask(s) before dispatching more workers.")
     if running:
         actions.append(f"Inspect {len(running)} running AgentTask(s) before dispatching more workers.")
     if failed:
@@ -1056,6 +1118,12 @@ def parse_args() -> argparse.Namespace:
     status = subparsers.add_parser("status", help="Summarize Warmhub queue, recent runs, failures, and recommended next actions.")
     status.add_argument("--limit", type=int, default=20)
     status.add_argument("--related-experiment", default=None, help="Optional NavExperiment id/wref filter.")
+    status.add_argument(
+        "--stale-running-after-s",
+        type=float,
+        default=DEFAULT_STALE_RUNNING_AFTER_S,
+        help="Flag running AgentTasks whose updatedAt is at least this many seconds old. Use 0 to disable.",
+    )
     status.add_argument("--json", action="store_true")
 
     run_command = subparsers.add_parser("task-run-command", help="Claim a task, run one notes.commands entry, and finish it.")
@@ -1145,7 +1213,12 @@ def main() -> int:
     if args.command == "task-list":
         return _print_task_list(args.repo, status=args.status, limit=args.limit, raw_json=args.json, ready_only=args.ready_only)
     if args.command == "status":
-        snapshot = warmhub_status_snapshot(args.repo, limit=args.limit, related_experiment=args.related_experiment)
+        snapshot = warmhub_status_snapshot(
+            args.repo,
+            limit=args.limit,
+            related_experiment=args.related_experiment,
+            stale_running_after_s=args.stale_running_after_s,
+        )
         if args.json:
             print(json.dumps(snapshot, indent=2, sort_keys=True))
         else:
@@ -1620,6 +1693,12 @@ def _format_status_text(snapshot: dict[str, Any]) -> str:
             ),
         ]
     )
+    stale_running_tasks = snapshot.get("stale_running_tasks", [])
+    if stale_running_tasks:
+        lines.append("")
+        lines.append("Stale running tasks:")
+        for task in stale_running_tasks[:5]:
+            lines.append("  - " + _format_stale_status_task_line(task))
     running_tasks = snapshot.get("tasks", {}).get("running", [])
     if running_tasks:
         lines.append("")
@@ -1746,6 +1825,22 @@ def _format_status_task_line(task: dict[str, Any]) -> str:
     if task.get("objective"):
         parts.append(_status_text_snippet(str(task.get("objective"))))
     return " | ".join(part for part in parts if part)
+
+
+def _format_stale_status_task_line(task: dict[str, Any]) -> str:
+    line = _format_status_task_line(task)
+    age_s = task.get("updated_age_s")
+    if isinstance(age_s, (int, float)):
+        line += f" | stale_for={_format_duration(age_s)}"
+    return line
+
+
+def _format_duration(seconds: float) -> str:
+    if seconds >= 3600:
+        return f"{seconds / 3600:.1f}h"
+    if seconds >= 60:
+        return f"{seconds / 60:.1f}m"
+    return f"{seconds:.1f}s"
 
 
 def _status_text_snippet(text: str, *, limit: int = 220) -> str:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sys
@@ -855,11 +856,66 @@ def test_warmhub_status_snapshot_prioritizes_ready_promotion_gate(monkeypatch) -
     assert snapshot["next_actions"][0] == "Run planned promotion gate next: AgentTask/plan-promotion-gate."
 
 
+def test_warmhub_status_snapshot_flags_stale_running_tasks(monkeypatch) -> None:
+    def fake_read(command):  # noqa: ANN001
+        if command[:3] == ["wh", "thing", "query"] and "AgentTask" in command:
+            status = next(part.split("=", 1)[1] for part in command if isinstance(part, str) and part.startswith("status="))
+            if status == "running":
+                return {
+                    "items": [
+                        {
+                            "wref": "AgentTask/run-stale",
+                            "name": "run-stale",
+                            "data": {
+                                "status": "running",
+                                "owner": "agent-a",
+                                "objective": "Old running task",
+                                "updatedAt": "2026-06-14T08:00:00Z",
+                                "tags": ["trial-slice", "qwen"],
+                            },
+                        },
+                        {
+                            "wref": "AgentTask/run-fresh",
+                            "name": "run-fresh",
+                            "data": {
+                                "status": "running",
+                                "owner": "agent-b",
+                                "objective": "Fresh running task",
+                                "updatedAt": "2026-06-14T14:30:00Z",
+                                "tags": ["trial-slice", "qwen"],
+                            },
+                        },
+                    ]
+                }
+            return {"items": []}
+        if command[:3] == ["wh", "thing", "query"] and ("NavEvalRun" in command or "NavArtifact" in command):
+            return {"items": []}
+        if command[:3] == ["wh", "assertion", "list"]:
+            return {"items": []}
+        raise AssertionError(command)
+
+    monkeypatch.setattr(research_warmhub, "_read_warmhub_json", fake_read)
+    now_s = datetime(2026, 6, 14, 15, tzinfo=timezone.utc).timestamp()
+
+    snapshot = research_warmhub.warmhub_status_snapshot(
+        "repo/example",
+        stale_running_after_s=4 * 60 * 60,
+        now_s=now_s,
+    )
+
+    assert snapshot["task_counts"]["running"] == 2
+    assert snapshot["stale_running_after_s"] == 14400
+    assert [task["wref"] for task in snapshot["stale_running_tasks"]] == ["AgentTask/run-stale"]
+    assert snapshot["stale_running_tasks"][0]["updated_age_s"] == 25200.0
+    assert "stale-looking running AgentTask(s)" in snapshot["next_actions"][0]
+
+
 def test_warmhub_status_text_includes_failure_diagnostics() -> None:
     text = research_warmhub._format_status_text(
         {
             "repo": "repo/example",
             "related_experiment": None,
+            "stale_running_after_s": 14400,
             "task_counts": {"planned": 0, "running": 0, "complete": 0, "failed": 0, "blocked": 0},
             "tasks": {
                 "planned": [],
@@ -917,10 +973,23 @@ def test_warmhub_status_text_includes_failure_diagnostics() -> None:
             ],
             "recent_promotion_decisions": [],
             "recent_training_readiness": [],
+            "stale_running_tasks": [
+                {
+                    "wref": "AgentTask/run-active",
+                    "owner": "agent-a",
+                    "updated_at": "2026-06-14T08:11:13Z",
+                    "updated_age_s": 18000.0,
+                    "tags": ["trial-slice", "qwen", "runpod"],
+                    "objective": "Run active trial slice.",
+                }
+            ],
             "next_actions": [],
         }
     )
 
+    assert "Stale running tasks:" in text
+    assert "AgentTask/run-active | owner=agent-a | updated=2026-06-14T08:11:13Z" in text
+    assert "stale_for=5.0h" in text
     assert "Running tasks:" in text
     assert "AgentTask/run-active | owner=agent-a | updated=2026-06-14T08:11:13Z" in text
     assert "Blocked tasks:" in text
@@ -937,11 +1006,13 @@ def test_warmhub_status_cli_prints_json(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         research_warmhub,
         "warmhub_status_snapshot",
-        lambda repo, *, limit, related_experiment: {
+        lambda repo, *, limit, related_experiment, stale_running_after_s: {
             "repo": repo,
             "related_experiment": related_experiment,
+            "stale_running_after_s": stale_running_after_s,
             "task_counts": {"planned": 1, "running": 0, "complete": 0, "failed": 0, "blocked": 0},
             "tasks": {"planned": [], "running": [], "complete": [], "failed": [], "blocked": []},
+            "stale_running_tasks": [],
             "recent_runs": [],
             "run_counts": {"total": 0, "success": 0, "failed": 0},
             "recent_failures": [],
