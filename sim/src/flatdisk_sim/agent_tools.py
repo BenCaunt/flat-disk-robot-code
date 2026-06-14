@@ -30,7 +30,10 @@ from flatdisk_robot_client import DEFAULT_CONNECT, FlatDiskRobotClient, MotionRe
 
 OBJECT_DRIVE_SCRIPT = SCRIPTS_DIR / "object_drive_zenoh.py"
 TRANSFORMERS_OBJECT_DRIVE_DETECTORS = {"florence-transformers", "grounding-dino"}
-TRANSFORMERS_OBJECT_DRIVE_EXTRAS = ("torch", "transformers", "timm", "einops")
+TRANSFORMERS_OBJECT_DRIVE_EXTRAS = {
+    "florence-transformers": ("torch", "transformers", "timm", "einops"),
+    "grounding-dino": ("torch", "torchvision", "transformers", "timm", "einops"),
+}
 DEFAULT_OBJECT_DRIVE_TIMEOUT_S = 300.0
 
 
@@ -429,7 +432,7 @@ def _object_drive_command(*, detector: str) -> list[str]:
         if python_override:
             return [python_override, str(OBJECT_DRIVE_SCRIPT)]
         cmd = ["uv", "run", "--project", "sim"]
-        for package in TRANSFORMERS_OBJECT_DRIVE_EXTRAS:
+        for package in TRANSFORMERS_OBJECT_DRIVE_EXTRAS.get(detector, ("torch", "transformers")):
             cmd.extend(["--with", package])
         cmd.extend(["python", str(OBJECT_DRIVE_SCRIPT)])
         return cmd

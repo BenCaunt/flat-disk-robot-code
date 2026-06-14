@@ -99,6 +99,17 @@ def test_transformers_object_drive_command_runs_with_optional_detector_deps() ->
     assert cmd[-1].endswith("object_drive_zenoh.py")
 
 
+def test_grounding_dino_object_drive_command_includes_torchvision() -> None:
+    cmd = _object_drive_command(detector="grounding-dino")
+
+    assert "torch" in cmd
+    assert "torchvision" in cmd
+    assert "transformers" in cmd
+    assert "einops" in cmd
+    assert cmd[-2] == "python"
+    assert cmd[-1].endswith("object_drive_zenoh.py")
+
+
 def test_transformers_object_drive_command_uses_prepared_python(monkeypatch) -> None:
     monkeypatch.setenv("FLATDISK_OBJECT_DRIVE_PYTHON", "/tmp/object-drive/bin/python")
 

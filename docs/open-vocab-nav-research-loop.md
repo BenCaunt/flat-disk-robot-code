@@ -207,7 +207,7 @@ visually plausible frames, run the detector doctor on saved policy frames before
 rerunning a full slice:
 
 ```bash
-uv run --project sim --with torch --with transformers --with timm --with einops \
+uv run --project sim --with torch --with torchvision --with transformers --with timm --with einops \
   flatdisk-sim-detector-doctor \
   --image path/to/frame.jpg \
   --prompt "visible object phrase" \
