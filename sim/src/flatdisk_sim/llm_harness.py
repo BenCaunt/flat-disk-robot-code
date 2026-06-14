@@ -821,8 +821,7 @@ class HarnessSession:
             self._write_prompt(step, "critic", critic_prompt)
             critic_output = self.critic.run(critic_prompt, role="critic", image_paths=image_paths)
             model_decision = parse_critic_decision(critic_output)
-            safety_decision = apply_deterministic_safety_gate(model_decision, action, recent_memory)
-            decision = apply_actor_consistency_guard(safety_decision, action, actor_side_effects, recent_memory)
+            decision = apply_deterministic_safety_gate(model_decision, action, recent_memory)
             self._log_llm(
                 step,
                 "critic",
@@ -834,23 +833,13 @@ class HarnessSession:
                     "prompt_path": str(Path("prompts") / f"{step:03d}_critic.txt"),
                 },
             )
-            if safety_decision != model_decision:
+            if decision != model_decision:
                 self.log_event(
                     "safety_gate",
                     {
                         "step": step,
                         "model_decision": critic_to_dict(model_decision),
-                        "safety_decision": critic_to_dict(safety_decision),
-                    },
-                )
-            if decision != safety_decision:
-                self.log_event(
-                    "actor_consistency_guard",
-                    {
-                        "step": step,
-                        "model_decision": critic_to_dict(safety_decision),
-                        "guard_decision": critic_to_dict(decision),
-                        "actor_grounding_audit": actor_side_effects["grounding_audit"],
+                        "safety_decision": critic_to_dict(decision),
                     },
                 )
             self._log_rerun_metadata()
@@ -1333,55 +1322,6 @@ def apply_deterministic_safety_gate(
 ) -> CriticDecision:
     del action, recent_memory
     return model_decision
-
-
-def apply_actor_consistency_guard(
-    decision: CriticDecision,
-    action: HarnessAction,
-    actor_side_effects: dict[str, Any],
-    recent_memory: list[Any],
-) -> CriticDecision:
-    if decision.verdict == "reject":
-        return decision
-    if action.tool != "visual_servo_object":
-        return decision
-    audit = actor_side_effects.get("grounding_audit")
-    if not isinstance(audit, dict) or not _actor_audit_requires_prompt_change(audit):
-        return decision
-    previous_prompt = _latest_visual_servo_prompt(recent_memory)
-    current_prompt = str(action.args.get("prompt", "")).strip()
-    if not previous_prompt or _normalize_prompt(previous_prompt) != _normalize_prompt(current_prompt):
-        return decision
-    return CriticDecision(
-        verdict="reject",
-        reason="actor grounding_audit requested a changed visual-servo prompt, but action repeated the previous prompt",
-        replacement=HarnessAction("wait", {"duration_s": 0.2}, "actor consistency guard"),
-    )
-
-
-def _actor_audit_requires_prompt_change(audit: dict[str, Any]) -> bool:
-    if audit.get("next_prompt_should_change") is True:
-        return True
-    return audit.get("previous_visual_servo_box_matches_intended_object") is False
-
-
-def _latest_visual_servo_prompt(recent_memory: list[Any]) -> str:
-    for record in reversed(recent_memory):
-        if not isinstance(record, dict):
-            continue
-        action = record.get("executed_action") or record.get("actor_action")
-        if not isinstance(action, dict) or action.get("tool") != "visual_servo_object":
-            continue
-        args = action.get("args")
-        if isinstance(args, dict):
-            prompt = str(args.get("prompt", "")).strip()
-            if prompt:
-                return prompt
-    return ""
-
-
-def _normalize_prompt(prompt: str) -> str:
-    return " ".join(prompt.lower().split())
 
 
 def evaluate_deterministic_safety(action: HarnessAction, memory: list[Any]) -> dict[str, Any]:
