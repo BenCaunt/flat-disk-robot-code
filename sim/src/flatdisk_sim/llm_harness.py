@@ -88,6 +88,7 @@ POLICY_INPUT_ALLOWLIST = [
     "topomap image-memory tool result",
     "relative memory log",
     "previous motion strip",
+    "previous detector debug overlay strip",
 ]
 PROMPT_MEMORY_RECORD_LIMIT = 8
 PROMPT_TEXT_LIMIT = 220
@@ -95,6 +96,7 @@ PROMPT_LIST_LIMIT = 4
 PROMPT_TOOL_RESULT_KEYS = {
     "action",
     "cost",
+    "debug_overlay_contact_sheet",
     "detector",
     "duration_s",
     "elapsed_s",
@@ -1013,7 +1015,9 @@ def build_actor_prompt(
     rules = [
         "Use only the provided camera/IMU observation, memory, and tool results.",
         "When an image is attached, treat it as the authoritative latest RGB camera frame.",
-        "When a previous motion strip is attached, read it left-to-right as evenly spaced frames from the last tool call.",
+        "Image attachments are ordered as: latest RGB frame; previous raw motion strip if present; previous detector debug overlay strip if present; topomap contact sheet if present.",
+        "When a previous raw motion strip is attached, read it left-to-right as evenly spaced frames from the last tool call.",
+        "When a previous detector debug overlay strip is attached, inspect the boxes/labels yourself; if the box is on the wrong object, treat moved=true as a detector grounding failure and switch strategy or use a more precise visible phrase.",
         "Treat brightness_center as a low-level camera summary that may be wrong or incomplete.",
         "Do not assume access to map coordinates, object metadata, target distance, wheel encoders, or simulator state.",
         "Use the image, IMU yaw, and recent motion history to choose exactly one bounded action.",
@@ -1078,6 +1082,8 @@ def build_critic_prompt(
     rules = [
         "Approve only bounded actions that make sense from camera/IMU and memory.",
         "When an image is attached, evaluate it as the authoritative latest RGB camera frame.",
+        "Image attachments are ordered as: latest RGB frame; previous raw motion strip if present; previous detector debug overlay strip if present; topomap contact sheet if present.",
+        "When a previous detector debug overlay strip is attached, check whether the detector box is actually on the named object before trusting moved=true or last_detection.",
         "Treat brightness_center as a low-level camera summary that may be wrong or incomplete.",
         "Reject unsafe, looping, ungrounded, or impossible commands.",
         "Reject visual_servo_object with the final-goal phrase when the actor is using it merely to search and the latest image lacks clear final-goal evidence.",
@@ -1360,7 +1366,6 @@ def sanitize_memory(value: Any) -> Any:
                 "stdout_tail",
                 "stderr_tail",
                 "debug_overlay_frame_paths",
-                "debug_overlay_contact_sheet",
                 "last_detection",
                 "last_detection_label",
                 "last_detection_source",
@@ -1493,6 +1498,9 @@ def _actor_image_paths(observation: dict[str, Any], recent_memory: list[dict[str
     previous_strip = _latest_motion_contact_sheet(recent_memory, root=root)
     if previous_strip is not None and previous_strip.exists():
         paths.append(previous_strip)
+    debug_overlay_strip = _latest_debug_overlay_contact_sheet(recent_memory, root=root)
+    if debug_overlay_strip is not None and debug_overlay_strip.exists():
+        paths.append(debug_overlay_strip)
     topomap_sheet = _latest_topomap_contact_sheet(recent_memory, root=root)
     if topomap_sheet is not None and topomap_sheet.exists():
         paths.append(topomap_sheet)
@@ -1525,6 +1533,19 @@ def _latest_motion_contact_sheet(recent_memory: list[dict[str, Any]], *, root: P
         if not isinstance(result, dict):
             continue
         path_text = result.get("motion_contact_sheet") or result.get("stitched_path")
+        if path_text:
+            return _resolve_model_path(str(path_text), root=root)
+    return None
+
+
+def _latest_debug_overlay_contact_sheet(recent_memory: list[dict[str, Any]], *, root: Path) -> Path | None:
+    for record in reversed(recent_memory):
+        if not isinstance(record, dict):
+            continue
+        result = record.get("tool_result")
+        if not isinstance(result, dict):
+            continue
+        path_text = result.get("debug_overlay_contact_sheet")
         if path_text:
             return _resolve_model_path(str(path_text), root=root)
     return None

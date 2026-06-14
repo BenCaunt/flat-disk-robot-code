@@ -81,6 +81,28 @@ class _MotionAwareActor:
         )
 
 
+class _ServoAuditActor:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.image_paths_by_call: list[list] = []
+
+    def run(self, prompt: str, *, role: str, image_paths=None) -> str:  # noqa: ANN001
+        del prompt, role
+        self.image_paths_by_call.append(list(image_paths or []))
+        self.calls += 1
+        if self.calls == 1:
+            return json.dumps(
+                {
+                    "thought": "servo first",
+                    "action": {
+                        "tool": "visual_servo_object",
+                        "args": {"prompt": "sofa", "duration_s": 1.0, "forward_power": 18.0},
+                    },
+                }
+            )
+        return json.dumps({"thought": "audit previous overlay", "action": {"tool": "wait", "args": {"duration_s": 0.2}}})
+
+
 class _MalformedActor:
     def run(self, prompt: str, *, role: str, image_paths=None) -> str:  # noqa: ANN001
         del prompt, role, image_paths
@@ -259,7 +281,9 @@ def test_prompt_memory_tail_compacts_verbose_records() -> None:
             "tool_result": {
                 "action": "drive_straight",
                 "motion_contact_sheet": f"motion_frames/{step:04d}_strip.jpg",
+                "debug_overlay_contact_sheet": f"motion_frames/{step:04d}_debug_overlay_strip.jpg",
                 "motion_frame_paths": [f"motion_frames/{step:04d}_{index}.jpg" for index in range(5)],
+                "debug_overlay_frame_paths": [f"motion_frames/{step:04d}_debug_{index}.jpg" for index in range(5)],
                 "stderr_tail": "stack trace " * 200,
                 "final_yaw_deg": 12.0,
             },
@@ -276,7 +300,9 @@ def test_prompt_memory_tail_compacts_verbose_records() -> None:
     assert "thought" not in json.dumps(compact)
     assert "stderr_tail" not in json.dumps(compact)
     assert "motion_frame_paths" not in compact[-1]["tool_result"]
+    assert "debug_overlay_frame_paths" not in compact[-1]["tool_result"]
     assert compact[-1]["tool_result"]["motion_contact_sheet"].endswith("_strip.jpg")
+    assert compact[-1]["tool_result"]["debug_overlay_contact_sheet"].endswith("_debug_overlay_strip.jpg")
     assert len(compact[-1]["actor_memory_update"]["observation_note"]) <= 220
 
 
@@ -540,6 +566,27 @@ def test_session_attaches_previous_motion_strip_and_saves_requested_frame(tmp_pa
     assert second["saved_frames"]
     saved_path = tmp_path / second["saved_frames"][0]["path"]
     assert saved_path.exists()
+
+
+def test_session_attaches_visual_servo_debug_overlay_after_raw_strip(tmp_path) -> None:
+    actor = _ServoAuditActor()
+    session = HarnessSession(
+        config=HarnessConfig(run_dir=tmp_path, max_steps=2),
+        tools=FakeHarnessTools(run_dir=tmp_path, environment="living_room"),
+        actor=actor,
+        critic=_AlwaysApproveCritic(),
+    )
+
+    session.start_goal("Drive to the sofa.")
+    first = session.run_auto_step()
+    second = session.run_auto_step()
+    session.close()
+
+    assert first is not None and second is not None
+    assert len(actor.image_paths_by_call[0]) == 1
+    assert len(actor.image_paths_by_call[1]) == 3
+    assert actor.image_paths_by_call[1][1].name.endswith("_strip.jpg")
+    assert actor.image_paths_by_call[1][2].name.endswith("_debug_overlay_strip.jpg")
 
 
 def test_session_logs_llm_outputs_to_rerun_sink(tmp_path) -> None:
