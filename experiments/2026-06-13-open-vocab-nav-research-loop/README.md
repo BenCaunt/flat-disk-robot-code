@@ -95,8 +95,13 @@ uv run --project sim flatdisk-sim-runpod-dispatch \
   --tag trial-slice \
   --max-workers 2 \
   --start-qwen-server \
+  --dispatch-manifest sim/scratch/open_vocab_nav_research_loop/runpod_dispatch_manifest.json \
   --terminate-after 4h
 ```
+
+Use the manifest as a redacted dispatch review artifact and attach it to
+Warmhub task results so later agents can see which planned tasks were selected
+or skipped before any pods were launched.
 
 Generated strategy sweep:
 

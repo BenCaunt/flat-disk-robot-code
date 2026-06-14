@@ -121,6 +121,8 @@ def test_main_dry_run_dispatches_selected_runpod_workers(monkeypatch, capsys, tm
             "--max-model-len 8192",
             "--env",
             "WARMHUB_API_KEY=secret",
+            "--dispatch-manifest",
+            str(tmp_path / "dispatch.json"),
         ],
     )
 
@@ -141,6 +143,16 @@ def test_main_dry_run_dispatches_selected_runpod_workers(monkeypatch, capsys, tm
     assert env["QWEN_VLLM_EXTRA_ARGS"] == "--max-model-len 8192"
     assert env["WARMHUB_API_KEY"] == "<redacted>"
     assert "--no-claim" in command[command.index("--docker-args") + 1]
+    assert payload["dispatch_manifest"] == str(tmp_path / "dispatch.json")
+    manifest = json.loads((tmp_path / "dispatch.json").read_text(encoding="utf-8"))
+    assert manifest["warmhub_repo"] == "bencaunt-2/open-vocab-nav-research-loop"
+    assert manifest["git_ref"] == "abc123"
+    assert manifest["selected_task_count"] == 1
+    assert manifest["workers"][0]["task"] == "AgentTask/plan-run-a"
+    manifest_command = manifest["workers"][0]["runpodctl_command"]
+    manifest_env = json.loads(manifest_command[manifest_command.index("--env") + 1])
+    assert manifest_env["WARMHUB_API_KEY"] == "<redacted>"
+    assert manifest["skipped_for_prerequisites"][0]["missing_prerequisites"] == ["AgentTask/plan-missing-preflight"]
 
 
 def test_main_launch_refuses_dirty_worktree(monkeypatch, tmp_path) -> None:

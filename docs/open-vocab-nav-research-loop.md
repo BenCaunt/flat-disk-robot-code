@@ -283,12 +283,17 @@ uv run --project sim flatdisk-sim-runpod-dispatch \
   --max-workers 2 \
   --start-qwen-server \
   --qwen-vllm-extra-args "--max-model-len 8192" \
+  --dispatch-manifest sim/scratch/open_vocab_nav_research_loop/runpod_dispatch_manifest.json \
   --terminate-after 4h \
   --evidence-artifact /workspace/outputs/open_vocab_nav_research_loop
 ```
 
 Add `--launch` only after reviewing the dry-run output. The dispatcher refuses
 real launches from a dirty worktree unless `--allow-dirty` is supplied.
+The dispatch manifest is a redacted, durable review artifact; attach it to
+`SubAgentResult.evidenceArtifacts` or cite it from an `AgentNote` so future
+agents can reconstruct which Warmhub tasks were selected, skipped, and launched
+from which git ref.
 The dispatcher reads a larger Warmhub task page before local filtering so older
 matching planned tasks are not missed in a busy queue.
 By default it skips tasks whose `notes.prerequisites` are not complete; pass

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import shlex
+import time
 from typing import Any
 
 from .research_loop import DEFAULT_WARMHUB_REPO
@@ -226,6 +227,45 @@ def dispatch_payload(specs: list[RunpodLaunchSpec], *, launch: bool, dirty_workt
     }
 
 
+def annotate_dispatch_payload(
+    payload: dict[str, Any],
+    *,
+    args: argparse.Namespace,
+    git_url: str,
+    git_ref: str | None,
+    queried_task_count: int,
+    selected_task_count: int,
+    skipped_prerequisites: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    annotated = dict(payload)
+    annotated.update(
+        {
+            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "warmhub_repo": args.repo,
+            "git_url": git_url,
+            "git_ref": git_ref,
+            "status_filter": args.status,
+            "name_prefix_filter": args.name_prefix,
+            "tag_filters": list(args.tag),
+            "related_experiment_filter": args.related_experiment,
+            "include_non_slice": bool(args.include_non_slice),
+            "ignore_prerequisites": bool(args.ignore_prerequisites),
+            "queried_task_count": queried_task_count,
+            "selected_task_count": selected_task_count,
+        }
+    )
+    if skipped_prerequisites is not None:
+        annotated["skipped_for_prerequisites_count"] = len(skipped_prerequisites)
+        annotated["skipped_for_prerequisites"] = skipped_prerequisites[:20]
+    return annotated
+
+
+def write_dispatch_manifest(payload: dict[str, Any], path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", default=DEFAULT_WARMHUB_REPO, help="Warmhub repo.")
@@ -268,6 +308,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--qwen-server-timeout-s", type=int, default=900)
     parser.add_argument("--qwen-vllm-package", default="vllm")
     parser.add_argument("--qwen-vllm-extra-args", default="")
+    parser.add_argument(
+        "--dispatch-manifest",
+        type=Path,
+        default=None,
+        help="Write the redacted dispatch payload to this JSON file for review or Warmhub evidence.",
+    )
     parser.add_argument("--launch", action="store_true", help="Actually create Runpod pods. Default is dry-run.")
     parser.add_argument("--allow-dirty", action="store_true", help="Allow launch even if the local worktree is dirty.")
     return parser.parse_args()
@@ -301,13 +347,22 @@ def main() -> int:
         respect_prerequisites=not args.ignore_prerequisites,
     )[: max(0, args.max_workers)]
     specs = make_dispatch_specs(args, selected, git_url=git_url, git_ref=git_ref)
-    payload = dispatch_payload(specs, launch=args.launch, dirty_worktree=dirty)
-    payload["queried_task_count"] = len(queried)
-    payload["selected_task_count"] = len(selected)
+    base_payload = dispatch_payload(specs, launch=args.launch, dirty_worktree=dirty)
+    prerequisite_skips = None
     if not args.ignore_prerequisites:
         prerequisite_skips = skipped_for_prerequisites(matching, completed_task_refs=completed_task_refs)
-        payload["skipped_for_prerequisites_count"] = len(prerequisite_skips)
-        payload["skipped_for_prerequisites"] = prerequisite_skips[:20]
+    payload = annotate_dispatch_payload(
+        base_payload,
+        args=args,
+        git_url=git_url,
+        git_ref=git_ref,
+        queried_task_count=len(queried),
+        selected_task_count=len(selected),
+        skipped_prerequisites=prerequisite_skips,
+    )
+    if args.dispatch_manifest is not None:
+        payload["dispatch_manifest"] = str(args.dispatch_manifest)
+        write_dispatch_manifest(payload, args.dispatch_manifest)
     if not args.launch:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
