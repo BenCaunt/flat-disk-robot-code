@@ -336,6 +336,7 @@ class FlorenceTransformersDetector:
         self.device = torch.device(device)
         dtype = torch.float16 if self.device.type in {"cuda", "mps"} else torch.float32
         self.dtype = dtype
+        _patch_florence_transformers_compat()
         try:
             self.processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
             self.model = AutoModelForCausalLM.from_pretrained(
@@ -344,9 +345,9 @@ class FlorenceTransformersDetector:
                 trust_remote_code=True,
             ).to(self.device)
         except AttributeError as exc:
-            if "forced_bos_token_id" not in str(exc):
+            if not _is_florence_transformers_compat_error(exc):
                 raise
-            patched = _patch_florence_forced_bos_token_id()
+            patched = _patch_florence_transformers_compat()
             if patched == 0:
                 raise
             self.processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
@@ -500,6 +501,49 @@ def _patch_florence_forced_bos_token_id() -> int:
         setattr(cls, "forced_bos_token_id", None)
         patched += 1
     return patched
+
+
+def _patch_transformers_tokenizer_additional_special_tokens() -> int:
+    """Restore a tokenizer attribute expected by Florence remote code.
+
+    Florence-2's remote processor reads ``tokenizer.additional_special_tokens``
+    directly. Transformers 5 can route missing tokenizer fields through
+    ``__getattr__`` and raise even though the data is still present in the
+    special-token maps. A base-class property keeps the remote code compatible
+    without mutating the downloaded model files.
+    """
+
+    try:
+        from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+    except Exception:
+        return 0
+
+    if isinstance(getattr(PreTrainedTokenizerBase, "additional_special_tokens", None), property):
+        return 0
+
+    def _get_additional_special_tokens(tokenizer: Any) -> list[Any]:
+        token_map = getattr(tokenizer, "special_tokens_map_extended", None)
+        if isinstance(token_map, dict) and isinstance(token_map.get("additional_special_tokens"), list):
+            return list(token_map["additional_special_tokens"])
+        token_map = getattr(tokenizer, "special_tokens_map", None)
+        if isinstance(token_map, dict) and isinstance(token_map.get("additional_special_tokens"), list):
+            return list(token_map["additional_special_tokens"])
+        init_kwargs = getattr(tokenizer, "init_kwargs", None)
+        if isinstance(init_kwargs, dict) and isinstance(init_kwargs.get("additional_special_tokens"), list):
+            return list(init_kwargs["additional_special_tokens"])
+        return []
+
+    setattr(PreTrainedTokenizerBase, "additional_special_tokens", property(_get_additional_special_tokens))
+    return 1
+
+
+def _patch_florence_transformers_compat() -> int:
+    return _patch_florence_forced_bos_token_id() + _patch_transformers_tokenizer_additional_special_tokens()
+
+
+def _is_florence_transformers_compat_error(exc: AttributeError) -> bool:
+    text = str(exc)
+    return "forced_bos_token_id" in text or "additional_special_tokens" in text
 
 
 def _post_process_florence(processor: Any, text: str, *, task: str, image_size: tuple[int, int]) -> Any:

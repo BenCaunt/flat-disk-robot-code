@@ -22,6 +22,7 @@ from object_drive_zenoh import (  # noqa: E402
     _detections_from_parsed,
     _image_gray,
     _patch_florence_forced_bos_token_id,
+    _patch_transformers_tokenizer_additional_special_tokens,
     bbox_center_x_from_bearing_rad,
     clipped_cos,
     command_from_bbox,
@@ -114,6 +115,21 @@ def test_florence_forced_bos_patch_sets_class_default(monkeypatch) -> None:
 
     assert patched >= 1
     assert Florence2LanguageConfig.forced_bos_token_id is None
+
+
+def test_transformers_tokenizer_additional_special_tokens_patch(monkeypatch) -> None:
+    class PreTrainedTokenizerBase:
+        @property
+        def special_tokens_map_extended(self) -> dict[str, list[str]]:
+            return {"additional_special_tokens": ["<loc_0>", "<loc_1>"]}
+
+    module = types.SimpleNamespace(PreTrainedTokenizerBase=PreTrainedTokenizerBase)
+    monkeypatch.setitem(sys.modules, "transformers.tokenization_utils_base", module)
+
+    patched = _patch_transformers_tokenizer_additional_special_tokens()
+
+    assert patched == 1
+    assert PreTrainedTokenizerBase().additional_special_tokens == ["<loc_0>", "<loc_1>"]
 
 
 def test_klt_tracker_replays_late_detection_to_current_frame() -> None:
