@@ -14,13 +14,29 @@ QWEN_VLLM_EXTRA_ARGS="${QWEN_VLLM_EXTRA_ARGS:---max-model-len 16384}"
 QWEN_HF_HOME="${QWEN_HF_HOME:-/workspace/huggingface}"
 QWEN_PIP_CACHE_DIR="${QWEN_PIP_CACHE_DIR:-/workspace/pip-cache}"
 QWEN_TMPDIR="${QWEN_TMPDIR:-/workspace/tmp}"
+QWEN_TORCHINDUCTOR_CACHE_DIR="${QWEN_TORCHINDUCTOR_CACHE_DIR:-/workspace/torchinductor-cache}"
+QWEN_TRITON_CACHE_DIR="${QWEN_TRITON_CACHE_DIR:-/workspace/triton-cache}"
+QWEN_VLLM_CACHE_ROOT="${QWEN_VLLM_CACHE_ROOT:-/workspace/vllm-cache}"
+QWEN_XDG_CACHE_HOME="${QWEN_XDG_CACHE_HOME:-/workspace/xdg-cache}"
 
 models_url="http://${QWEN_HOST}:${QWEN_PORT}/v1/models"
-mkdir -p "$(dirname "${QWEN_SERVER_LOG}")" "${QWEN_HF_HOME}" "${QWEN_PIP_CACHE_DIR}" "${QWEN_TMPDIR}"
+mkdir -p \
+  "$(dirname "${QWEN_SERVER_LOG}")" \
+  "${QWEN_HF_HOME}" \
+  "${QWEN_PIP_CACHE_DIR}" \
+  "${QWEN_TMPDIR}" \
+  "${QWEN_TORCHINDUCTOR_CACHE_DIR}" \
+  "${QWEN_TRITON_CACHE_DIR}" \
+  "${QWEN_VLLM_CACHE_ROOT}" \
+  "${QWEN_XDG_CACHE_HOME}"
 export HF_HOME="${HF_HOME:-${QWEN_HF_HOME}}"
 export HF_HUB_DISABLE_XET="${HF_HUB_DISABLE_XET:-1}"
 export PIP_CACHE_DIR="${PIP_CACHE_DIR:-${QWEN_PIP_CACHE_DIR}}"
 export TMPDIR="${TMPDIR:-${QWEN_TMPDIR}}"
+export TORCHINDUCTOR_CACHE_DIR="${TORCHINDUCTOR_CACHE_DIR:-${QWEN_TORCHINDUCTOR_CACHE_DIR}}"
+export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-${QWEN_TRITON_CACHE_DIR}}"
+export VLLM_CACHE_ROOT="${VLLM_CACHE_ROOT:-${QWEN_VLLM_CACHE_ROOT}}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-${QWEN_XDG_CACHE_HOME}}"
 
 endpoint_ready() {
   MODELS_URL="${models_url}" python3 - <<'PY'
