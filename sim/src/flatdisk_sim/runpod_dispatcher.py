@@ -34,6 +34,19 @@ from .runpod_launcher import (
 )
 
 
+TASK_STAGE_ORDER = (
+    "fixture",
+    "preflight",
+    "trial-slice",
+    "sweep",
+    "promotion-gate",
+    "failure-analysis",
+    "training-review",
+    "other",
+)
+TASK_STAGE_CHOICES = ("auto", "any", *TASK_STAGE_ORDER)
+
+
 @dataclass(frozen=True)
 class AgentTaskSummary:
     wref: str
@@ -162,6 +175,45 @@ def skipped_for_prerequisites(tasks: list[AgentTaskSummary], *, completed_task_r
     return skipped
 
 
+def task_stage(task: AgentTaskSummary) -> str:
+    tags = set(task.tags)
+    name = task.name
+    if "fixture" in tags:
+        return "fixture"
+    if "preflight" in tags or name.endswith("-preflight"):
+        return "preflight"
+    if "trial-slice" in tags:
+        return "trial-slice"
+    if "sweep" in tags:
+        return "sweep"
+    if "promotion-gate" in tags:
+        return "promotion-gate"
+    if "failure-analysis" in tags:
+        return "failure-analysis"
+    if "training-export" in tags or "training-review" in tags:
+        return "training-review"
+    return "other"
+
+
+def select_tasks_for_dispatch(
+    tasks: list[AgentTaskSummary],
+    *,
+    stage: str,
+    max_workers: int,
+) -> tuple[list[AgentTaskSummary], str | None]:
+    limit = max(0, max_workers)
+    if stage == "any":
+        return tasks[:limit], "any" if tasks else None
+    if stage == "auto":
+        for candidate_stage in TASK_STAGE_ORDER:
+            staged = [task for task in tasks if task_stage(task) == candidate_stage]
+            if staged:
+                return staged[:limit], candidate_stage
+        return [], None
+    staged = [task for task in tasks if task_stage(task) == stage]
+    return staged[:limit], stage if staged else stage
+
+
 def make_dispatch_specs(args: argparse.Namespace, tasks: list[AgentTaskSummary], *, git_url: str, git_ref: str | None) -> list[RunpodLaunchSpec]:
     env = parse_env_assignments(args.env)
     specs: list[RunpodLaunchSpec] = []
@@ -234,6 +286,8 @@ def annotate_dispatch_payload(
     args: argparse.Namespace,
     git_url: str,
     git_ref: str | None,
+    effective_stage: str,
+    selected_stage: str | None,
     queried_task_count: int,
     selected_task_count: int,
     skipped_prerequisites: list[dict[str, Any]] | None,
@@ -249,6 +303,9 @@ def annotate_dispatch_payload(
             "name_prefix_filter": args.name_prefix,
             "tag_filters": list(args.tag),
             "related_experiment_filter": args.related_experiment,
+            "stage_filter": args.stage,
+            "effective_stage_filter": effective_stage,
+            "selected_stage": selected_stage,
             "include_non_slice": bool(args.include_non_slice),
             "ignore_prerequisites": bool(args.ignore_prerequisites),
             "queried_task_count": queried_task_count,
@@ -290,6 +347,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--name-prefix", default=None, help="Only dispatch tasks whose AgentTask name starts with this prefix.")
     parser.add_argument("--tag", action="append", default=[], help="Require a tag. Repeat for AND filtering.")
     parser.add_argument("--related-experiment", default=None)
+    parser.add_argument(
+        "--stage",
+        choices=TASK_STAGE_CHOICES,
+        default="trial-slice",
+        help=(
+            "Task stage to dispatch. Default preserves legacy trial-slice behavior; "
+            "auto selects the first ready stage in queue order."
+        ),
+    )
     parser.add_argument("--include-non-slice", action="store_true", help="Allow non-trial-slice tasks such as preflight or analysis.")
     parser.add_argument("--ignore-prerequisites", action="store_true", help="Dispatch matching tasks even when prerequisite AgentTasks are incomplete.")
     parser.add_argument("--agent", default=None, help="Exact agent name to use for every launched task.")
@@ -352,20 +418,24 @@ def main() -> int:
 
     queried = query_agent_tasks(args.repo, status=args.status, limit=args.limit)
     completed_task_refs = query_completed_task_refs(args.repo, limit=max(args.limit, 500)) if not args.ignore_prerequisites else set()
+    effective_stage = "any" if args.include_non_slice and args.stage == "trial-slice" else args.stage
+    include_non_slice = bool(args.include_non_slice or effective_stage != "trial-slice")
     matching = filter_tasks(
         queried,
         name_prefix=args.name_prefix,
         tags=tuple(args.tag),
         related_experiment=args.related_experiment,
-        include_non_slice=args.include_non_slice,
+        include_non_slice=include_non_slice,
         completed_task_refs=set(),
         respect_prerequisites=False,
     )
-    selected = filter_tasks(
+    ready = filter_tasks(
         matching,
+        include_non_slice=True,
         completed_task_refs=completed_task_refs,
         respect_prerequisites=not args.ignore_prerequisites,
-    )[: max(0, args.max_workers)]
+    )
+    selected, selected_stage = select_tasks_for_dispatch(ready, stage=effective_stage, max_workers=args.max_workers)
     specs = make_dispatch_specs(args, selected, git_url=git_url, git_ref=git_ref)
     base_payload = dispatch_payload(specs, launch=args.launch, dirty_worktree=dirty)
     prerequisite_skips = None
@@ -376,6 +446,8 @@ def main() -> int:
         args=args,
         git_url=git_url,
         git_ref=git_ref,
+        effective_stage=effective_stage,
+        selected_stage=selected_stage,
         queried_task_count=len(queried),
         selected_task_count=len(selected),
         skipped_prerequisites=prerequisite_skips,

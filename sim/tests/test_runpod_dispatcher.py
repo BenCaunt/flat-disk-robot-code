@@ -4,7 +4,7 @@ import json
 from types import SimpleNamespace
 
 from flatdisk_sim import runpod_dispatcher
-from flatdisk_sim.runpod_dispatcher import AgentTaskSummary, filter_tasks
+from flatdisk_sim.runpod_dispatcher import AgentTaskSummary, filter_tasks, select_tasks_for_dispatch, task_stage
 
 
 def test_filter_tasks_defaults_to_trial_slices_and_applies_tags() -> None:
@@ -65,6 +65,33 @@ def test_filter_tasks_skips_incomplete_prerequisites_by_default() -> None:
     selected = filter_tasks(tasks, name_prefix="plan-", tags=("runpod",), completed_task_refs={"AgentTask/plan-preflight"})
 
     assert [task.wref for task in selected] == ["AgentTask/plan-run-ready"]
+
+
+def test_select_tasks_for_dispatch_auto_uses_ready_stage_order() -> None:
+    tasks = [
+        AgentTaskSummary(
+            wref="AgentTask/plan-promotion-gate",
+            name="plan-promotion-gate",
+            status="planned",
+            owner="unassigned",
+            objective="Run promotion gate",
+            tags=("promotion-gate", "baseline-preservation"),
+        ),
+        AgentTaskSummary(
+            wref="AgentTask/plan-failure-analysis",
+            name="plan-failure-analysis",
+            status="planned",
+            owner="unassigned",
+            objective="Analyze failures",
+            tags=("failure-analysis",),
+        ),
+    ]
+
+    selected, stage = select_tasks_for_dispatch(tasks, stage="auto", max_workers=1)
+
+    assert stage == "promotion-gate"
+    assert [task.wref for task in selected] == ["AgentTask/plan-promotion-gate"]
+    assert task_stage(tasks[1]) == "failure-analysis"
 
 
 def test_main_dry_run_dispatches_selected_runpod_workers(monkeypatch, capsys, tmp_path) -> None:
@@ -133,6 +160,8 @@ def test_main_dry_run_dispatches_selected_runpod_workers(monkeypatch, capsys, tm
     assert payload["dispatch"] is False
     assert payload["dirty_worktree"] is True
     assert payload["queried_task_count"] == 3
+    assert payload["stage_filter"] == "trial-slice"
+    assert payload["selected_stage"] == "trial-slice"
     assert payload["selected_task_count"] == 1
     assert payload["worker_count"] == 1
     assert payload["skipped_for_prerequisites_count"] == 1
@@ -148,6 +177,7 @@ def test_main_dry_run_dispatches_selected_runpod_workers(monkeypatch, capsys, tm
     manifest = json.loads((tmp_path / "dispatch.json").read_text(encoding="utf-8"))
     assert manifest["warmhub_repo"] == "bencaunt-2/open-vocab-nav-research-loop"
     assert manifest["git_ref"] == "abc123"
+    assert manifest["selected_stage"] == "trial-slice"
     assert manifest["selected_task_count"] == 1
     assert manifest["workers"][0]["task"] == "AgentTask/plan-run-a"
     manifest_command = manifest["workers"][0]["runpodctl_command"]
@@ -261,3 +291,115 @@ def test_main_launch_reserves_before_creating_pods(monkeypatch, capsys, tmp_path
     assert payload["reserved_task_count"] == 1
     assert payload["reserved_tasks"] == ["AgentTask/plan-run-a"]
     assert payload["failed_launches"] == 0
+
+
+def test_main_auto_stage_dispatches_ready_promotion_gate(monkeypatch, capsys, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(runpod_dispatcher, "current_git_remote", lambda _cwd: "https://github.com/BenCaunt/flat-disk-robot-code.git")
+    monkeypatch.setattr(runpod_dispatcher, "current_git_ref", lambda _cwd: "abc123")
+    monkeypatch.setattr(runpod_dispatcher, "worktree_dirty", lambda _cwd: False)
+    monkeypatch.setattr(
+        runpod_dispatcher,
+        "query_completed_task_refs",
+        lambda *_args, **_kwargs: {
+            "AgentTask/plan-run-a",
+            "AgentTask/plan-run-b",
+        },
+    )
+    monkeypatch.setattr(
+        runpod_dispatcher,
+        "query_agent_tasks",
+        lambda *_args, **_kwargs: [
+            AgentTaskSummary(
+                wref="AgentTask/plan-promotion-gate",
+                name="plan-promotion-gate",
+                status="planned",
+                owner="unassigned",
+                objective="Gate candidates",
+                tags=("promotion-gate", "baseline-preservation"),
+                prerequisites=("AgentTask/plan-run-a", "AgentTask/plan-run-b"),
+            ),
+            AgentTaskSummary(
+                wref="AgentTask/plan-failure-analysis",
+                name="plan-failure-analysis",
+                status="planned",
+                owner="unassigned",
+                objective="Analyze",
+                tags=("failure-analysis",),
+                prerequisites=("AgentTask/plan-promotion-gate",),
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "flatdisk-sim-runpod-dispatch",
+            "--stage",
+            "auto",
+            "--name-prefix",
+            "plan-",
+            "--max-workers",
+            "2",
+            "--agent-prefix",
+            "agent",
+        ],
+    )
+
+    assert runpod_dispatcher.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["stage_filter"] == "auto"
+    assert payload["effective_stage_filter"] == "auto"
+    assert payload["selected_stage"] == "promotion-gate"
+    assert payload["selected_task_count"] == 1
+    assert payload["workers"][0]["task"] == "AgentTask/plan-promotion-gate"
+    assert payload["skipped_for_prerequisites"][0]["task"] == "AgentTask/plan-failure-analysis"
+
+
+def test_main_include_non_slice_preserves_legacy_any_stage_selection(monkeypatch, capsys, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(runpod_dispatcher, "current_git_remote", lambda _cwd: "https://github.com/BenCaunt/flat-disk-robot-code.git")
+    monkeypatch.setattr(runpod_dispatcher, "current_git_ref", lambda _cwd: "abc123")
+    monkeypatch.setattr(runpod_dispatcher, "worktree_dirty", lambda _cwd: False)
+    monkeypatch.setattr(runpod_dispatcher, "query_completed_task_refs", lambda *_args, **_kwargs: set())
+    monkeypatch.setattr(
+        runpod_dispatcher,
+        "query_agent_tasks",
+        lambda *_args, **_kwargs: [
+            AgentTaskSummary(
+                wref="AgentTask/plan-preflight",
+                name="plan-preflight",
+                status="planned",
+                owner="unassigned",
+                objective="Preflight",
+                tags=("preflight",),
+            ),
+            AgentTaskSummary(
+                wref="AgentTask/plan-run-a",
+                name="plan-run-a",
+                status="planned",
+                owner="unassigned",
+                objective="Run",
+                tags=("trial-slice",),
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "flatdisk-sim-runpod-dispatch",
+            "--include-non-slice",
+            "--name-prefix",
+            "plan-",
+            "--max-workers",
+            "2",
+        ],
+    )
+
+    assert runpod_dispatcher.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["stage_filter"] == "trial-slice"
+    assert payload["effective_stage_filter"] == "any"
+    assert payload["selected_stage"] == "any"
+    assert [worker["task"] for worker in payload["workers"]] == ["AgentTask/plan-preflight", "AgentTask/plan-run-a"]
