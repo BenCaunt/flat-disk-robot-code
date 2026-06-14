@@ -930,11 +930,14 @@ def _training_readiness_item_summary(item: dict[str, Any]) -> dict[str, Any]:
         "about": item.get("aboutWref") or item.get("about"),
         "status": data.get("status"),
         "sft_ready": data.get("sftReady"),
+        "preference_tuning_ready": data.get("preferenceTuningReady"),
         "ppo_ready": data.get("ppoReady"),
         "grpo_ready": data.get("grpoReady"),
         "policy_sample_count": data.get("policySampleCount"),
         "evaluator_label_count": data.get("evaluatorLabelCount"),
         "trajectory_preference_count": data.get("trajectoryPreferenceCount"),
+        "qwen_sft_sample_count": data.get("qwenSftSampleCount"),
+        "qwen_action_preference_count": data.get("qwenActionPreferenceCount"),
         "blockers": data.get("blockers") if isinstance(data.get("blockers"), list) else [],
         "warnings": data.get("warnings") if isinstance(data.get("warnings"), list) else [],
         "report_path": data.get("reportPath"),
@@ -1804,6 +1807,7 @@ def _format_status_text(snapshot: dict[str, Any]) -> str:
             lines.append(
                 "  - "
                 f"{readiness.get('status')}: SFT={readiness.get('sft_ready')}, "
+                f"pref={readiness.get('preference_tuning_ready')}, "
                 f"PPO={readiness.get('ppo_ready')}, GRPO={readiness.get('grpo_ready')}"
             )
     lines.append("")

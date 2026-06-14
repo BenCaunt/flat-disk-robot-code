@@ -159,3 +159,15 @@ uv run --project sim flatdisk-sim-prepare-qwen-tool-training \
   --input sim/scratch/open_vocab_nav_research_loop/<run>/training_export/policy_dataset_v1 \
   --output-dir sim/scratch/open_vocab_nav_research_loop/<run>/qwen_tool_training
 ```
+
+Then run training readiness over the run directory. It will discover both
+`training_export/training_manifest.json` and
+`qwen_tool_training/qwen_tool_training_manifest.json`, reporting raw policy
+samples, accepted Qwen SFT records, Qwen guard-replacement preference pairs, and
+any missing Qwen image or privileged-token blockers separately.
+
+```bash
+uv run --project sim flatdisk-sim-nav-training-readiness \
+  --input sim/scratch/open_vocab_nav_research_loop/<run> \
+  --output-dir sim/scratch/open_vocab_nav_research_loop/<run>/training_readiness
+```

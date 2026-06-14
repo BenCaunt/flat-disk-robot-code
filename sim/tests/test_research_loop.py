@@ -66,6 +66,8 @@ def test_research_loop_dry_run_writes_trial_matrix_and_warmhub_bundle(tmp_path) 
     assert shapes["RunAssessment"]["fields"]["finalToBestRegressionM?"] == "number"
     assert shapes["PromotionDecision"]["fields"]["status"]["enum"] == ["promote", "reject"]
     assert shapes["TrainingReadiness"]["fields"]["grpoReady"] == "boolean"
+    assert shapes["TrainingReadiness"]["fields"]["preferenceTuningReady"] == "boolean"
+    assert shapes["TrainingReadiness"]["fields"]["qwenActionPreferenceCount"] == "number"
     ops = json.loads((tmp_path / "out" / "warmhub_ops.json").read_text(encoding="utf-8"))
     assert any(op["name"] == "NavExperiment/test_open_vocab" for op in ops)
     assert any(op["name"] == "PromptVariant/test_open_vocab_qwen_explore" for op in ops)

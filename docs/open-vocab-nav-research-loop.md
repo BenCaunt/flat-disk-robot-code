@@ -356,6 +356,11 @@ By default it skips tasks whose `notes.prerequisites` are not complete; pass
   guard-replaced actor actions, and write an audit report covering reward
   filters, missing images, actor-vs-executed action targets, and privileged-token
   leakage.
+- Run `flatdisk-sim-nav-training-readiness` over both the `training_export/`
+  tree and any `qwen_tool_training/` output before choosing a training method.
+  The readiness assertion now reports raw policy samples, accepted Qwen SFT
+  records, Qwen guard-replacement preferences, missing Qwen images, and
+  privileged-token scans separately.
 - Use `training_export/policy_review_traces.jsonl` first for failure triage and
   parallel-agent handoff; it records tool calls and contact-sheet paths without
   hidden target distances or THOR object metadata.

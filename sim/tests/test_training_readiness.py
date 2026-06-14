@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from flatdisk_sim.qwen_tool_training import prepare_qwen_tool_training
 from flatdisk_sim.training_export import export_training_data_from_summaries
 from flatdisk_sim.training_readiness import analyze_training_readiness, main
 
@@ -13,12 +14,19 @@ def _summary_fixture(
     trial_id: str,
     final_distance_m: float,
     success: bool = False,
+    actor_action: dict | None = None,
+    executed_action: dict | None = None,
 ) -> dict:
     run_dir = tmp_path / trial_id
     policy_dir = run_dir / "policy"
     prompts_dir = policy_dir / "prompts"
+    frames_dir = policy_dir / "frames"
     prompts_dir.mkdir(parents=True)
+    frames_dir.mkdir(parents=True)
+    (frames_dir / "0001.jpg").write_bytes(b"fake image")
     (prompts_dir / "000_actor.txt").write_text("STATIC_HARNESS_CONTEXT\nDYNAMIC_TASK_STATE\n", encoding="utf-8")
+    actor_action = actor_action or {"tool": "drive_straight", "args": {"power_percent": 20, "duration_s": 0.5}, "thought": "move"}
+    executed_action = executed_action or {"tool": "drive_straight", "args": {"power_percent": 20, "duration_s": 0.5}, "thought": "move"}
     (policy_dir / "harness_events.jsonl").write_text(
         json.dumps(
             {
@@ -26,8 +34,8 @@ def _summary_fixture(
                 "step": 0,
                 "output": json.dumps(
                     {
-                        "thought": "move",
-                        "action": {"tool": "drive_straight", "args": {"power_percent": 20, "duration_s": 0.5}},
+                        "thought": actor_action.get("thought", ""),
+                        "action": {"tool": actor_action["tool"], "args": actor_action.get("args", {})},
                     }
                 ),
             }
@@ -64,10 +72,10 @@ def _summary_fixture(
                         "frame_seq": 1,
                         "brightness_center": 0.5,
                     },
-                    "actor_action": {"tool": "drive_straight", "args": {"power_percent": 20, "duration_s": 0.5}, "thought": "move"},
+                    "actor_action": actor_action,
                     "actor_memory_update": {"belief": "open space ahead"},
                     "critic": {"verdict": "approve", "reason": "bounded"},
-                    "executed_action": {"tool": "drive_straight", "args": {"power_percent": 20, "duration_s": 0.5}, "thought": "move"},
+                    "executed_action": executed_action,
                     "tool_result": {"ok": True},
                     "saved_frames": [],
                 },
@@ -115,6 +123,51 @@ def test_training_readiness_marks_sft_ppo_and_grpo_ready_for_ranked_rollouts(tmp
     assert readiness_op["data"]["policySampleCount"] == 2
     note_op = next(op for op in ops if op["name"] == "AgentNote/ready")
     assert "training-readiness" in note_op["data"]["tags"]
+
+
+def test_training_readiness_counts_qwen_tool_action_preferences(tmp_path: Path) -> None:
+    actor = {"tool": "drive_straight", "args": {"power_percent": 20, "duration_s": 0.5}, "thought": "move"}
+    executed = {"tool": "wait", "args": {"duration_s": 0.2}, "thought": "replacement"}
+    summary = _summary_fixture(
+        tmp_path,
+        trial_id="trial_replaced",
+        final_distance_m=1.25,
+        actor_action=actor,
+        executed_action=executed,
+    )
+    export = export_training_data_from_summaries(
+        [summary],
+        output_dir=tmp_path / "run" / "training_export",
+        experiment_id="exp",
+        run_id="run",
+    )
+    prepare_qwen_tool_training(
+        Path(export["policy_dataset_dir"]),
+        output_dir=tmp_path / "run" / "qwen_tool_training",
+    )
+
+    report = analyze_training_readiness(
+        [tmp_path / "run"],
+        output_dir=tmp_path / "readiness",
+        analysis_id="qwen-preferences",
+        experiment_id="exp",
+    )
+
+    assert report["readiness"]["status"] == "ready"
+    assert report["readiness"]["sft_ready"] is False
+    assert report["readiness"]["preference_tuning_ready"] is True
+    assert report["aggregate"]["qwen_tool_training_manifest_count"] == 1
+    assert report["aggregate"]["qwen_sft_sample_count"] == 0
+    assert report["aggregate"]["qwen_rejected_sample_count"] == 1
+    assert report["aggregate"]["qwen_action_preference_count"] == 1
+    assert report["aggregate"]["qwen_missing_image_count"] == 0
+    assert report["aggregate"]["forbidden_qwen_message_token_hits"] == []
+    readiness_op = next(op for op in report["warmhub_ops"] if op["name"] == "TrainingReadiness/qwen-preferences")
+    assert readiness_op["data"]["preferenceTuningReady"] is True
+    assert readiness_op["data"]["qwenActionPreferenceCount"] == 1
+    markdown = (tmp_path / "readiness" / "training_readiness.md").read_text(encoding="utf-8")
+    assert "Preference tuning" in markdown
+    assert "1 Qwen guard-replacement action preferences" in markdown
 
 
 def test_training_readiness_relocates_runpod_absolute_manifest_paths(tmp_path: Path) -> None:
