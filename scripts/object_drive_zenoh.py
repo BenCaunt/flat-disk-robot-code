@@ -336,7 +336,6 @@ class FlorenceTransformersDetector:
         self.device = torch.device(device)
         dtype = torch.float16 if self.device.type in {"cuda", "mps"} else torch.float32
         self.dtype = dtype
-        _patch_florence_transformers_compat()
         try:
             self.processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
             self.model = AutoModelForCausalLM.from_pretrained(
@@ -521,16 +520,23 @@ def _patch_transformers_tokenizer_additional_special_tokens() -> int:
     if isinstance(getattr(PreTrainedTokenizerBase, "additional_special_tokens", None), property):
         return 0
 
+    def _as_token_list(value: Any) -> list[Any]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return list(value)
+        if isinstance(value, tuple):
+            return list(value)
+        return [value]
+
     def _get_additional_special_tokens(tokenizer: Any) -> list[Any]:
-        token_map = getattr(tokenizer, "special_tokens_map_extended", None)
-        if isinstance(token_map, dict) and isinstance(token_map.get("additional_special_tokens"), list):
-            return list(token_map["additional_special_tokens"])
-        token_map = getattr(tokenizer, "special_tokens_map", None)
-        if isinstance(token_map, dict) and isinstance(token_map.get("additional_special_tokens"), list):
-            return list(token_map["additional_special_tokens"])
-        init_kwargs = getattr(tokenizer, "init_kwargs", None)
-        if isinstance(init_kwargs, dict) and isinstance(init_kwargs.get("additional_special_tokens"), list):
-            return list(init_kwargs["additional_special_tokens"])
+        for attr_name in ("_additional_special_tokens", "additional_special_tokens"):
+            if attr_name in tokenizer.__dict__:
+                return _as_token_list(tokenizer.__dict__[attr_name])
+        for map_name in ("_special_tokens_map", "init_kwargs"):
+            token_map = tokenizer.__dict__.get(map_name)
+            if isinstance(token_map, dict) and "additional_special_tokens" in token_map:
+                return _as_token_list(token_map["additional_special_tokens"])
         return []
 
     setattr(PreTrainedTokenizerBase, "additional_special_tokens", property(_get_additional_special_tokens))

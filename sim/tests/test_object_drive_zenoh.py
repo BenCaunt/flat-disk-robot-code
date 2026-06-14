@@ -119,9 +119,12 @@ def test_florence_forced_bos_patch_sets_class_default(monkeypatch) -> None:
 
 def test_transformers_tokenizer_additional_special_tokens_patch(monkeypatch) -> None:
     class PreTrainedTokenizerBase:
+        def __init__(self) -> None:
+            self.init_kwargs = {"additional_special_tokens": ["<loc_0>", "<loc_1>"]}
+
         @property
-        def special_tokens_map_extended(self) -> dict[str, list[str]]:
-            return {"additional_special_tokens": ["<loc_0>", "<loc_1>"]}
+        def special_tokens_map(self) -> dict[str, list[str]]:
+            raise AssertionError("patch must not read recursive special_tokens_map properties")
 
     module = types.SimpleNamespace(PreTrainedTokenizerBase=PreTrainedTokenizerBase)
     monkeypatch.setitem(sys.modules, "transformers.tokenization_utils_base", module)
