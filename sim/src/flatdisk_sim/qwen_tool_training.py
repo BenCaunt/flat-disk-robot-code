@@ -14,6 +14,7 @@ from .training_export import FORBIDDEN_POLICY_TOKENS
 
 QWEN_TOOL_SFT_SAMPLE_SCHEMA = "flatdisk.qwen_tool_sft_sample.v1"
 QWEN_TOOL_REJECTED_SAMPLE_SCHEMA = "flatdisk.qwen_tool_sft_rejected_sample.v1"
+QWEN_TOOL_ACTION_PREFERENCE_SCHEMA = "flatdisk.qwen_tool_action_preference.v1"
 QWEN_TOOL_TRAINING_MANIFEST_SCHEMA = "flatdisk.qwen_tool_training_manifest.v1"
 QWEN_TOOL_AUDIT_SCHEMA = "flatdisk.qwen_tool_training_audit.v1"
 
@@ -31,13 +32,8 @@ DEFAULT_FORBIDDEN_MODEL_TOKENS = tuple(
                 "candidate_step_reward",
                 "candidate_episode_reward",
                 "success_radius_m",
-                "last_detection",
-                "target_detected",
-                "ever_detected",
                 "stdout_tail",
                 "stderr_tail",
-                "debug_overlay",
-                "thor",
             ]
         )
     )
@@ -59,7 +55,9 @@ def prepare_qwen_tool_training(
 
     accepted: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
+    preferences: list[dict[str, Any]] = []
     reason_counts: Counter[str] = Counter()
+    preference_rejection_counts: Counter[str] = Counter()
     for sample in samples:
         materialized, reject_reasons = _materialize_sample(
             sample,
@@ -82,23 +80,38 @@ def prepare_qwen_tool_training(
             )
         else:
             accepted.append(materialized)
+        preference, preference_reject_reasons = _materialize_action_preference(
+            sample,
+            dataset_dir=Path(dataset["dataset_dir"]),
+            image_root=image_root,
+            require_existing_images=require_existing_images,
+        )
+        if preference_reject_reasons:
+            preference_rejection_counts.update(preference_reject_reasons)
+        if preference is not None:
+            preferences.append(preference)
 
     accepted_path = output_dir / "qwen_sft_messages.jsonl"
     rejected_path = output_dir / "rejected_samples.jsonl"
+    preferences_path = output_dir / "qwen_action_preferences.jsonl"
     audit_path = output_dir / "training_audit.json"
     manifest_path = output_dir / "qwen_tool_training_manifest.json"
     _write_jsonl(accepted_path, accepted)
     _write_jsonl(rejected_path, rejected)
+    _write_jsonl(preferences_path, preferences)
     audit = {
         "schema": QWEN_TOOL_AUDIT_SCHEMA,
         "accepted_count": len(accepted),
         "rejected_count": len(rejected),
+        "action_preference_count": len(preferences),
         "rejection_reasons": dict(sorted(reason_counts.items())),
+        "action_preference_rejection_reasons": dict(sorted(preference_rejection_counts.items())),
         "require_existing_images": require_existing_images,
         "min_sft_weight": min_sft_weight,
         "forbidden_model_tokens": list(DEFAULT_FORBIDDEN_MODEL_TOKENS),
         "policy_input_channel_only": True,
         "evaluator_labels_used_for_filtering_only": True,
+        "action_preferences_use_model_facing_prompt_only": True,
     }
     audit_path.write_text(json.dumps(audit, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     manifest = {
@@ -110,10 +123,12 @@ def prepare_qwen_tool_training(
         "source_evaluator_labels_jsonl": str(dataset["evaluator_labels_jsonl"]),
         "qwen_sft_messages_jsonl": str(accepted_path),
         "rejected_samples_jsonl": str(rejected_path),
+        "qwen_action_preferences_jsonl": str(preferences_path),
         "training_audit_json": str(audit_path),
         "sample_count": len(samples),
         "accepted_count": len(accepted),
         "rejected_count": len(rejected),
+        "action_preference_count": len(preferences),
         "message_format": "qwen-vl-chat-messages",
         "target_format": "json_object_with_thought_action_memory_update",
         "policy_input_only_in_messages": True,
@@ -135,7 +150,7 @@ def _resolve_policy_dataset(input_path: Path) -> dict[str, Any]:
         raise FileNotFoundError(f"could not find policy_dataset_v1/dataset_manifest.json under {input_path}")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     dataset_dir = Path(str(manifest.get("output_dir") or manifest_path.parent))
-    if not dataset_dir.is_absolute() and not dataset_dir.exists():
+    if not dataset_dir.exists():
         dataset_dir = manifest_path.parent
     return {
         "dataset_dir": str(dataset_dir),
@@ -150,11 +165,18 @@ def _manifest_path(manifest: dict[str, Any], key: str, *, default: Path) -> Path
     if not value:
         return default
     path = Path(str(value))
-    if path.is_absolute() or path.exists():
+    if path.exists():
         return path
+    if path.is_absolute():
+        local_name_candidate = default.parent / path.name
+        if local_name_candidate.exists():
+            return local_name_candidate
+        return default
     output_dir = Path(str(manifest.get("output_dir") or ""))
     candidate = output_dir / path
-    return candidate if candidate.exists() else path
+    if candidate.exists():
+        return candidate
+    return default if default.exists() else path
 
 
 def _materialize_sample(
@@ -226,6 +248,80 @@ def _materialize_sample(
     return record, sorted(set(reject_reasons))
 
 
+def _materialize_action_preference(
+    sample: dict[str, Any],
+    *,
+    dataset_dir: Path,
+    image_root: Path | None,
+    require_existing_images: bool,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    reject_reasons: list[str] = []
+    target = sample.get("target") if isinstance(sample.get("target"), dict) else {}
+    policy_input = sample.get("policy_input") if isinstance(sample.get("policy_input"), dict) else {}
+    actor_action = target.get("action_json") if isinstance(target.get("action_json"), dict) else {}
+    executed_action = target.get("executed_action_json") if isinstance(target.get("executed_action_json"), dict) else {}
+    if target.get("actor_equals_executed") is True:
+        return None, ["actor_action_matches_executed_action"]
+    if not actor_action.get("tool"):
+        reject_reasons.append("missing_actor_action_tool")
+    if not executed_action.get("tool"):
+        reject_reasons.append("missing_executed_action_tool")
+
+    validated_rejected = action_to_dict(validate_harness_action(parse_prompt_action(actor_action)))
+    validated_chosen = action_to_dict(validate_harness_action(parse_prompt_action(executed_action)))
+    if _action_contract_payload(validated_rejected) != _action_contract_payload(actor_action):
+        reject_reasons.append("invalid_or_unbounded_actor_action")
+    if _action_contract_payload(validated_chosen) != _action_contract_payload(executed_action):
+        reject_reasons.append("invalid_or_unbounded_executed_action")
+
+    image_paths = _resolve_image_paths(policy_input.get("image_paths", []), dataset_dir=dataset_dir, image_root=image_root)
+    missing_images = [str(path) for path in image_paths if not path.exists()]
+    if require_existing_images and missing_images:
+        reject_reasons.append("missing_image")
+
+    user_text = _user_text(policy_input)
+    prompt_messages = _qwen_prompt_messages(user_text, image_paths=image_paths)
+    forbidden = _forbidden_tokens(prompt_messages)
+    if forbidden:
+        reject_reasons.append("forbidden_model_token")
+    if reject_reasons:
+        return None, sorted(set(reject_reasons))
+
+    chosen_payload = _assistant_payload(validated_chosen, {})
+    rejected_payload = _assistant_payload(validated_rejected, target.get("memory_update_json"))
+    return (
+        {
+            "schema": QWEN_TOOL_ACTION_PREFERENCE_SCHEMA,
+            "sample_id": f"{sample.get('sample_id')}_actor_replacement_preference",
+            "source_policy_sample_id": sample.get("sample_id"),
+            "source_policy_step_id": sample.get("source_policy_step_id"),
+            "policy_input_hash": sample.get("policy_input_hash"),
+            "preference_source": "critic_or_harness_replacement",
+            "preference_type": "executed_action_preferred_over_rejected_actor_action",
+            "prompt_messages": prompt_messages,
+            "image_paths": [str(path) for path in image_paths],
+            "chosen_assistant_target_json": chosen_payload,
+            "rejected_assistant_target_json": rejected_payload,
+            "chosen_action_source": "executed_action_json",
+            "rejected_action_source": "actor_action_json",
+            "audit": {
+                "forbidden_model_tokens_present": forbidden,
+                "image_count": len(image_paths),
+                "missing_images": missing_images,
+                "actor_equals_executed": False,
+                "privileged_scan_passed": not forbidden,
+                "preference_labels_excluded_from_messages": True,
+                "evaluator_reward_excluded_from_messages": True,
+            },
+            "metadata": {
+                "episode_rollout_id": sample.get("episode_rollout_id"),
+                "policy_input_hash": sample.get("policy_input_hash"),
+            },
+        },
+        [],
+    )
+
+
 def _label_sft_weight(label: dict[str, Any] | None) -> float:
     if not isinstance(label, dict):
         return 0.0
@@ -242,8 +338,12 @@ def _resolve_image_paths(values: Any, *, dataset_dir: Path, image_root: Path | N
     resolved: list[Path] = []
     for value in values:
         path = Path(str(value))
-        if path.is_absolute() or path.exists():
+        if path.exists():
             resolved.append(path)
+            continue
+        if path.is_absolute():
+            relocated = _relocate_copied_artifact_path(path, dataset_dir=dataset_dir, image_root=image_root)
+            resolved.append(relocated or path)
             continue
         if image_root is not None:
             resolved.append(image_root / path)
@@ -254,6 +354,43 @@ def _resolve_image_paths(values: Any, *, dataset_dir: Path, image_root: Path | N
         else:
             resolved.append(path)
     return resolved
+
+
+def _relocate_copied_artifact_path(path: Path, *, dataset_dir: Path, image_root: Path | None) -> Path | None:
+    marker_suffixes = _artifact_marker_suffixes(path)
+    if not marker_suffixes:
+        return None
+    roots: list[Path] = []
+    if image_root is not None:
+        roots.append(image_root)
+    roots.extend(_nearby_artifact_roots(dataset_dir))
+    seen_roots: set[Path] = set()
+    for root in roots:
+        if root in seen_roots:
+            continue
+        seen_roots.add(root)
+        for suffix in marker_suffixes:
+            candidate = root / suffix
+            if candidate.exists():
+                return candidate
+    return None
+
+
+def _nearby_artifact_roots(dataset_dir: Path) -> list[Path]:
+    roots = [dataset_dir]
+    roots.extend(list(dataset_dir.parents)[:4])
+    return roots
+
+
+def _artifact_marker_suffixes(path: Path) -> list[Path]:
+    parts = path.parts
+    suffixes: list[Path] = []
+    for marker in ("trials", "training_export"):
+        if marker not in parts:
+            continue
+        index = parts.index(marker)
+        suffixes.append(Path(*parts[index:]))
+    return suffixes
 
 
 def _user_text(policy_input: dict[str, Any]) -> str:
@@ -286,12 +423,16 @@ def _action_contract_payload(action: dict[str, Any]) -> dict[str, Any]:
 
 
 def _qwen_messages(user_text: str, *, image_paths: list[Path], assistant_payload: dict[str, Any]) -> list[dict[str, Any]]:
-    content: list[dict[str, Any]] = [{"type": "image", "image": str(path)} for path in image_paths]
-    content.append({"type": "text", "text": user_text})
     return [
-        {"role": "user", "content": content},
+        *_qwen_prompt_messages(user_text, image_paths=image_paths),
         {"role": "assistant", "content": json.dumps(assistant_payload, sort_keys=True, default=str)},
     ]
+
+
+def _qwen_prompt_messages(user_text: str, *, image_paths: list[Path]) -> list[dict[str, Any]]:
+    content: list[dict[str, Any]] = [{"type": "image", "image": str(path)} for path in image_paths]
+    content.append({"type": "text", "text": user_text})
+    return [{"role": "user", "content": content}]
 
 
 def _forbidden_tokens(messages: list[dict[str, Any]]) -> list[str]:

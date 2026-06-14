@@ -146,7 +146,11 @@ Before training, run the Qwen tool-training materializer, which joins
 `policy_dataset_v1/policy_samples.jsonl` with
 `policy_dataset_v1/evaluator_labels.jsonl`, validates referenced image paths,
 filters unsafe or rejected actions, emits Qwen-compatible multimodal SFT JSONL,
-and audits that no privileged evaluator fields leak into model-facing messages.
+emits `qwen_action_preferences.jsonl` for guard-replaced actor actions, and
+audits that no privileged evaluator fields leak into model-facing messages.
+Preference records use only the model-facing Qwen prompt as input, choose the
+executed safe action, and reject the original actor action without contaminating
+accepted SFT.
 Treat PPO/GRPO as a later step once grouped rollouts, reward normalization, and
 on-policy collection are explicit.
 

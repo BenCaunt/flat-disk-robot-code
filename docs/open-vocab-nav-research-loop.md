@@ -31,7 +31,10 @@ for Qwen actor outputs, critic decisions, executed tools, grounding audits, and
 general flags such as unstable visual-servo grounding. Hidden THOR
 distance/success is kept in evaluator-only reward/label channels for offline
 ranking, SFT filtering, PPO, or GRPO; it is never inserted into model inputs or
-policy-review traces.
+policy-review traces. `flatdisk-sim-prepare-qwen-tool-training` can also
+materialize guard-replaced actor actions as Qwen action-preference pairs, where
+the executed safe action is the chosen target and the rejected actor action is
+kept out of accepted SFT.
 
 Seed config:
 
@@ -349,9 +352,10 @@ By default it skips tasks whose `notes.prerequisites` are not complete; pass
 - Use `flatdisk-sim-prepare-qwen-tool-training` before PPO/GRPO to join
   `training_export/policy_dataset_v1/policy_samples.jsonl` with
   `policy_dataset_v1/evaluator_labels.jsonl`, resolve image paths, emit
-  Qwen-compatible multimodal SFT JSONL, and write an audit report covering
-  reward filters, missing images, actor-vs-executed action targets, and
-  privileged-token leakage.
+  Qwen-compatible multimodal SFT JSONL plus `qwen_action_preferences.jsonl` for
+  guard-replaced actor actions, and write an audit report covering reward
+  filters, missing images, actor-vs-executed action targets, and privileged-token
+  leakage.
 - Use `training_export/policy_review_traces.jsonl` first for failure triage and
   parallel-agent handoff; it records tool calls and contact-sheet paths without
   hidden target distances or THOR object metadata.
