@@ -700,6 +700,46 @@ Before spending another long run on GRPO scale, add an adapter-effect sanity
 check such as logit comparison, adapter merge/load verification, or a small
 overfit probe where the adapter must visibly change completions.
 
+### Adapter-Effect Logit Check
+
+The GRPO job module now includes a PEFT adapter-effect diagnostic for the GRPO
+eval slice:
+
+- `flatdisk-sim-plan-qwen-grpo-adapter-effect` plans a check from an existing
+  `qwen_grpo_completion_eval_job.json`.
+- `flatdisk-sim-run-qwen-grpo-adapter-effect` runs or dry-runs the planned
+  check and writes `qwen_grpo_adapter_effect_result.json`.
+- The planner copies the same prompt/image records used by completion eval into
+  `qwen_grpo_adapter_effect_dataset.jsonl`; it checks image existence, prompt
+  sidecar leaks, and PEFT adapter directory completeness before launch.
+- The generated `check_qwen_grpo_adapter_effect.py` loads base Qwen once,
+  wraps it with `PeftModel.from_pretrained(...)`, compares next-token logits
+  with `model.disable_adapter()` versus adapter-enabled inference on the same
+  processor inputs, and writes `adapter_effect_samples.jsonl`.
+- Metrics include nonzero logit-delta rate, max/mean absolute logit delta,
+  L2 logit delta, KL in both directions, top-1 changed rate, top-k Jaccard,
+  and per-expected-tool counts. Expected tools are attached only after
+  inference for reporting.
+
+Local validation:
+
+```bash
+PYTHONPATH=/tmp/codex_no_readline:sim/src uv run --project sim --extra dev \
+  flatdisk-sim-plan-qwen-grpo-adapter-effect \
+  --completion-eval-job sim/scratch/open_vocab_nav_research_loop/qwen_grpo_completion_evals/stride5_24/base \
+  --output-dir sim/scratch/open_vocab_nav_research_loop/qwen_grpo_adapter_effect_checks/stride5_24_lora8_toolbalanced_local_plan \
+  --adapter-path sim/scratch/open_vocab_nav_research_loop/qwen_grpo_jobs/bathroom_cross_run_lora_8step_cap48_tool_balanced/adapter \
+  --top-k 5 \
+  --fail-on-not-ready
+```
+
+This local planner reported `status=ready`, `sample_count=24`,
+`missing_image_count=0`, `adapter_path_blockers=[]`,
+`forbidden_model_token_hits=[]`, and `sidecar_prompt_leak_hits=[]`. A runner
+dry-run also succeeded, and the generated script passed `py_compile`. Unit
+coverage for the planner, blockers, dry-run, fake execution, prompt-leak
+boundary, and metric aggregation is in `sim/tests/test_qwen_grpo_training.py`.
+
 Resume status for a future continuation:
 
 - This is no longer a verification-only blocker. Runpod auth works when

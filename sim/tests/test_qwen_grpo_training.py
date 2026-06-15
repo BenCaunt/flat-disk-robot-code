@@ -266,6 +266,13 @@ def _write_ready_grpo_handoff(tmp_path: Path) -> Path:
     return tmp_path / "run" / "qwen_grpo_training"
 
 
+def _write_fake_adapter(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "adapter_config.json").write_text('{"peft_type":"LORA"}\n', encoding="utf-8")
+    (path / "adapter_model.safetensors").write_bytes(b"fake adapter")
+    return path
+
+
 def _generated_reward_namespace() -> dict:
     script = qwen_grpo_job._TRAIN_SCRIPT
     start = script.index("def canonical_json")
@@ -836,3 +843,198 @@ def test_run_qwen_grpo_completion_eval_job_executes_ready_fake_eval(tmp_path: Pa
     assert metrics["parsed_tool_counts"] == {"alpha_tool": 1, "beta_tool": 1}
     assert metrics["exact_reference_action_count_by_expected_tool"] == {"alpha_tool": 1}
     assert metrics["tool_match_count_by_expected_tool"] == {"alpha_tool": 1}
+
+
+def test_plan_qwen_grpo_adapter_effect_check_writes_prompt_only_job(tmp_path: Path) -> None:
+    grpo_dir = _write_ready_grpo_handoff(tmp_path)
+    qwen_grpo_job.plan_qwen_grpo_training(grpo_dir, output_dir=tmp_path / "grpo_job")
+    qwen_grpo_job.plan_qwen_grpo_completion_eval(
+        tmp_path / "grpo_job",
+        output_dir=tmp_path / "completion_eval",
+        max_samples=1,
+        sample_offset=1,
+    )
+    adapter_path = _write_fake_adapter(tmp_path / "adapter")
+
+    job = qwen_grpo_job.plan_qwen_grpo_adapter_effect_check(
+        tmp_path / "completion_eval",
+        output_dir=tmp_path / "adapter_effect",
+        adapter_path=adapter_path,
+        top_k=7,
+        delta_threshold=1e-5,
+    )
+
+    assert job["schema"] == "flatdisk.qwen_grpo_adapter_effect_job.v1"
+    assert job["status"] == "ready"
+    assert job["evaluation_method"] == "qwen_peft_adapter_effect_logit_check"
+    assert job["source_completion_eval_job"].endswith("qwen_grpo_completion_eval_job.json")
+    assert job["dataset"]["eval_sample_count"] == 1
+    assert job["dataset"]["image_reference_count"] == 1
+    assert job["dataset"]["missing_image_count"] == 0
+    assert job["dataset"]["sidecar_prompt_leak_hits"] == []
+    assert job["dataset"]["forbidden_model_token_hits"] == []
+    assert job["dataset"]["adapter_path_blockers"] == []
+    assert job["dataset"]["reference_action_tool_counts"] == {"drive_straight": 1}
+    assert job["adapter_effect_args"] == {"delta_threshold": 1e-05, "top_k": 7}
+    assert job["audit"]["reference_actions_used_only_for_reporting"] is True
+    assert job["audit"]["adapter_compared_by_disable_enable_on_same_peft_model"] is True
+    assert job["adapter_path"] == str(adapter_path)
+    assert "trl" not in job["required_packages"]
+    assert "peft" in job["required_packages"]
+    assert job["launch_argv"][:2] == ["python", str(tmp_path / "adapter_effect" / "check_qwen_grpo_adapter_effect.py")]
+    assert "--top-k 7" in job["launch_command"]
+    assert "--delta-threshold 1e-05" in job["launch_command"]
+
+    effect_dataset = tmp_path / "adapter_effect" / "qwen_grpo_adapter_effect_dataset.jsonl"
+    effect_record = json.loads(effect_dataset.read_text(encoding="utf-8").splitlines()[0])
+    prompt_text = json.dumps(effect_record["prompt_messages"])
+    assert "candidate_step_reward" not in prompt_text
+    assert "candidate_episode_reward" not in prompt_text
+    assert "reference_action_canonical" not in prompt_text
+    assert "reference_action_json" not in prompt_text
+    assert "nearest_target" not in prompt_text
+    assert "distance_m" not in prompt_text
+    assert effect_record["reference_action_json"]["tool"] == "drive_straight"
+
+    script_text = Path(job["adapter_effect_script"]).read_text(encoding="utf-8")
+    assert "PeftModel.from_pretrained" in script_text
+    assert "model.disable_adapter()" in script_text
+    assert "GRPOTrainer" not in script_text
+    assert "get_peft_model" not in script_text
+    assert "record.get(\"prompt_messages\")" in script_text
+    assert "reference_action_canonical" in script_text
+
+
+def test_plan_qwen_grpo_adapter_effect_check_blocks_missing_adapter_and_images(tmp_path: Path) -> None:
+    grpo_dir = _write_ready_grpo_handoff(tmp_path)
+    qwen_grpo_job.plan_qwen_grpo_training(grpo_dir, output_dir=tmp_path / "grpo_job")
+    qwen_grpo_job.plan_qwen_grpo_completion_eval(
+        tmp_path / "grpo_job",
+        output_dir=tmp_path / "completion_eval",
+    )
+    for image_path in tmp_path.glob("trial_*/policy/frames/0001.jpg"):
+        image_path.unlink()
+
+    job = qwen_grpo_job.plan_qwen_grpo_adapter_effect_check(
+        tmp_path / "completion_eval",
+        output_dir=tmp_path / "adapter_effect",
+        adapter_path=tmp_path / "missing_adapter",
+    )
+
+    assert job["status"] == "not_ready"
+    assert any("image reference" in blocker for blocker in job["blockers"])
+    assert any("missing adapter_path" in blocker for blocker in job["blockers"])
+
+    allowed = qwen_grpo_job.plan_qwen_grpo_adapter_effect_check(
+        tmp_path / "completion_eval",
+        output_dir=tmp_path / "adapter_effect_allow_missing_images",
+        adapter_path=_write_fake_adapter(tmp_path / "adapter"),
+        require_existing_images=False,
+    )
+    assert allowed["status"] == "ready"
+    assert allowed["warnings"]
+    assert allowed["dataset"]["missing_image_count"] == 2
+
+
+def test_run_qwen_grpo_adapter_effect_check_job_dry_run_writes_result(tmp_path: Path) -> None:
+    grpo_dir = _write_ready_grpo_handoff(tmp_path)
+    qwen_grpo_job.plan_qwen_grpo_training(grpo_dir, output_dir=tmp_path / "grpo_job")
+    qwen_grpo_job.plan_qwen_grpo_completion_eval(
+        tmp_path / "grpo_job",
+        output_dir=tmp_path / "completion_eval",
+    )
+    qwen_grpo_job.plan_qwen_grpo_adapter_effect_check(
+        tmp_path / "completion_eval",
+        output_dir=tmp_path / "adapter_effect",
+        adapter_path=_write_fake_adapter(tmp_path / "adapter"),
+    )
+
+    result = qwen_grpo_job.run_qwen_grpo_adapter_effect_check_job(
+        tmp_path / "adapter_effect",
+        dry_run=True,
+        check_dependencies=False,
+    )
+
+    assert result["schema"] == "flatdisk.qwen_grpo_adapter_effect_result.v1"
+    assert result["status"] == "dry_run"
+    assert result["returncode"] is None
+    assert result["blockers"] == []
+    assert result["dependency_check"]["enabled"] is False
+    assert result["launch_argv"][0] == "python"
+    assert result["sample_count"] == 2
+    assert (tmp_path / "adapter_effect" / "qwen_grpo_adapter_effect_result.json").exists()
+
+
+def test_run_qwen_grpo_adapter_effect_check_job_executes_ready_fake_check(tmp_path: Path) -> None:
+    grpo_dir = _write_ready_grpo_handoff(tmp_path)
+    qwen_grpo_job.plan_qwen_grpo_training(grpo_dir, output_dir=tmp_path / "grpo_job")
+    qwen_grpo_job.plan_qwen_grpo_completion_eval(
+        tmp_path / "grpo_job",
+        output_dir=tmp_path / "completion_eval",
+    )
+    qwen_grpo_job.plan_qwen_grpo_adapter_effect_check(
+        tmp_path / "completion_eval",
+        output_dir=tmp_path / "adapter_effect",
+        adapter_path=_write_fake_adapter(tmp_path / "adapter"),
+    )
+    job_path = tmp_path / "adapter_effect" / "qwen_grpo_adapter_effect_job.json"
+    job = json.loads(job_path.read_text(encoding="utf-8"))
+    fake_check = tmp_path / "adapter_effect" / "fake_adapter_effect.py"
+    effect_log = Path(job["adapter_effect_log_jsonl"])
+    effect_log_payload = (
+        '{"expected_tool":"turn_by_angle",'
+        '"max_abs_logit_delta":0.25,'
+        '"mean_abs_logit_delta":0.01,'
+        '"l2_logit_delta":1.5,'
+        '"kl_adapter_from_base":0.02,'
+        '"kl_base_from_adapter":0.03,'
+        '"nonzero_delta":true,'
+        '"top1_changed":true,'
+        '"top_k_jaccard":0.4}\n'
+        '{"expected_tool":"visual_servo_object",'
+        '"max_abs_logit_delta":0.0,'
+        '"mean_abs_logit_delta":0.0,'
+        '"l2_logit_delta":0.0,'
+        '"kl_adapter_from_base":0.0,'
+        '"kl_base_from_adapter":0.0,'
+        '"nonzero_delta":false,'
+        '"top1_changed":false,'
+        '"top_k_jaccard":1.0}\n'
+    )
+    fake_check.write_text(
+        "\n".join(
+            [
+                "from pathlib import Path",
+                f"path = Path({str(effect_log)!r})",
+                "path.parent.mkdir(parents=True, exist_ok=True)",
+                f"path.write_text({effect_log_payload!r}, encoding='utf-8')",
+                "print('adapter-effect-ok')",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    job["required_packages"] = []
+    job["adapter_effect_script"] = str(fake_check)
+    job["launch_command"] = f"{shlex.quote(sys.executable)} {shlex.quote(str(fake_check))}"
+    job["launch_argv"] = [sys.executable, str(fake_check)]
+    job_path.write_text(json.dumps(job, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    result = qwen_grpo_job.run_qwen_grpo_adapter_effect_check_job(job_path)
+
+    assert result["status"] == "complete"
+    assert result["returncode"] == 0
+    assert "adapter-effect-ok" in result["stdout_tail"]
+    assert result["adapter_effect_log_sample_count"] == 2
+    metrics = result["adapter_effect_log_metrics"]
+    assert metrics["sample_count"] == 2
+    assert metrics["nonzero_delta_count"] == 1
+    assert metrics["top1_changed_count"] == 1
+    assert metrics["max_abs_logit_delta_max"] == 0.25
+    assert metrics["mean_abs_logit_delta_mean"] == 0.005
+    assert metrics["kl_adapter_from_base_mean"] == 0.01
+    assert metrics["kl_base_from_adapter_mean"] == 0.015
+    assert metrics["top_k_jaccard_mean"] == 0.7
+    assert metrics["expected_tool_counts"] == {"turn_by_angle": 1, "visual_servo_object": 1}
+    assert metrics["nonzero_delta_count_by_expected_tool"] == {"turn_by_angle": 1}
+    assert metrics["top1_changed_count_by_expected_tool"] == {"turn_by_angle": 1}
