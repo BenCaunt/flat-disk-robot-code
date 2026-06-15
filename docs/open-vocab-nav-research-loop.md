@@ -846,6 +846,29 @@ servo action tokens less likely. The next training attempt should pivot to a
 tiny overfit/SFT or action-token reward-shaping diagnostic before launching
 larger GRPO runs.
 
+The first tiny SFT pivot used the new `qwen_sft_training` module on RunPod:
+
+```text
+sim/scratch/open_vocab_nav_research_loop/qwen_tool_training/
+  scan_20260614_130240_training_export
+sim/scratch/open_vocab_nav_research_loop/qwen_sft_jobs/
+  arrival_stop_tiny1
+```
+
+The source handoff came from
+`open_vocab_nav_arrival_stop_bathroom_20260614_130240`, which produced
+`accepted_count=6` SFT records and `rejected_count=12`. A one-sample LoRA SFT
+job (`max_steps=10`, `learning_rate=2e-5`, `lora_r=8`) completed on RunPod with
+`returncode=0`, `duration_s=342.523`, and an adapter saved under
+`arrival_stop_tiny1/adapter`. The training log shows a real one-example
+learning signal on a 9,397-token multimodal prompt: loss decreased from
+`0.323851585` at step 1 to `0.226456374` at step 10.
+
+This does not prove navigation improvement yet, but it does prove the simpler
+teacher-forced path can change Qwen on a clean action target. Next verify the
+SFT adapter with a teacher-forced likelihood or exact-completion check on the
+same sample, then scale to the six accepted samples before returning to GRPO.
+
 Resume status for a future continuation:
 
 - This is no longer a verification-only blocker. Runpod auth works when
