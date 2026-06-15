@@ -150,6 +150,126 @@ def plan_qwen_sft_training(
     return job
 
 
+def plan_qwen_sft_training_from_prompt_action_dataset(
+    dataset_input: Path,
+    *,
+    output_dir: Path,
+    model_id: str = DEFAULT_MODEL_ID,
+    adapter_output_dir: Path | None = None,
+    max_samples: int | None = None,
+    sample_offset: int = 0,
+    sample_stride: int = 1,
+    max_steps: int = 20,
+    learning_rate: float = 2e-5,
+    gradient_accumulation_steps: int = 1,
+    lora_r: int = 8,
+    lora_alpha: int = 16,
+    lora_dropout: float = 0.05,
+    require_existing_images: bool = True,
+) -> dict[str, Any]:
+    if sample_offset < 0:
+        raise ValueError("sample_offset must be non-negative")
+    if sample_stride < 1:
+        raise ValueError("sample_stride must be at least 1")
+    if max_samples is not None and max_samples < 1:
+        raise ValueError("max_samples must be positive when set")
+    dataset_path = _resolve_prompt_action_dataset(dataset_input)
+    source_records = _read_jsonl_if_exists(dataset_path)
+    selected_source_records = _select_records(
+        source_records,
+        max_samples=max_samples,
+        sample_offset=sample_offset,
+        sample_stride=sample_stride,
+    )
+    selected_records = [_prompt_action_sft_record(record) for record in selected_source_records]
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    adapter_output_dir = adapter_output_dir or output_dir / "adapter"
+    train_dataset_path = output_dir / "qwen_sft_training_dataset.jsonl"
+    train_script_path = output_dir / "train_qwen_sft_lora.py"
+    training_log_path = output_dir / "qwen_sft_training_log.jsonl"
+    job_path = output_dir / "qwen_sft_training_job.json"
+    _write_jsonl(train_dataset_path, selected_records)
+    validation = _validate_sft_records(
+        selected_records,
+        require_existing_images=require_existing_images,
+        expected_source_count=None,
+        source_sft_path=dataset_path,
+        selected_from_count=len(source_records),
+    )
+    launch_argv = _launch_argv(
+        train_script_path=train_script_path,
+        dataset_path=train_dataset_path,
+        model_id=model_id,
+        adapter_output_dir=adapter_output_dir,
+        training_log_path=training_log_path,
+        max_steps=max_steps,
+        learning_rate=learning_rate,
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        lora_r=lora_r,
+        lora_alpha=lora_alpha,
+        lora_dropout=lora_dropout,
+    )
+    _write_train_script(train_script_path)
+    train_script_sha256 = _sha256_file(train_script_path)
+    job = {
+        "schema": QWEN_SFT_TRAINING_JOB_SCHEMA,
+        "created_at": strftime("%Y-%m-%dT%H:%M:%SZ", gmtime()),
+        "status": "ready" if not validation["blockers"] else "not_ready",
+        "blockers": validation["blockers"],
+        "warnings": validation["warnings"],
+        "input": str(dataset_input),
+        "qwen_tool_training_manifest": "",
+        "source_qwen_sft_messages_jsonl": "",
+        "source_prompt_action_dataset_jsonl": str(dataset_path),
+        "source_dataset_kind": "qwen_grpo_prompt_action_jsonl",
+        "qwen_sft_training_jsonl": str(train_dataset_path),
+        "output_dir": str(output_dir),
+        "adapter_output_dir": str(adapter_output_dir),
+        "train_script": str(train_script_path),
+        "train_script_sha256": train_script_sha256,
+        "training_log_jsonl": str(training_log_path),
+        "launch_argv": launch_argv,
+        "launch_command": _argv_to_command(launch_argv),
+        "training_method": "offline_teacher_forced_sft_lora",
+        "trainer": "custom_qwen_teacher_forced_lora",
+        "model_id": model_id,
+        "target_mode": TARGET_MODE_ACTION_ONLY,
+        "required_packages": DEFAULT_REQUIRED_PACKAGES,
+        "runtime": {
+            "python_entrypoint": str(train_script_path),
+            "launcher": "python",
+            "dependency_check": "importlib.util.find_spec without importing GPU training libraries",
+            "required_packages": DEFAULT_REQUIRED_PACKAGES,
+        },
+        "training_args": {
+            "max_samples": max_samples,
+            "sample_offset": sample_offset,
+            "sample_stride": sample_stride,
+            "max_steps": max_steps,
+            "learning_rate": learning_rate,
+            "gradient_accumulation_steps": gradient_accumulation_steps,
+            "lora_r": lora_r,
+            "lora_alpha": lora_alpha,
+            "lora_dropout": lora_dropout,
+            "target_mode": TARGET_MODE_ACTION_ONLY,
+        },
+        "dataset": validation["dataset"],
+        "audit": {
+            "policy_input_only": True,
+            "evaluator_labels_excluded": True,
+            "teacher_forced_assistant_target": True,
+            "target_source": "qwen_grpo prompt/action reference action compact JSON",
+            "target_mode": TARGET_MODE_ACTION_ONLY,
+            "require_existing_images": require_existing_images,
+            "source_training_manifest_required": False,
+            "reference_actions_used_only_as_sft_targets": True,
+        },
+    }
+    job_path.write_text(json.dumps(job, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return job
+
+
 def run_qwen_sft_training_job(
     job_input: Path,
     *,
@@ -290,6 +410,103 @@ def _relocated_absolute_path(path: Path, *, local_qwen_training_dir: Path) -> Pa
     index = len(parts) - 1 - list(reversed(parts)).index("qwen_tool_training")
     tail = parts[index + 1 :]
     return local_qwen_training_dir / Path(*tail) if tail else local_qwen_training_dir
+
+
+def _resolve_prompt_action_dataset(dataset_input: Path) -> Path:
+    path = dataset_input.expanduser()
+    if path.is_file():
+        return path
+    candidates = [
+        path / "qwen_grpo_completion_eval_dataset.jsonl",
+        path / "qwen_grpo_action_likelihood_dataset.jsonl",
+        path / "qwen_grpo_trl_dataset.jsonl",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(f"could not find a Qwen prompt/action dataset JSONL under {dataset_input}")
+
+
+def _select_records(
+    records: list[dict[str, Any]],
+    *,
+    max_samples: int | None,
+    sample_offset: int,
+    sample_stride: int,
+) -> list[dict[str, Any]]:
+    selected = records[sample_offset::sample_stride]
+    return selected[:max_samples] if max_samples is not None else selected
+
+
+def _prompt_action_sft_record(record: dict[str, Any]) -> dict[str, Any]:
+    messages = copy.deepcopy(_prompt_messages(record))
+    action = _reference_action(record)
+    compact_action = _compact_action(action)
+    compact_payload = {"action": compact_action} if compact_action is not None else {}
+    compact_text = json.dumps(compact_payload, sort_keys=True, separators=(",", ":")) if compact_payload else ""
+    messages.append({"role": "assistant", "content": compact_text})
+    source_sample_id = str(record.get("sample_id") or "")
+    metadata = {
+        "source_dataset_kind": "qwen_grpo_prompt_action_jsonl",
+        "source_sample_id": source_sample_id,
+        "source_rollout_id": record.get("source_rollout_id"),
+        "target_mode": TARGET_MODE_ACTION_ONLY,
+    }
+    return {
+        "schema": QWEN_SFT_SAMPLE_SCHEMA,
+        "sample_id": source_sample_id,
+        "source_sample_id": source_sample_id,
+        "source_policy_step_id": record.get("source_policy_step_id"),
+        "source_rollout_id": record.get("source_rollout_id"),
+        "messages": messages,
+        "images": _record_image_paths(record),
+        "image_paths": _record_image_paths(record),
+        "assistant_target_json": compact_payload,
+        "action_only_target_json": compact_payload,
+        "target_mode": TARGET_MODE_ACTION_ONLY,
+        "source_reference_action_sha256": _sha256_text(_canonical_json(action)),
+        "metadata": metadata,
+        "audit": {
+            "target_mode": TARGET_MODE_ACTION_ONLY,
+            "source_dataset_kind": "qwen_grpo_prompt_action_jsonl",
+            "reference_action_sidecar_used_as_target": True,
+            "reward_labels_excluded_from_messages": True,
+        },
+    }
+
+
+def _prompt_messages(record: dict[str, Any]) -> list[dict[str, Any]]:
+    messages = record.get("prompt_messages") if record.get("prompt_messages") is not None else record.get("prompt")
+    return copy.deepcopy(messages) if isinstance(messages, list) else []
+
+
+def _reference_action(record: dict[str, Any]) -> dict[str, Any]:
+    action = record.get("reference_action_json")
+    if isinstance(action, dict):
+        return copy.deepcopy(action)
+    action = _parse_json_dict(record.get("reference_action_canonical"))
+    if action:
+        return action
+    target_payload = record.get("assistant_target_json")
+    if isinstance(target_payload, dict) and isinstance(target_payload.get("action"), dict):
+        return copy.deepcopy(target_payload["action"])
+    return {}
+
+
+def _parse_json_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return copy.deepcopy(value)
+    if not isinstance(value, str) or not value.strip():
+        return {}
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, default=str)
 
 
 def _validate_sft_records(
@@ -844,11 +1061,19 @@ if __name__ == "__main__":
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", type=Path, required=True, help="qwen_tool_training dir or qwen_tool_training_manifest.json")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--input", type=Path, help="qwen_tool_training dir or qwen_tool_training_manifest.json")
+    source.add_argument(
+        "--dataset-jsonl",
+        type=Path,
+        help="Existing Qwen GRPO prompt/action dataset JSONL or containing directory.",
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--model-id", default=DEFAULT_MODEL_ID)
     parser.add_argument("--adapter-output-dir", type=Path, default=None)
     parser.add_argument("--max-samples", type=int, default=None)
+    parser.add_argument("--sample-offset", type=int, default=0)
+    parser.add_argument("--sample-stride", type=int, default=1)
     parser.add_argument("--max-steps", type=int, default=20)
     parser.add_argument("--learning-rate", type=float, default=2e-5)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
@@ -875,21 +1100,39 @@ def parse_run_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    job = plan_qwen_sft_training(
-        args.input,
-        output_dir=args.output_dir,
-        model_id=args.model_id,
-        adapter_output_dir=args.adapter_output_dir,
-        max_samples=args.max_samples,
-        max_steps=args.max_steps,
-        learning_rate=args.learning_rate,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        lora_r=args.lora_r,
-        lora_alpha=args.lora_alpha,
-        lora_dropout=args.lora_dropout,
-        target_mode=args.target_mode,
-        require_existing_images=not args.allow_missing_images,
-    )
+    if args.dataset_jsonl is not None:
+        job = plan_qwen_sft_training_from_prompt_action_dataset(
+            args.dataset_jsonl,
+            output_dir=args.output_dir,
+            model_id=args.model_id,
+            adapter_output_dir=args.adapter_output_dir,
+            max_samples=args.max_samples,
+            sample_offset=args.sample_offset,
+            sample_stride=args.sample_stride,
+            max_steps=args.max_steps,
+            learning_rate=args.learning_rate,
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
+            lora_r=args.lora_r,
+            lora_alpha=args.lora_alpha,
+            lora_dropout=args.lora_dropout,
+            require_existing_images=not args.allow_missing_images,
+        )
+    else:
+        job = plan_qwen_sft_training(
+            args.input,
+            output_dir=args.output_dir,
+            model_id=args.model_id,
+            adapter_output_dir=args.adapter_output_dir,
+            max_samples=args.max_samples,
+            max_steps=args.max_steps,
+            learning_rate=args.learning_rate,
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
+            lora_r=args.lora_r,
+            lora_alpha=args.lora_alpha,
+            lora_dropout=args.lora_dropout,
+            target_mode=args.target_mode,
+            require_existing_images=not args.allow_missing_images,
+        )
     print(
         json.dumps(
             {

@@ -1052,6 +1052,16 @@ action-only SFT adapter was ready and preserved the expected 22-sample,
 multi-tool slice; the next RunPod exact-completion comparison should use this
 paired mode instead of two separate full model loads.
 
+The SFT planner can now also start from a generic Qwen GRPO prompt/action
+dataset with `python -m flatdisk_sim.qwen_sft_training --dataset-jsonl ...`.
+It converts each prompt plus reference action sidecar into a compact
+action-only SFT record, keeping reward labels and reference actions out of the
+model prompt. A local planning probe on the 24-sample stride5 dataset with
+`--sample-offset 1 --sample-stride 2 --max-steps 40` produced a ready 12-sample
+multi-tool train split: `check_object_grounding=4`, `turn_by_angle=3`,
+`visual_servo_object=4`, and `stop=1`. This is the current best next training
+candidate because all tool classes are represented.
+
 Resume status for a future continuation:
 
 - This is no longer a verification-only blocker. Runpod auth works when

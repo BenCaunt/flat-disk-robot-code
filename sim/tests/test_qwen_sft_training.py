@@ -9,6 +9,7 @@ from flatdisk_sim.qwen_sft_training import (
     main,
     module_main,
     plan_qwen_sft_training,
+    plan_qwen_sft_training_from_prompt_action_dataset,
     run_main,
     run_qwen_sft_training_job,
 )
@@ -156,6 +157,78 @@ def test_plan_qwen_sft_training_can_write_action_only_targets(tmp_path: Path) ->
     assert row["audit"]["target_mode"] == "action-only"
 
 
+def test_plan_qwen_sft_training_from_prompt_action_dataset_writes_action_only_records(tmp_path: Path) -> None:
+    image_path = tmp_path / "frame.jpg"
+    image_path.write_bytes(b"fake image")
+    dataset_path = tmp_path / "qwen_grpo_action_likelihood_dataset.jsonl"
+    records = [
+        {
+            "sample_id": "sample-000",
+            "source_rollout_id": "rollout-a",
+            "prompt_messages": [{"role": "user", "content": [{"type": "image", "image": str(image_path)}]}],
+            "image_paths": [str(image_path)],
+            "reference_action_json": {"tool": "check_object_grounding", "args": {"prompt": "chair"}},
+            "candidate_step_reward": 0.0,
+        },
+        {
+            "sample_id": "sample-001",
+            "source_rollout_id": "rollout-b",
+            "prompt_messages": [{"role": "user", "content": [{"type": "text", "text": "turn left"}]}],
+            "image_paths": [str(image_path)],
+            "reference_action_json": {"tool": "turn_by_angle", "args": {"degrees": -30.0, "power_percent": 12.0}},
+            "candidate_step_reward": -0.1,
+        },
+        {
+            "sample_id": "sample-002",
+            "source_rollout_id": "rollout-c",
+            "prompt_messages": [{"role": "user", "content": [{"type": "text", "text": "stop"}]}],
+            "image_paths": [str(image_path)],
+            "reference_action_json": {"tool": "stop", "args": {}},
+            "candidate_step_reward": 0.0,
+        },
+    ]
+    dataset_path.write_text(
+        "".join(json.dumps(record, sort_keys=True) + "\n" for record in records),
+        encoding="utf-8",
+    )
+
+    job = plan_qwen_sft_training_from_prompt_action_dataset(
+        dataset_path,
+        output_dir=tmp_path / "sft_job",
+        sample_offset=1,
+        max_samples=2,
+        max_steps=4,
+    )
+
+    assert job["status"] == "ready"
+    assert job["source_dataset_kind"] == "qwen_grpo_prompt_action_jsonl"
+    assert job["source_prompt_action_dataset_jsonl"] == str(dataset_path)
+    assert job["qwen_tool_training_manifest"] == ""
+    assert job["target_mode"] == "action-only"
+    assert job["training_args"]["sample_offset"] == 1
+    assert job["training_args"]["sample_stride"] == 1
+    assert job["dataset"]["source_sample_count"] == 3
+    assert job["dataset"]["sample_count"] == 2
+    assert job["dataset"]["target_action_tool_counts"] == {"stop": 1, "turn_by_angle": 1}
+    assert job["audit"]["reference_actions_used_only_as_sft_targets"] is True
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "sft_job" / "qwen_sft_training_dataset.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert [row["sample_id"] for row in rows] == ["sample-001", "sample-002"]
+    assert rows[0]["schema"] == "flatdisk.qwen_tool_sft_sample.v1"
+    assert rows[0]["messages"][-1]["role"] == "assistant"
+    assert rows[0]["messages"][-1]["content"] == (
+        '{"action":{"args":{"degrees":-30.0,"power_percent":12.0},"tool":"turn_by_angle"}}'
+    )
+    prompt_text = json.dumps(rows[0]["messages"][:-1])
+    assert "candidate_step_reward" not in prompt_text
+    assert "reference_action_json" not in prompt_text
+    assert rows[0]["metadata"]["source_dataset_kind"] == "qwen_grpo_prompt_action_jsonl"
+
+
 def test_plan_qwen_sft_training_blocks_forbidden_prompt_tokens(tmp_path: Path) -> None:
     qwen_dir = _write_qwen_sft_fixture(tmp_path, prompt_text="Hidden distance_m should not be here.")
 
@@ -183,6 +256,44 @@ def test_plan_qwen_sft_training_cli_can_fail_on_not_ready(tmp_path: Path, monkey
     assert main() == 2
     job = json.loads((tmp_path / "sft_job" / "qwen_sft_training_job.json").read_text(encoding="utf-8"))
     assert job["status"] == "not_ready"
+
+
+def test_plan_qwen_sft_training_cli_accepts_prompt_action_dataset(tmp_path: Path, monkeypatch) -> None:
+    image_path = tmp_path / "frame.jpg"
+    image_path.write_bytes(b"fake image")
+    dataset_path = tmp_path / "qwen_grpo_completion_eval_dataset.jsonl"
+    dataset_path.write_text(
+        json.dumps(
+            {
+                "sample_id": "sample-000",
+                "prompt_messages": [{"role": "user", "content": [{"type": "text", "text": "stop"}]}],
+                "image_paths": [str(image_path)],
+                "reference_action_canonical": '{"args": {}, "tool": "stop"}',
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "flatdisk-sim-plan-qwen-sft-training",
+            "--dataset-jsonl",
+            str(dataset_path),
+            "--output-dir",
+            str(tmp_path / "sft_job"),
+            "--max-steps",
+            "2",
+            "--fail-on-not-ready",
+        ],
+    )
+
+    assert main() == 0
+    job = json.loads((tmp_path / "sft_job" / "qwen_sft_training_job.json").read_text(encoding="utf-8"))
+    assert job["status"] == "ready"
+    assert job["source_prompt_action_dataset_jsonl"] == str(dataset_path)
+    assert job["dataset"]["target_action_tool_counts"] == {"stop": 1}
 
 
 def test_run_qwen_sft_training_job_dry_run_writes_result(tmp_path: Path) -> None:
