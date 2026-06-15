@@ -98,6 +98,9 @@ def test_plan_qwen_sft_training_writes_ready_job_and_teacher_forced_script(tmp_p
     assert job["training_args"]["max_samples"] == 1
     assert job["training_args"]["max_steps"] == 3
     assert job["training_args"]["learning_rate"] == 1e-5
+    assert job["target_mode"] == "assistant"
+    assert job["dataset"]["target_mode_counts"] == {"assistant": 1}
+    assert job["dataset"]["target_action_tool_counts"] == {"drive_straight": 1}
     assert "trl" not in job["required_packages"]
     assert "peft" in job["required_packages"]
     assert job["launch_argv"][:2] == ["python", str(tmp_path / "sft_job" / "train_qwen_sft_lora.py")]
@@ -114,6 +117,43 @@ def test_plan_qwen_sft_training_writes_ready_job_and_teacher_forced_script(tmp_p
     assert "apply_chat_template" in script_text
     assert "DPOTrainer" not in script_text
     assert "GRPOTrainer" not in script_text
+
+
+def test_plan_qwen_sft_training_can_write_action_only_targets(tmp_path: Path) -> None:
+    qwen_dir = _write_qwen_sft_fixture(tmp_path, count=2)
+
+    job = plan_qwen_sft_training(
+        qwen_dir,
+        output_dir=tmp_path / "sft_job",
+        max_samples=1,
+        max_steps=3,
+        target_mode="action-only",
+    )
+
+    assert job["status"] == "ready"
+    assert job["target_mode"] == "action-only"
+    assert job["training_args"]["target_mode"] == "action-only"
+    assert job["audit"]["target_source"] == "qwen_sft_messages compact action content"
+    assert job["dataset"]["sample_count"] == 1
+    assert job["dataset"]["target_mode_counts"] == {"action-only": 1}
+    assert job["dataset"]["target_action_tool_counts"] == {"drive_straight": 1}
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "sft_job" / "qwen_sft_training_dataset.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["target_mode"] == "action-only"
+    assert row["assistant_target_json"] == {
+        "action": {"args": {"duration_s": 0.5, "power_percent": 18.0}, "tool": "drive_straight"}
+    }
+    assert row["messages"][-1]["role"] == "assistant"
+    assert row["messages"][-1]["content"] == (
+        '{"action":{"args":{"duration_s":0.5,"power_percent":18.0},"tool":"drive_straight"}}'
+    )
+    assert len(row["source_assistant_target_sha256"]) == 64
+    assert row["audit"]["target_mode"] == "action-only"
 
 
 def test_plan_qwen_sft_training_blocks_forbidden_prompt_tokens(tmp_path: Path) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+import copy
 import hashlib
 import importlib.util
 import json
@@ -21,6 +22,9 @@ QWEN_SFT_TRAINING_JOB_SCHEMA = "flatdisk.qwen_sft_training_job.v1"
 QWEN_SFT_TRAINING_RESULT_SCHEMA = "flatdisk.qwen_sft_training_result.v1"
 QWEN_SFT_SAMPLE_SCHEMA = "flatdisk.qwen_tool_sft_sample.v1"
 DEFAULT_MODEL_ID = "Qwen/Qwen3-VL-8B-Instruct"
+TARGET_MODE_ASSISTANT = "assistant"
+TARGET_MODE_ACTION_ONLY = "action-only"
+TARGET_MODES = (TARGET_MODE_ASSISTANT, TARGET_MODE_ACTION_ONLY)
 DEFAULT_REQUIRED_PACKAGES = [
     "accelerate",
     "peft",
@@ -44,8 +48,11 @@ def plan_qwen_sft_training(
     lora_r: int = 8,
     lora_alpha: int = 16,
     lora_dropout: float = 0.05,
+    target_mode: str = TARGET_MODE_ASSISTANT,
     require_existing_images: bool = True,
 ) -> dict[str, Any]:
+    if target_mode not in TARGET_MODES:
+        raise ValueError(f"target_mode must be one of {TARGET_MODES}: {target_mode}")
     qwen_manifest = _resolve_qwen_training_manifest(input_path)
     manifest = json.loads(qwen_manifest.read_text(encoding="utf-8"))
     manifest["_manifest_path"] = str(qwen_manifest)
@@ -55,7 +62,8 @@ def plan_qwen_sft_training(
         default=qwen_manifest.parent / "qwen_sft_messages.jsonl",
     )
     source_records = _read_jsonl_if_exists(source_sft_path)
-    selected_records = source_records[:max_samples] if max_samples is not None else list(source_records)
+    selected_source_records = source_records[:max_samples] if max_samples is not None else list(source_records)
+    selected_records = _records_for_target_mode(selected_source_records, target_mode=target_mode)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     adapter_output_dir = adapter_output_dir or output_dir / "adapter"
@@ -106,6 +114,7 @@ def plan_qwen_sft_training(
         "training_method": "offline_teacher_forced_sft_lora",
         "trainer": "custom_qwen_teacher_forced_lora",
         "model_id": model_id,
+        "target_mode": target_mode,
         "required_packages": DEFAULT_REQUIRED_PACKAGES,
         "runtime": {
             "python_entrypoint": str(train_script_path),
@@ -121,13 +130,19 @@ def plan_qwen_sft_training(
             "lora_r": lora_r,
             "lora_alpha": lora_alpha,
             "lora_dropout": lora_dropout,
+            "target_mode": target_mode,
         },
         "dataset": validation["dataset"],
         "audit": {
             "policy_input_only": True,
             "evaluator_labels_excluded": True,
             "teacher_forced_assistant_target": True,
-            "target_source": "qwen_sft_messages assistant content",
+            "target_source": (
+                "qwen_sft_messages compact action content"
+                if target_mode == TARGET_MODE_ACTION_ONLY
+                else "qwen_sft_messages assistant content"
+            ),
+            "target_mode": target_mode,
             "require_existing_images": require_existing_images,
         },
     }
@@ -302,8 +317,11 @@ def _validate_sft_records(
     assistant_target_count = 0
     image_reference_count = 0
     schema_counts: Counter[str] = Counter()
+    target_action_tool_counts: Counter[str] = Counter()
+    target_mode_counts: Counter[str] = Counter()
     for record in records:
         schema_counts[str(record.get("schema") or "")] += 1
+        target_mode_counts[str(record.get("target_mode") or TARGET_MODE_ASSISTANT)] += 1
         messages = record.get("messages")
         if not isinstance(messages, list) or len(messages) < 2:
             malformed_count += 1
@@ -313,6 +331,9 @@ def _validate_sft_records(
                 malformed_count += 1
             else:
                 assistant_target_count += 1
+                tool = _target_action_tool(str(assistant_messages[-1].get("content") or ""))
+                if tool:
+                    target_action_tool_counts[tool] += 1
         image_paths = _record_image_paths(record)
         image_reference_count += len(image_paths)
         missing_images.extend(str(path) for path in image_paths if not Path(path).exists())
@@ -343,8 +364,109 @@ def _validate_sft_records(
             "missing_images": sorted(set(missing_images)),
             "forbidden_model_token_hits": dict(sorted(forbidden_hits.items())),
             "schema_counts": dict(sorted(schema_counts.items())),
+            "target_action_tool_counts": dict(sorted(target_action_tool_counts.items())),
+            "target_mode_counts": dict(sorted(target_mode_counts.items())),
         },
     }
+
+
+def _records_for_target_mode(records: list[dict[str, Any]], *, target_mode: str) -> list[dict[str, Any]]:
+    if target_mode == TARGET_MODE_ASSISTANT:
+        return list(records)
+    if target_mode == TARGET_MODE_ACTION_ONLY:
+        return [_action_only_record(record) for record in records]
+    raise ValueError(f"target_mode must be one of {TARGET_MODES}: {target_mode}")
+
+
+def _action_only_record(record: dict[str, Any]) -> dict[str, Any]:
+    copied = copy.deepcopy(record)
+    original_target = _assistant_target(copied.get("messages"))
+    target_payload = copied.get("assistant_target_json")
+    if not isinstance(target_payload, dict):
+        target_payload = _parse_assistant_target_json(copied.get("messages"))
+    action = target_payload.get("action") if isinstance(target_payload, dict) else None
+    compact_action = _compact_action(action)
+    if compact_action is None:
+        compact_text = ""
+        compact_payload: dict[str, Any] = {}
+    else:
+        compact_payload = {"action": compact_action}
+        compact_text = json.dumps(compact_payload, sort_keys=True, separators=(",", ":"))
+    _replace_last_assistant_content(copied, compact_text)
+    copied["assistant_target_json"] = compact_payload
+    copied["action_only_target_json"] = compact_payload
+    copied["target_mode"] = TARGET_MODE_ACTION_ONLY
+    copied["source_assistant_target_sha256"] = _sha256_text(original_target)
+    audit = copied.get("audit")
+    if not isinstance(audit, dict):
+        audit = {}
+        copied["audit"] = audit
+    audit["target_mode"] = TARGET_MODE_ACTION_ONLY
+    audit["source_target_preserved_by_hash"] = True
+    metadata = copied.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+        copied["metadata"] = metadata
+    metadata["target_mode"] = TARGET_MODE_ACTION_ONLY
+    return copied
+
+
+def _parse_assistant_target_json(messages: Any) -> dict[str, Any]:
+    target = _assistant_target(messages)
+    if not target:
+        return {}
+    try:
+        payload = json.loads(target)
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _assistant_target(messages: Any) -> str:
+    if not isinstance(messages, list):
+        return ""
+    for message in reversed(messages):
+        if isinstance(message, dict) and message.get("role") == "assistant":
+            return str(message.get("content") or "")
+    return ""
+
+
+def _replace_last_assistant_content(record: dict[str, Any], content: str) -> None:
+    messages = record.get("messages")
+    if not isinstance(messages, list):
+        return
+    for message in reversed(messages):
+        if isinstance(message, dict) and message.get("role") == "assistant":
+            message["content"] = content
+            return
+
+
+def _compact_action(action: Any) -> dict[str, Any] | None:
+    if not isinstance(action, dict) or not action.get("tool"):
+        return None
+    args = action.get("args")
+    return {
+        "tool": action.get("tool"),
+        "args": args if isinstance(args, dict) else {},
+    }
+
+
+def _target_action_tool(target: str) -> str | None:
+    try:
+        payload = json.loads(target)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    action = payload.get("action")
+    if not isinstance(action, dict):
+        return None
+    tool = action.get("tool")
+    return str(tool) if tool is not None else None
+
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _record_image_paths(record: dict[str, Any]) -> list[str]:
@@ -733,6 +855,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lora-r", type=int, default=8)
     parser.add_argument("--lora-alpha", type=int, default=16)
     parser.add_argument("--lora-dropout", type=float, default=0.05)
+    parser.add_argument("--target-mode", choices=TARGET_MODES, default=TARGET_MODE_ASSISTANT)
     parser.add_argument("--allow-missing-images", action="store_true")
     parser.add_argument("--fail-on-not-ready", action="store_true")
     return parser.parse_args()
@@ -764,6 +887,7 @@ def main() -> int:
         lora_r=args.lora_r,
         lora_alpha=args.lora_alpha,
         lora_dropout=args.lora_dropout,
+        target_mode=args.target_mode,
         require_existing_images=not args.allow_missing_images,
     )
     print(
@@ -772,6 +896,8 @@ def main() -> int:
                 "status": job["status"],
                 "sample_count": job["dataset"]["sample_count"],
                 "source_sample_count": job["dataset"]["source_sample_count"],
+                "target_mode": job["target_mode"],
+                "target_action_tool_counts": job["dataset"]["target_action_tool_counts"],
                 "missing_image_count": job["dataset"]["missing_image_count"],
                 "forbidden_model_token_hits": job["dataset"]["forbidden_model_token_hits"],
                 "job_path": str(Path(job["output_dir"]) / "qwen_sft_training_job.json"),
