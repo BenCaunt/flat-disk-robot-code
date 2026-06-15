@@ -289,6 +289,28 @@ Current handoff for GRPO training, 2026-06-14:
   `missing_image_count=0`, `forbidden_model_token_hits=[]`, and
   `sidecar_prompt_leak_hits=[]`; the runner dry-run also succeeded. This was
   not a real Qwen generation run yet.
+- A real Runpod completion-eval comparison then completed on the existing A40
+  pod from fresh checkout
+  `/workspace/flat-disk-robot-code-eval-20260615-qwen-completions` at commit
+  `376600e`. Eval artifact root:
+  `sim/scratch/open_vocab_nav_research_loop/qwen_grpo_completion_evals/stride5_24`.
+  The eval slice used `--max-samples 24 --sample-stride 5 --max-new-tokens 48`
+  from the balanced 4-step GRPO dataset, with expected tools
+  `check_object_grounding=8`, `turn_by_angle=8`, `visual_servo_object=7`, and
+  `stop=1`. All four runs completed with `returncode=0`.
+- Completion-eval results were identical for base Qwen and all saved LoRA
+  adapters (`lora4_toolbalanced`, `lora8_toolbalanced`,
+  `lora4_exactbonus005`): `24/24` parsed actions, `6/24` exact reference
+  actions, `15/24` same-tool matches, mean argument-match fraction `0.423611`,
+  `0` positive non-reference rewards, and completion digest
+  `e31e4973e7bb5037`. Parsed tools were `check_object_grounding=4`,
+  `turn_by_angle=16`, `visual_servo_object=3`, `stop=1`; exact-by-tool was
+  `check_object_grounding=3/8`, `turn_by_angle=1/8`,
+  `visual_servo_object=1/7`, `stop=1/1`. The adapter evals produced zero
+  byte-level completion text differences from base on this deterministic slice.
+  Treat this as evidence that the current LoRA updates are too weak to affect
+  greedy action decoding here, or that adapter activation/effect size needs a
+  direct sanity check before more GRPO scaling.
 - The working pod venv is `/workspace/flatdisk-grpo-venv`, created with
   `--system-site-packages` so it can see image Torch `2.9.1+cu128`; install
   `torchvision==0.24.1 --no-deps` to match that Torch build. Do not let pip pull
@@ -302,10 +324,11 @@ Current handoff for GRPO training, 2026-06-14:
   early same-tool behavior, but doubling the balanced run to 8 steps did not
   solve exact action selection; the exact-action bonus ablation also did not
   help, and held-out completion-eval planning now exists. Useful next
-  directions: run the completion eval on base Qwen and the saved LoRA adapters,
-  collect more diverse grouped rollouts with stop/arrival and ambiguous
-  grounding examples, inspect whether reference actions are too noisy or too
-  correlated with turns, and only then scale to a 24-step balanced run.
+  directions: add an adapter-effect sanity check (for example compare logits or
+  force/merge adapter weights before generation), collect more diverse grouped
+  rollouts with stop/arrival and ambiguous grounding examples, inspect whether
+  reference actions are too noisy or too correlated with turns, and only then
+  scale to a stronger GRPO run.
 - Future continuation should treat this as past verification, not a blocker.
   There is no known Runpod auth issue when `.env` is loaded as above, and no
   user action is needed before launching the next capped LoRA training attempt.

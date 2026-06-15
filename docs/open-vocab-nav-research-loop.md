@@ -664,6 +664,42 @@ The planner reported `status=ready`, `sample_count=4`,
 also succeeded. This smoke verified packaging and leakage checks; it did not
 run real Qwen generation.
 
+Real Runpod comparison:
+
+- Remote checkout:
+  `/workspace/flat-disk-robot-code-eval-20260615-qwen-completions` at commit
+  `376600e`.
+- Local copied artifacts:
+  `sim/scratch/open_vocab_nav_research_loop/qwen_grpo_completion_evals/stride5_24`
+- Eval slice: balanced 4-step GRPO prompt dataset,
+  `--max-samples 24 --sample-stride 5 --max-new-tokens 48`.
+- Expected tools: `check_object_grounding=8`, `turn_by_angle=8`,
+  `visual_servo_object=7`, `stop=1`.
+- Models/adapters evaluated: base `Qwen/Qwen3-VL-8B-Instruct`,
+  `lora4_toolbalanced`, `lora8_toolbalanced`, and `lora4_exactbonus005`.
+- All four runs completed with return code `0`.
+
+All four runs produced identical aggregate metrics:
+
+- `24/24` parsed actions.
+- `6/24` exact reference actions.
+- `15/24` same-tool matches.
+- Mean argument-match fraction `0.423611`.
+- `0` positive non-reference rewards.
+- Parsed tools: `check_object_grounding=4`, `turn_by_angle=16`,
+  `visual_servo_object=3`, `stop=1`.
+- Exact-by-tool: `check_object_grounding=3/8`, `turn_by_angle=1/8`,
+  `visual_servo_object=1/7`, `stop=1/1`.
+- Completion text digest: `e31e4973e7bb5037` for base and every adapter.
+- Byte-level completion text diffs versus base: `0` for each adapter.
+
+Interpretation: the current LoRA adapters do not affect deterministic greedy
+action completions on this eval slice. The persistent behavior is still
+`turn_by_angle` overuse: expected `turn_by_angle=8`, parsed `turn_by_angle=16`.
+Before spending another long run on GRPO scale, add an adapter-effect sanity
+check such as logit comparison, adapter merge/load verification, or a small
+overfit probe where the adapter must visibly change completions.
+
 Resume status for a future continuation:
 
 - This is no longer a verification-only blocker. Runpod auth works when
@@ -679,13 +715,14 @@ Resume status for a future continuation:
   reward is in place, and reference-tool balancing improves early same-tool
   behavior; the 8-step diagnostic still shows weak exact-action selection and
   persistent `turn_by_angle` fallback; the exact-action bonus ablation did not
-  help on the short comparison; held-out completion-eval planning now exists.
-  Useful next directions are running completion eval on base Qwen and the saved
-  LoRA adapters, collecting more diverse grouped rollouts with stop/arrival and
-  ambiguous grounding examples, auditing whether reference actions are too
-  noisy or too correlated with turns, and then running a 24-step balanced
-  comparison. Keep `--max-completion-length` explicit so smoke and short
-  training jobs cannot spend most of their time generating long completions.
+  help on the short comparison; held-out completion-eval planning and a first
+  base-versus-adapter eval now exist. Useful next directions are adding an
+  adapter-effect sanity check, collecting more diverse grouped rollouts with
+  stop/arrival and ambiguous grounding examples, auditing whether reference
+  actions are too noisy or too correlated with turns, and then running a
+  stronger balanced comparison. Keep `--max-completion-length` explicit so smoke
+  and short training jobs cannot spend most of their time generating long
+  completions.
 
 The fixes needed to make the smoke complete were:
 
