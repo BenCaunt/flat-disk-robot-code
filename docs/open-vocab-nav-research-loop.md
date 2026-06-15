@@ -911,6 +911,51 @@ should either add an action-token-focused loss/eval or run exact-completion
 sampling to verify the adapter actually emits the desired tool call, not merely
 the surrounding response structure.
 
+The exact-completion SFT diagnostic now plans and runs deterministic
+base-disabled versus adapter-enabled generations from an existing
+`qwen_sft_training_job.json`:
+
+```bash
+python -m flatdisk_sim.qwen_sft_completion \
+  --sft-training-job sim/scratch/open_vocab_nav_research_loop/qwen_sft_jobs/arrival_stop_six_sample_sft \
+  --output-dir sim/scratch/open_vocab_nav_research_loop/qwen_sft_completion_checks/arrival_stop_six_sample_sft_trainset_action_recovered_140 \
+  --max-samples 6 \
+  --max-new-tokens 140
+
+python -m flatdisk_sim.qwen_sft_completion run \
+  --job sim/scratch/open_vocab_nav_research_loop/qwen_sft_completion_checks/arrival_stop_six_sample_sft_trainset_action_recovered_140
+```
+
+The generated script loads the same base model and PEFT adapter, generates once
+with `model.disable_adapter()` and once with the adapter enabled, then parses
+the emitted `action` object. The parser intentionally separates strict full JSON
+parsing from tool-call recovery: if a completion begins with a balanced
+`"action": {...}` object but is truncated later in audit/rationale text, the
+tool call still counts while exact JSON/text matches remain false.
+
+RunPod exact-completion result:
+
+- `arrival_stop_six_sample_sft_trainset_action_recovered_140`: six train-set
+  samples, `returncode=0`, all target tools were `visual_servo_object`.
+  Base parsed an action in `6/6`, emitted `visual_servo_object` in `5/6`, and
+  exactly matched the target action in `0/6`. The SFT adapter parsed an action
+  in `6/6`, emitted `visual_servo_object` in `5/6`, and exactly matched the
+  target action in `2/6`. The adapter improved the tool choice on one sample
+  (`turn_by_angle` to `visual_servo_object`) and regressed one sample
+  (`visual_servo_object` to `check_object_grounding`).
+- Artifacts copied locally under
+  `sim/scratch/open_vocab_nav_research_loop/qwen_sft_completion_checks/arrival_stop_six_sample_sft_trainset_action_recovered_140/`:
+  `qwen_sft_completion_result.json`,
+  `qwen_sft_completion_samples.jsonl`, and
+  `qwen_sft_completion_progress.jsonl`.
+
+Interpretation: the exact completion check confirms the SFT adapter can change
+Qwen's generated action, and it improves exact action arguments on this tiny
+train set. It does not yet improve top-level tool choice over base Qwen
+(`5/6` versus `5/6`). The next training step should use an action-focused target
+or loss, and the next eval should use a held-out/diverse slice instead of only
+six accepted visual-servo records.
+
 Resume status for a future continuation:
 
 - This is no longer a verification-only blocker. Runpod auth works when
