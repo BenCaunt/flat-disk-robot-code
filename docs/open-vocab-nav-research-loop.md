@@ -957,6 +957,13 @@ By default it skips tasks whose `notes.prerequisites` are not complete; pass
   The readiness assertion now reports raw policy samples, accepted Qwen SFT
   records, Qwen guard-replacement preferences, DPO handoff records, missing Qwen
   images, and privileged-token scans separately.
+- Use `python -m flatdisk_sim.qwen_sft_training --input <qwen_tool_training>`
+  to plan a tiny teacher-forced Qwen LoRA SFT job from
+  `qwen_sft_messages.jsonl`; use
+  `python -m flatdisk_sim.qwen_sft_training run --job <qwen_sft_training_job.json>`
+  on a GPU worker. This is the preferred next diagnostic after the negative
+  action-likelihood result: first prove one to a few clean action JSON targets
+  can be overfit before launching larger GRPO runs.
 - Use `flatdisk-sim-plan-qwen-dpo-training` after readiness to validate
   `qwen_dpo_messages.jsonl`, generate a `qwen_dpo_training_job.json`, and emit a
   Runpod-oriented TRL script without importing GPU training dependencies in the
