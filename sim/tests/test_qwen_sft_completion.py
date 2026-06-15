@@ -6,6 +6,8 @@ import shlex
 import sys
 
 from flatdisk_sim.qwen_sft_completion import (
+    _extract_action_from_text,
+    _parse_jsonish,
     module_main,
     plan_qwen_sft_completion_check,
     run_qwen_sft_completion_check,
@@ -128,6 +130,24 @@ def test_plan_qwen_sft_completion_uses_image_paths_before_images(tmp_path: Path)
 
     assert job["status"] == "ready"
     assert job["dataset"]["missing_image_count"] == 0
+
+
+def test_qwen_sft_completion_extracts_action_from_truncated_completion() -> None:
+    completion = (
+        '{"action": {"args": {"duration_s": 2.0, "prompt": "white toilet"}, '
+        '"tool": "visual_servo_object"}, "grounding_audit": {"check_overlay_evidence": "truncated'
+    )
+
+    payload, parse_status = _parse_jsonish(completion)
+    action, action_status = _extract_action_from_text(completion, payload)
+
+    assert payload is None
+    assert parse_status == "malformed"
+    assert action_status == "balanced_action_object"
+    assert action == {
+        "args": {"duration_s": 2.0, "prompt": "white toilet"},
+        "tool": "visual_servo_object",
+    }
 
 
 def test_plan_qwen_sft_completion_blocks_missing_adapter_config(tmp_path: Path) -> None:

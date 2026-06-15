@@ -317,7 +317,8 @@ def _assistant_target(messages: Any) -> str:
 
 
 def _target_action_tool(target: str) -> str | None:
-    action = _extract_action(_parse_jsonish(target)[0])
+    payload, _parse_status = _parse_jsonish(target)
+    action, _action_status = _extract_action_from_text(target, payload)
     if not isinstance(action, dict):
         return None
     tool = action.get("tool")
@@ -359,6 +360,60 @@ def _extract_action(payload: Any) -> dict[str, Any] | None:
         return None
     action = payload.get("action")
     return action if isinstance(action, dict) else None
+
+
+def _extract_action_from_text(text: str, payload: Any) -> tuple[dict[str, Any] | None, str]:
+    action = _extract_action(payload)
+    if action is not None:
+        return action, "payload"
+    action_object, status = _extract_balanced_object_after_key(text, "action")
+    return action_object, status
+
+
+def _extract_balanced_object_after_key(text: str, key: str) -> tuple[dict[str, Any] | None, str]:
+    cleaned = _strip_code_fence(str(text or ""))
+    key_index = cleaned.find(f'"{key}"')
+    if key_index < 0:
+        return None, "missing_action_key"
+    colon_index = cleaned.find(":", key_index + len(key) + 2)
+    if colon_index < 0:
+        return None, "missing_action_colon"
+    start = cleaned.find("{", colon_index + 1)
+    if start < 0:
+        return None, "missing_action_object"
+    end = _balanced_object_end(cleaned, start)
+    if end is None:
+        return None, "truncated_action_object"
+    try:
+        payload = json.loads(cleaned[start : end + 1])
+    except json.JSONDecodeError:
+        return None, "malformed_action_object"
+    return payload if isinstance(payload, dict) else None, "balanced_action_object"
+
+
+def _balanced_object_end(text: str, start: int) -> int | None:
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+    return None
 
 
 def _forbidden_tokens(payloads: Iterable[Any]) -> list[str]:
@@ -738,6 +793,59 @@ def extract_action(payload: object | None) -> dict | None:
     return action if isinstance(action, dict) else None
 
 
+def balanced_object_end(text: str, start: int) -> int | None:
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+    return None
+
+
+def extract_balanced_object_after_key(text: str, key: str) -> tuple[dict | None, str]:
+    cleaned, _fenced = strip_code_fence(text)
+    key_index = cleaned.find(f'"{key}"')
+    if key_index < 0:
+        return None, "missing_action_key"
+    colon_index = cleaned.find(":", key_index + len(key) + 2)
+    if colon_index < 0:
+        return None, "missing_action_colon"
+    start = cleaned.find("{", colon_index + 1)
+    if start < 0:
+        return None, "missing_action_object"
+    end = balanced_object_end(cleaned, start)
+    if end is None:
+        return None, "truncated_action_object"
+    try:
+        payload = json.loads(cleaned[start : end + 1])
+    except json.JSONDecodeError:
+        return None, "malformed_action_object"
+    return payload if isinstance(payload, dict) else None, "balanced_action_object"
+
+
+def extract_action_from_text(text: str, payload: object | None) -> tuple[dict | None, str]:
+    action = extract_action(payload)
+    if action is not None:
+        return action, "payload"
+    return extract_balanced_object_after_key(text, "action")
+
+
 def action_tool(action: dict | None) -> str | None:
     if not isinstance(action, dict):
         return None
@@ -803,7 +911,7 @@ def generate_completion(processor, model, inputs: dict, *, max_new_tokens: int) 
 def score_record(processor, model, record: dict, metadata: dict, *, max_new_tokens: int) -> dict:
     inputs, input_meta, target_text = prepare_generation_inputs(processor, model, record)
     target_payload, target_parse_status, target_fenced = parse_jsonish(target_text)
-    target_action = extract_action(target_payload)
+    target_action, target_action_parse_status = extract_action_from_text(target_text, target_payload)
     target_tool = action_tool(target_action)
     with torch.inference_mode():
         with model.disable_adapter():
@@ -815,8 +923,8 @@ def score_record(processor, model, record: dict, metadata: dict, *, max_new_toke
         )
     base_payload, base_parse_status, base_fenced = parse_jsonish(base_completion)
     adapter_payload, adapter_parse_status, adapter_fenced = parse_jsonish(adapter_completion)
-    base_action = extract_action(base_payload)
-    adapter_action = extract_action(adapter_payload)
+    base_action, base_action_parse_status = extract_action_from_text(base_completion, base_payload)
+    adapter_action, adapter_action_parse_status = extract_action_from_text(adapter_completion, adapter_payload)
     base_tool = action_tool(base_action)
     adapter_tool = action_tool(adapter_action)
     return {
@@ -826,6 +934,7 @@ def score_record(processor, model, record: dict, metadata: dict, *, max_new_toke
         "source_policy_step_id": record.get("source_policy_step_id"),
         "target_text": target_text,
         "target_parse_status": target_parse_status,
+        "target_action_parse_status": target_action_parse_status,
         "target_was_fenced": target_fenced,
         "target_parsed_json": target_payload,
         "target_parsed_action": target_action,
@@ -838,6 +947,8 @@ def score_record(processor, model, record: dict, metadata: dict, *, max_new_toke
         "adapter_completion_char_count": len(adapter_completion),
         "base_completion_parse_status": base_parse_status,
         "adapter_completion_parse_status": adapter_parse_status,
+        "base_action_parse_status": base_action_parse_status,
+        "adapter_action_parse_status": adapter_action_parse_status,
         "base_completion_was_fenced": base_fenced,
         "adapter_completion_was_fenced": adapter_fenced,
         "base_parsed_json": base_payload,
