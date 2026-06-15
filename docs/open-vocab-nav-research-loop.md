@@ -710,12 +710,15 @@ eval slice:
 - `flatdisk-sim-run-qwen-grpo-adapter-effect` runs or dry-runs the planned
   check and writes `qwen_grpo_adapter_effect_result.json`.
 - The planner copies the same prompt/image records used by completion eval into
-  `qwen_grpo_adapter_effect_dataset.jsonl`; it checks image existence, prompt
-  sidecar leaks, and PEFT adapter directory completeness before launch.
+  `qwen_grpo_adapter_effect_dataset.jsonl`, optionally with
+  `--max-samples`, `--sample-offset`, and `--sample-stride`; it checks image
+  existence, prompt sidecar leaks, and PEFT adapter directory completeness
+  before launch.
 - The generated `check_qwen_grpo_adapter_effect.py` loads base Qwen once,
   wraps it with `PeftModel.from_pretrained(...)`, compares next-token logits
   with `model.disable_adapter()` versus adapter-enabled inference on the same
-  processor inputs, and writes `adapter_effect_samples.jsonl`.
+  processor inputs, and appends rows to `adapter_effect_samples.jsonl` after
+  each sample.
 - Metrics include nonzero logit-delta rate, max/mean absolute logit delta,
   L2 logit delta, KL in both directions, top-1 changed rate, top-k Jaccard,
   and per-expected-tool counts. Expected tools are attached only after

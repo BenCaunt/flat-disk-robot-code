@@ -456,10 +456,19 @@ def plan_qwen_grpo_adapter_effect_check(
     output_dir: Path,
     adapter_path: Path,
     model_id: str | None = None,
+    max_samples: int | None = None,
+    sample_offset: int = 0,
+    sample_stride: int = 1,
     top_k: int = 5,
     delta_threshold: float = 1e-6,
     require_existing_images: bool = True,
 ) -> dict[str, Any]:
+    if sample_offset < 0:
+        raise ValueError("sample_offset must be non-negative")
+    if sample_stride < 1:
+        raise ValueError("sample_stride must be at least 1")
+    if max_samples is not None and max_samples < 1:
+        raise ValueError("max_samples must be positive when set")
     if top_k < 1:
         raise ValueError("top_k must be positive")
     if delta_threshold < 0.0:
@@ -472,12 +481,18 @@ def plan_qwen_grpo_adapter_effect_check(
         relative_to=completion_eval_job_path.parent,
     )
     source_records = _read_jsonl_if_exists(source_dataset_path)
+    effect_records = _select_eval_records(
+        source_records,
+        max_samples=max_samples,
+        sample_offset=sample_offset,
+        sample_stride=sample_stride,
+    )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     dataset_path = output_dir / "qwen_grpo_adapter_effect_dataset.jsonl"
     script_path = output_dir / "check_qwen_grpo_adapter_effect.py"
     effect_log_path = output_dir / "adapter_effect_samples.jsonl"
-    _write_jsonl(dataset_path, source_records)
+    _write_jsonl(dataset_path, effect_records)
     _write_adapter_effect_script(script_path)
 
     resolved_model_id = model_id or str(completion_eval_job.get("model_id") or DEFAULT_MODEL_ID)
@@ -494,7 +509,8 @@ def plan_qwen_grpo_adapter_effect_check(
     validation = _validate_adapter_effect_job_inputs(
         completion_eval_job,
         dataset_path=source_dataset_path,
-        eval_records=source_records,
+        source_record_count=len(source_records),
+        eval_records=effect_records,
         adapter_path=adapter_path,
         require_existing_images=require_existing_images,
     )
@@ -521,6 +537,9 @@ def plan_qwen_grpo_adapter_effect_check(
         "launch_argv": launch_argv,
         "launch_command": _argv_to_command(launch_argv),
         "adapter_effect_args": {
+            "max_samples": max_samples,
+            "sample_offset": sample_offset,
+            "sample_stride": sample_stride,
             "top_k": top_k,
             "delta_threshold": delta_threshold,
         },
@@ -1083,6 +1102,7 @@ def _validate_adapter_effect_job_inputs(
     completion_eval_job: dict[str, Any],
     *,
     dataset_path: Path | None,
+    source_record_count: int,
     eval_records: list[dict[str, Any]],
     adapter_path: Path,
     require_existing_images: bool,
@@ -1134,6 +1154,7 @@ def _validate_adapter_effect_job_inputs(
         "blockers": blockers,
         "warnings": warnings,
         "dataset": {
+            "source_sample_count": source_record_count,
             "eval_sample_count": len(eval_records),
             "image_reference_count": sum(
                 len(record.get("image_paths", []))
@@ -2396,6 +2417,13 @@ def write_effect_log(path: Path, rows: list[dict]) -> None:
             handle.write(json.dumps(row, sort_keys=True, default=str) + "\\n")
 
 
+def append_effect_log(path: Path, row: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, sort_keys=True, default=str) + "\\n")
+        handle.flush()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", type=Path, required=True)
@@ -2422,8 +2450,10 @@ def main() -> None:
     model.eval()
     metadata = adapter_metadata(model, args.adapter_path)
     records = read_jsonl(args.dataset)
-    rows = []
     logged_at = strftime("%Y-%m-%dT%H:%M:%SZ", gmtime())
+    args.adapter_effect_log.parent.mkdir(parents=True, exist_ok=True)
+    args.adapter_effect_log.write_text("", encoding="utf-8")
+    sample_count = 0
     for index, record in enumerate(records):
         expected_action = parse_reference_action(record.get("reference_action_canonical"))
         row = {
@@ -2438,13 +2468,13 @@ def main() -> None:
             "adapter_metadata": metadata,
         }
         row.update(compare_prompt_logits(processor, model, record, args))
-        rows.append(row)
-    write_effect_log(args.adapter_effect_log, rows)
+        append_effect_log(args.adapter_effect_log, row)
+        sample_count += 1
     print(
         json.dumps(
             {
                 "status": "complete",
-                "sample_count": len(rows),
+                "sample_count": sample_count,
                 "adapter_effect_log": str(args.adapter_effect_log),
                 "adapter_metadata": metadata,
             },
@@ -2694,11 +2724,20 @@ def parse_adapter_effect_plan_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--adapter-path", type=Path, required=True)
     parser.add_argument("--model-id", default=None)
+    parser.add_argument("--max-samples", type=int, default=None)
+    parser.add_argument("--sample-offset", type=int, default=0)
+    parser.add_argument("--sample-stride", type=int, default=1)
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--delta-threshold", type=float, default=1e-6)
     parser.add_argument("--allow-missing-images", action="store_true")
     parser.add_argument("--fail-on-not-ready", action="store_true")
     args = parser.parse_args()
+    if args.sample_offset < 0:
+        parser.error("--sample-offset must be non-negative")
+    if args.sample_stride < 1:
+        parser.error("--sample-stride must be at least 1")
+    if args.max_samples is not None and args.max_samples < 1:
+        parser.error("--max-samples must be positive when set")
     if args.top_k < 1:
         parser.error("--top-k must be positive")
     if args.delta_threshold < 0.0:
@@ -2713,6 +2752,9 @@ def adapter_effect_plan_main() -> int:
         output_dir=args.output_dir,
         adapter_path=args.adapter_path,
         model_id=args.model_id,
+        max_samples=args.max_samples,
+        sample_offset=args.sample_offset,
+        sample_stride=args.sample_stride,
         top_k=args.top_k,
         delta_threshold=args.delta_threshold,
         require_existing_images=not args.allow_missing_images,

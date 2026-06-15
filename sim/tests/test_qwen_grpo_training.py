@@ -851,8 +851,6 @@ def test_plan_qwen_grpo_adapter_effect_check_writes_prompt_only_job(tmp_path: Pa
     qwen_grpo_job.plan_qwen_grpo_completion_eval(
         tmp_path / "grpo_job",
         output_dir=tmp_path / "completion_eval",
-        max_samples=1,
-        sample_offset=1,
     )
     adapter_path = _write_fake_adapter(tmp_path / "adapter")
 
@@ -860,6 +858,8 @@ def test_plan_qwen_grpo_adapter_effect_check_writes_prompt_only_job(tmp_path: Pa
         tmp_path / "completion_eval",
         output_dir=tmp_path / "adapter_effect",
         adapter_path=adapter_path,
+        max_samples=1,
+        sample_offset=1,
         top_k=7,
         delta_threshold=1e-5,
     )
@@ -868,6 +868,7 @@ def test_plan_qwen_grpo_adapter_effect_check_writes_prompt_only_job(tmp_path: Pa
     assert job["status"] == "ready"
     assert job["evaluation_method"] == "qwen_peft_adapter_effect_logit_check"
     assert job["source_completion_eval_job"].endswith("qwen_grpo_completion_eval_job.json")
+    assert job["dataset"]["source_sample_count"] == 2
     assert job["dataset"]["eval_sample_count"] == 1
     assert job["dataset"]["image_reference_count"] == 1
     assert job["dataset"]["missing_image_count"] == 0
@@ -875,7 +876,13 @@ def test_plan_qwen_grpo_adapter_effect_check_writes_prompt_only_job(tmp_path: Pa
     assert job["dataset"]["forbidden_model_token_hits"] == []
     assert job["dataset"]["adapter_path_blockers"] == []
     assert job["dataset"]["reference_action_tool_counts"] == {"drive_straight": 1}
-    assert job["adapter_effect_args"] == {"delta_threshold": 1e-05, "top_k": 7}
+    assert job["adapter_effect_args"] == {
+        "delta_threshold": 1e-05,
+        "max_samples": 1,
+        "sample_offset": 1,
+        "sample_stride": 1,
+        "top_k": 7,
+    }
     assert job["audit"]["reference_actions_used_only_for_reporting"] is True
     assert job["audit"]["adapter_compared_by_disable_enable_on_same_peft_model"] is True
     assert job["adapter_path"] == str(adapter_path)
