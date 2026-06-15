@@ -743,6 +743,33 @@ dry-run also succeeded, and the generated script passed `py_compile`. Unit
 coverage for the planner, blockers, dry-run, fake execution, prompt-leak
 boundary, and metric aggregation is in `sim/tests/test_qwen_grpo_training.py`.
 
+RunPod smoke on `lora8_toolbalanced`:
+
+- Remote checkout:
+  `/workspace/flat-disk-robot-code-eval-20260615-qwen-completions` at commit
+  `0839be9`.
+- Adapter:
+  `/workspace/flat-disk-robot-code-train-20260614-grpo-toolbalanced8/sim/scratch/open_vocab_nav_research_loop/qwen_grpo_jobs/bathroom_cross_run_lora_8step_cap48_tool_balanced/adapter`.
+- Local copied artifacts:
+  `sim/scratch/open_vocab_nav_research_loop/qwen_grpo_adapter_effect_checks/stride5_24_lora8_toolbalanced_remote_smoke2`.
+- Slice: `--max-samples 2 --top-k 5`, expected tools
+  `check_object_grounding=1`, `stop=1`.
+- Result: `2/2` samples had nonzero logit deltas; top-1 token changed on
+  `0/2` samples.
+- Aggregate metrics: mean max-absolute logit delta `0.487304688`,
+  max max-absolute delta `0.5625`, mean absolute logit delta `0.075996335`,
+  mean L2 delta `37.379156112`, mean KL adapter-from-base `0.000000925`,
+  mean top-k Jaccard `0.833333333`.
+- The active PEFT adapter name was `default`, with `21,823,488` adapter
+  parameters. Both checked prompts still had the same top-1 next token
+  (`{"`) with and without the adapter.
+
+Interpretation: adapter loading is working and the lora8 adapter measurably
+changes logits, but the changes are too small or too off-target to change
+greedy action completions on this small smoke. The next training/debug step
+should focus on whether the learning signal shifts action/tool tokens enough
+under the response contract, not on PEFT path loading.
+
 Resume status for a future continuation:
 
 - This is no longer a verification-only blocker. Runpod auth works when
