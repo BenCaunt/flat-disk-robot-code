@@ -1000,6 +1000,48 @@ success. The next experiment should evaluate compact action-only SFT on a
 held-out/diverse slice with multiple tools, then use that target format for
 DPO/GRPO or larger grouped rollout training.
 
+Held-out action-only SFT transfer check:
+
+- Commit `bb97c27` added dataset-driven GRPO completion-eval planning, so the
+  same raw Qwen action dataset can be evaluated without requiring a completed
+  GRPO training job. The CLI now accepts `--dataset-jsonl` and can exclude
+  known train sample ids with `--exclude-sample-ids-jsonl`.
+- The heldout slice used
+  `qwen_grpo_action_likelihood_checks/stride5_24_lora8_toolbalanced_remote_mathfix_24/qwen_grpo_action_likelihood_dataset.jsonl`.
+  It contains 24 records; excluding the two records overlapping the six-sample
+  action-only SFT train set leaves 22 records with expected tools
+  `check_object_grounding=8`, `turn_by_angle=8`, `visual_servo_object=5`, and
+  `stop=1`.
+- Teacher-forced action likelihood on RunPod completed with `22/22` tool spans
+  found, `20/22` improved target mean logprob, `20/22` improved tool-token mean
+  logprob, target mean logprob delta `+0.028169299`, and tool-token mean
+  logprob delta `+0.020476193`. By expected tool, target deltas were
+  `check_object_grounding=-0.003038803`, `turn_by_angle=+0.017606266`,
+  `visual_servo_object=+0.093860339`, and `stop=+0.033883192`; the grounding
+  class is weak/mixed.
+- Deterministic exact completion with the action-only SFT adapter completed
+  with `22/22` parseable compact actions, `14/22` tool matches, and `6/22`
+  exact reference actions. Parsed tool counts were `turn_by_angle=15`,
+  `check_object_grounding=4`, `visual_servo_object=2`, and `stop=1`, so the
+  policy still overpredicts turns on the diverse slice.
+- The base Qwen exact-completion comparison on the same heldout22 slice tied the
+  adapter on every aggregate metric: `22/22` parseable compact actions,
+  `14/22` tool matches, and `6/22` exact reference actions. Row-level
+  comparison found `21/22` identical completions; the one different completion
+  had the same reward and did not change the aggregate result.
+- Artifacts copied locally under
+  `sim/scratch/open_vocab_nav_research_loop/qwen_grpo_completion_evals/stride5_24/action_only_sft_heldout22/`
+  and
+  `sim/scratch/open_vocab_nav_research_loop/qwen_grpo_completion_evals/stride5_24/base_heldout22/`.
+
+Interpretation: action-only SFT gives real off-train teacher-forced likelihood
+movement, but this six-sample adapter does not yet move greedy held-out policy
+behavior. Do not scale the exact same narrow SFT recipe as if it were a policy
+win. The next useful training run should use a broader compact-action,
+multi-tool dataset and paired base/adapter completion eval in one process, so
+we can cheaply separate token-likelihood movement from actual action-choice
+changes.
+
 Resume status for a future continuation:
 
 - This is no longer a verification-only blocker. Runpod auth works when
