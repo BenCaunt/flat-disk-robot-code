@@ -21,6 +21,9 @@ from .qwen_tool_training import DEFAULT_FORBIDDEN_MODEL_TOKENS
 QWEN_GRPO_TRAINING_JOB_SCHEMA = "flatdisk.qwen_grpo_training_job.v1"
 QWEN_GRPO_TRAINING_RESULT_SCHEMA = "flatdisk.qwen_grpo_training_result.v1"
 QWEN_GRPO_TRL_SAMPLE_SCHEMA = "flatdisk.qwen_grpo_trl_prompt_sample.v1"
+QWEN_GRPO_COMPLETION_EVAL_JOB_SCHEMA = "flatdisk.qwen_grpo_completion_eval_job.v1"
+QWEN_GRPO_COMPLETION_EVAL_RESULT_SCHEMA = "flatdisk.qwen_grpo_completion_eval_result.v1"
+DEFAULT_EVAL_REQUIRED_PACKAGES = ["peft", "pillow", "torch", "torchvision", "transformers"]
 GRPO_RESPONSE_CONTRACT = (
     "GRPO_RESPONSE_CONTRACT\n"
     "For this training action response, output only one compact JSON object and stop immediately after it. "
@@ -247,6 +250,204 @@ def run_qwen_grpo_training_job(
     return result
 
 
+def plan_qwen_grpo_completion_eval(
+    training_job_input: Path,
+    *,
+    output_dir: Path,
+    model_id: str | None = None,
+    adapter_path: Path | None = None,
+    max_samples: int | None = None,
+    sample_offset: int = 0,
+    sample_stride: int = 1,
+    max_new_tokens: int = 96,
+    temperature: float = 0.0,
+    top_p: float = 1.0,
+    zero_reward_exact_action_bonus: float | None = None,
+    require_existing_images: bool = True,
+) -> dict[str, Any]:
+    if sample_offset < 0:
+        raise ValueError("sample_offset must be non-negative")
+    if sample_stride < 1:
+        raise ValueError("sample_stride must be at least 1")
+    if max_samples is not None and max_samples < 1:
+        raise ValueError("max_samples must be positive when set")
+    if max_new_tokens < 1:
+        raise ValueError("max_new_tokens must be positive")
+    if temperature < 0.0:
+        raise ValueError("temperature must be non-negative")
+    if top_p <= 0.0 or top_p > 1.0:
+        raise ValueError("top_p must be in (0, 1]")
+
+    training_job_path = _resolve_qwen_grpo_job(training_job_input)
+    training_job = json.loads(training_job_path.read_text(encoding="utf-8"))
+    dataset_path = _job_path(training_job, "qwen_grpo_trl_dataset_jsonl", relative_to=training_job_path.parent)
+    source_records = _read_jsonl_if_exists(dataset_path)
+    eval_records = _select_eval_records(
+        source_records,
+        max_samples=max_samples,
+        sample_offset=sample_offset,
+        sample_stride=sample_stride,
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    eval_dataset_path = output_dir / "qwen_grpo_completion_eval_dataset.jsonl"
+    eval_script_path = output_dir / "eval_qwen_grpo_completions.py"
+    completion_log_path = output_dir / "completion_eval_samples.jsonl"
+    _write_jsonl(eval_dataset_path, eval_records)
+    _write_eval_script(eval_script_path)
+    training_args = training_job.get("training_args") if isinstance(training_job.get("training_args"), dict) else {}
+    resolved_model_id = model_id or str(training_job.get("model_id") or DEFAULT_MODEL_ID)
+    resolved_bonus = (
+        float(zero_reward_exact_action_bonus)
+        if zero_reward_exact_action_bonus is not None
+        else float(_optional_float(training_args.get("zero_reward_exact_action_bonus")) or 0.0)
+    )
+    if resolved_bonus < 0.0:
+        raise ValueError("zero_reward_exact_action_bonus must be non-negative")
+    launch_argv = _eval_launch_argv(
+        eval_script_path=eval_script_path,
+        dataset_path=eval_dataset_path,
+        model_id=resolved_model_id,
+        output_dir=output_dir,
+        completion_log_path=completion_log_path,
+        adapter_path=adapter_path,
+        max_new_tokens=max_new_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        zero_reward_exact_action_bonus=resolved_bonus,
+    )
+    validation = _validate_completion_eval_job_inputs(
+        training_job,
+        dataset_path=dataset_path,
+        source_records=source_records,
+        eval_records=eval_records,
+        require_existing_images=require_existing_images,
+    )
+    if adapter_path is not None and not adapter_path.exists():
+        validation["blockers"].append(f"missing adapter_path: {adapter_path}")
+    job = {
+        "schema": QWEN_GRPO_COMPLETION_EVAL_JOB_SCHEMA,
+        "created_at": strftime("%Y-%m-%dT%H:%M:%SZ", gmtime()),
+        "status": "ready" if not validation["blockers"] else "not_ready",
+        "blockers": validation["blockers"],
+        "warnings": validation["warnings"],
+        "source_training_job": str(training_job_path),
+        "source_training_job_schema": training_job.get("schema"),
+        "source_training_job_status": training_job.get("status"),
+        "source_dataset_jsonl": str(dataset_path) if dataset_path else "",
+        "qwen_grpo_completion_eval_dataset_jsonl": str(eval_dataset_path),
+        "output_dir": str(output_dir),
+        "eval_script": str(eval_script_path),
+        "eval_script_sha256": _sha256_file(eval_script_path),
+        "completion_log_jsonl": str(completion_log_path),
+        "result_path": str(output_dir / "qwen_grpo_completion_eval_result.json"),
+        "evaluation_method": "heldout_qwen_completion_eval",
+        "model_id": resolved_model_id,
+        "adapter_path": str(adapter_path) if adapter_path else "",
+        "required_packages": DEFAULT_EVAL_REQUIRED_PACKAGES,
+        "launch_argv": launch_argv,
+        "launch_command": _argv_to_command(launch_argv),
+        "eval_args": {
+            "max_samples": max_samples,
+            "sample_offset": sample_offset,
+            "sample_stride": sample_stride,
+            "max_new_tokens": max_new_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "zero_reward_exact_action_bonus": resolved_bonus,
+        },
+        "dataset": validation["dataset"],
+        "audit": {
+            "prompt_only_dataset": True,
+            "reference_actions_are_sidecar_columns": True,
+            "reward_labels_excluded_from_messages": True,
+            "evaluation_uses_reference_actions_only_for_scoring": True,
+            "online_environment_reward": False,
+            "require_existing_images": require_existing_images,
+            "adapter_optional": True,
+        },
+    }
+    (output_dir / "qwen_grpo_completion_eval_job.json").write_text(
+        json.dumps(job, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return job
+
+
+def run_qwen_grpo_completion_eval_job(
+    job_input: Path,
+    *,
+    result_dir: Path | None = None,
+    dry_run: bool = False,
+    check_dependencies: bool = True,
+    timeout_s: float | None = None,
+    launch_command: str | None = None,
+    tail_chars: int = 4000,
+) -> dict[str, Any]:
+    job_path = _resolve_qwen_grpo_completion_eval_job(job_input)
+    job = json.loads(job_path.read_text(encoding="utf-8"))
+    result_dir = result_dir or Path(str(job.get("output_dir") or job_path.parent))
+    result_dir.mkdir(parents=True, exist_ok=True)
+    result_path = result_dir / "qwen_grpo_completion_eval_result.json"
+    launch_argv = _job_launch_argv(job, launch_command_override=launch_command)
+    blockers = _completion_eval_job_blockers(job, job_path=job_path, check_dependencies=check_dependencies)
+    if not launch_argv:
+        blockers.append("missing launch_command")
+    result: dict[str, Any] = {
+        "schema": QWEN_GRPO_COMPLETION_EVAL_RESULT_SCHEMA,
+        "created_at": strftime("%Y-%m-%dT%H:%M:%SZ", gmtime()),
+        "completed_at": None,
+        "status": "not_ready",
+        "dry_run": dry_run,
+        "job_manifest": str(job_path),
+        "result_path": str(result_path),
+        "model_id": job.get("model_id"),
+        "adapter_path": job.get("adapter_path"),
+        "sample_count": (job.get("dataset") or {}).get("eval_sample_count"),
+        "launch_command": _argv_to_command(launch_argv),
+        "launch_argv": launch_argv,
+        "returncode": None,
+        "stdout_tail": "",
+        "stderr_tail": "",
+        "duration_s": None,
+        "blockers": blockers,
+        "dependency_check": _dependency_check_payload(job, enabled=check_dependencies),
+    }
+    if blockers:
+        result["completed_at"] = strftime("%Y-%m-%dT%H:%M:%SZ", gmtime())
+        _write_result(result_path, result)
+        return result
+    if dry_run:
+        result["status"] = "dry_run"
+        result["completed_at"] = strftime("%Y-%m-%dT%H:%M:%SZ", gmtime())
+        _write_result(result_path, result)
+        return result
+
+    start = monotonic()
+    try:
+        completed = subprocess.run(
+            launch_argv,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=timeout_s,
+        )
+        result["returncode"] = completed.returncode
+        result["stdout_tail"] = _tail(completed.stdout, tail_chars)
+        result["stderr_tail"] = _tail(completed.stderr, tail_chars)
+        result["status"] = "complete" if completed.returncode == 0 else "failed"
+    except subprocess.TimeoutExpired as exc:
+        result["status"] = "failed"
+        result["blockers"] = [f"completion eval command timed out after {timeout_s} second(s)"]
+        result["stdout_tail"] = _tail(_decode_timeout_output(exc.stdout), tail_chars)
+        result["stderr_tail"] = _tail(_decode_timeout_output(exc.stderr), tail_chars)
+    finally:
+        result["duration_s"] = round(monotonic() - start, 3)
+        result["completed_at"] = strftime("%Y-%m-%dT%H:%M:%SZ", gmtime())
+        _attach_completion_log_summary(result, job, job_path=job_path)
+    _write_result(result_path, result)
+    return result
+
+
 def _attach_completion_log_summary(result: dict[str, Any], job: dict[str, Any], *, job_path: Path) -> None:
     completion_log = _job_path(job, "completion_log_jsonl", relative_to=job_path.parent)
     result["completion_log_jsonl"] = str(completion_log) if completion_log else ""
@@ -271,6 +472,10 @@ def _completion_log_metrics(path: Path) -> dict[str, Any]:
     positive_non_reference_count = 0
     tool_match_count = 0
     arg_match_fractions = []
+    expected_tool_counts: Counter[str] = Counter()
+    parsed_tool_counts: Counter[str] = Counter()
+    exact_by_expected_tool: Counter[str] = Counter()
+    tool_match_by_expected_tool: Counter[str] = Counter()
     for record in records:
         parsed_action = record.get("parsed_action") if isinstance(record.get("parsed_action"), dict) else {}
         expected_action = (
@@ -278,6 +483,10 @@ def _completion_log_metrics(path: Path) -> dict[str, Any]:
             if isinstance(record.get("expected_action"), dict)
             else _reference_action_from_canonical(record.get("reference_action_canonical"))
         )
+        expected_tool = _action_tool(expected_action) or "unknown"
+        parsed_tool = _action_tool(parsed_action) or "unparsed"
+        expected_tool_counts[expected_tool] += 1
+        parsed_tool_counts[parsed_tool] += 1
         if parsed_action:
             parsed_action_count += 1
         tool_match = (
@@ -287,6 +496,7 @@ def _completion_log_metrics(path: Path) -> dict[str, Any]:
         )
         if parsed_action and tool_match:
             tool_match_count += 1
+            tool_match_by_expected_tool[expected_tool] += 1
         arg_match_fraction = _optional_float(record.get("arg_match_fraction"))
         if arg_match_fraction is None:
             arg_match_fraction = (
@@ -296,6 +506,7 @@ def _completion_log_metrics(path: Path) -> dict[str, Any]:
         exact_reference = _canonical_json(parsed_action) == record.get("reference_action_canonical")
         if exact_reference:
             exact_reference_count += 1
+            exact_by_expected_tool[expected_tool] += 1
         elif _optional_float(record.get("reward")) and float(record["reward"]) > 0:
             positive_non_reference_count += 1
     return {
@@ -316,6 +527,10 @@ def _completion_log_metrics(path: Path) -> dict[str, Any]:
         "mean_completion_chars": round(sum(len(text) for text in completion_texts) / len(completion_texts), 3)
         if completion_texts
         else 0.0,
+        "expected_tool_counts": dict(sorted(expected_tool_counts.items())),
+        "parsed_tool_counts": dict(sorted(parsed_tool_counts.items())),
+        "exact_reference_action_count_by_expected_tool": dict(sorted(exact_by_expected_tool.items())),
+        "tool_match_count_by_expected_tool": dict(sorted(tool_match_by_expected_tool.items())),
     }
 
 
@@ -539,6 +754,85 @@ def _validate_grpo_job_inputs(
     }
 
 
+def _select_eval_records(
+    records: list[dict[str, Any]],
+    *,
+    max_samples: int | None,
+    sample_offset: int,
+    sample_stride: int,
+) -> list[dict[str, Any]]:
+    selected = [record for index, record in enumerate(records) if index >= sample_offset and (index - sample_offset) % sample_stride == 0]
+    return selected[:max_samples] if max_samples is not None else selected
+
+
+def _validate_completion_eval_job_inputs(
+    training_job: dict[str, Any],
+    *,
+    dataset_path: Path | None,
+    source_records: list[dict[str, Any]],
+    eval_records: list[dict[str, Any]],
+    require_existing_images: bool,
+) -> dict[str, Any]:
+    blockers: list[str] = []
+    warnings: list[str] = []
+    if training_job.get("schema") != QWEN_GRPO_TRAINING_JOB_SCHEMA:
+        blockers.append(f"unexpected source training job schema: {training_job.get('schema')}")
+    if training_job.get("status") != "ready":
+        blockers.append(f"source training job is not ready: {training_job.get('status')}")
+    if dataset_path is None or not dataset_path.exists():
+        blockers.append(f"missing source qwen_grpo_trl_dataset_jsonl: {training_job.get('qwen_grpo_trl_dataset_jsonl')}")
+    if not source_records:
+        blockers.append("source GRPO TRL dataset contains no prompt samples")
+    if not eval_records:
+        blockers.append("completion eval dataset contains no prompt samples")
+
+    missing_images = sorted(
+        {
+            str(path)
+            for record in eval_records
+            for path in record.get("image_paths", [])
+            if not Path(str(path)).exists()
+        }
+    )
+    malformed_count = sum(
+        1
+        for record in eval_records
+        if not isinstance(record.get("prompt_messages") or record.get("prompt"), list)
+        or not isinstance(record.get("reference_action_json"), dict)
+        or not record.get("reference_action_canonical")
+    )
+    forbidden_hits = _forbidden_prompt_message_hits(eval_records)
+    sidecar_leak_hits = _sidecar_prompt_leak_hits(eval_records)
+    if malformed_count:
+        blockers.append(f"{malformed_count} completion eval sample(s) are malformed")
+    if require_existing_images and missing_images:
+        blockers.append(f"{len(missing_images)} completion eval image reference(s) are missing")
+    elif missing_images:
+        warnings.append(f"{len(missing_images)} completion eval image reference(s) are missing")
+    if forbidden_hits:
+        blockers.append("completion eval prompt messages contain forbidden privileged token(s): " + ", ".join(forbidden_hits))
+    if sidecar_leak_hits:
+        blockers.append("completion eval prompt messages contain scoring sidecar token(s): " + ", ".join(sidecar_leak_hits))
+    return {
+        "blockers": blockers,
+        "warnings": warnings,
+        "dataset": {
+            "source_sample_count": len(source_records),
+            "eval_sample_count": len(eval_records),
+            "image_reference_count": sum(
+                len(record.get("image_paths", []))
+                for record in eval_records
+                if isinstance(record.get("image_paths"), list)
+            ),
+            "missing_image_count": len(missing_images),
+            "missing_images": missing_images,
+            "forbidden_model_token_hits": forbidden_hits,
+            "sidecar_prompt_leak_hits": sidecar_leak_hits,
+            "reference_action_tool_counts": _grpo_dataset_action_summary(eval_records)["reference_action_tool_counts"],
+        },
+    }
+
+
 def _resolve_qwen_grpo_manifest(input_path: Path) -> Path:
     path = input_path.expanduser()
     if path.is_file() and path.name == "qwen_grpo_training_manifest.json":
@@ -565,6 +859,20 @@ def _resolve_qwen_grpo_job(job_input: Path) -> Path:
         if candidate.exists():
             return candidate
     raise FileNotFoundError(f"could not find qwen_grpo_training_job.json under {job_input}")
+
+
+def _resolve_qwen_grpo_completion_eval_job(job_input: Path) -> Path:
+    path = job_input.expanduser()
+    if path.is_file() and path.name == "qwen_grpo_completion_eval_job.json":
+        return path
+    candidates = [
+        path / "qwen_grpo_completion_eval_job.json",
+        path / "qwen_grpo_completion_eval" / "qwen_grpo_completion_eval_job.json",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(f"could not find qwen_grpo_completion_eval_job.json under {job_input}")
 
 
 def _resolve_manifest_path(manifest: dict[str, Any], key: str) -> Path | None:
@@ -620,6 +928,35 @@ def _training_job_blockers(
         missing_packages = _missing_required_packages(job)
         if missing_packages:
             blockers.append("missing required training package(s): " + ", ".join(missing_packages))
+    return blockers
+
+
+def _completion_eval_job_blockers(
+    job: dict[str, Any],
+    *,
+    job_path: Path,
+    check_dependencies: bool,
+) -> list[str]:
+    blockers: list[str] = []
+    if job.get("schema") != QWEN_GRPO_COMPLETION_EVAL_JOB_SCHEMA:
+        blockers.append(f"unexpected completion eval job schema: {job.get('schema')}")
+    if job.get("status") != "ready":
+        blockers.append(f"completion eval job is not ready: {job.get('status')}")
+    eval_script = _job_path(job, "eval_script", relative_to=job_path.parent)
+    if eval_script is None or not eval_script.exists():
+        blockers.append(f"missing eval_script: {job.get('eval_script')}")
+    dataset_path = _job_path(job, "qwen_grpo_completion_eval_dataset_jsonl", relative_to=job_path.parent)
+    if dataset_path is None or not dataset_path.exists():
+        blockers.append(
+            f"missing qwen_grpo_completion_eval_dataset_jsonl: {job.get('qwen_grpo_completion_eval_dataset_jsonl')}"
+        )
+    adapter_path_value = str(job.get("adapter_path") or "")
+    if adapter_path_value and not Path(adapter_path_value).exists():
+        blockers.append(f"missing adapter_path: {adapter_path_value}")
+    if check_dependencies:
+        missing_packages = _missing_required_packages(job)
+        if missing_packages:
+            blockers.append("missing required completion eval package(s): " + ", ".join(missing_packages))
     return blockers
 
 
@@ -698,6 +1035,44 @@ def _launch_argv(
     ]
 
 
+def _eval_launch_argv(
+    *,
+    eval_script_path: Path,
+    dataset_path: Path,
+    model_id: str,
+    output_dir: Path,
+    completion_log_path: Path,
+    adapter_path: Path | None,
+    max_new_tokens: int,
+    temperature: float,
+    top_p: float,
+    zero_reward_exact_action_bonus: float,
+) -> list[str]:
+    argv = [
+        "python",
+        str(eval_script_path),
+        "--dataset",
+        str(dataset_path),
+        "--model-id",
+        model_id,
+        "--output-dir",
+        str(output_dir),
+        "--completion-log",
+        str(completion_log_path),
+        "--max-new-tokens",
+        str(max_new_tokens),
+        "--temperature",
+        str(temperature),
+        "--top-p",
+        str(top_p),
+        "--zero-reward-exact-action-bonus",
+        str(zero_reward_exact_action_bonus),
+    ]
+    if adapter_path is not None:
+        argv.extend(["--adapter-path", str(adapter_path)])
+    return argv
+
+
 def _job_launch_argv(job: dict[str, Any], *, launch_command_override: str | None) -> list[str]:
     if launch_command_override:
         return shlex.split(launch_command_override)
@@ -714,6 +1089,10 @@ def _argv_to_command(argv: list[str]) -> str:
 
 def _write_train_script(path: Path) -> None:
     path.write_text(_TRAIN_SCRIPT, encoding="utf-8")
+
+
+def _write_eval_script(path: Path) -> None:
+    path.write_text(_EVAL_SCRIPT, encoding="utf-8")
 
 
 def _write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
@@ -742,6 +1121,32 @@ def _forbidden_message_hits(records: list[dict[str, Any]]) -> list[str]:
     ]
     text = json.dumps(prompt_payload, sort_keys=True, default=str).lower()
     return sorted({token for token in DEFAULT_FORBIDDEN_MODEL_TOKENS if token.lower() in text})
+
+
+def _forbidden_prompt_message_hits(records: list[dict[str, Any]]) -> list[str]:
+    payload = [
+        record.get("prompt_messages") if record.get("prompt_messages") is not None else record.get("prompt")
+        for record in records
+    ]
+    text = json.dumps(payload, sort_keys=True, default=str).lower()
+    return sorted({token for token in DEFAULT_FORBIDDEN_MODEL_TOKENS if token.lower() in text})
+
+
+def _sidecar_prompt_leak_hits(records: list[dict[str, Any]]) -> list[str]:
+    sidecar_tokens = [
+        "reference_action_canonical",
+        "reference_action_json",
+        "reference_assistant_json",
+        "candidate_step_reward",
+        "candidate_episode_reward",
+        "zero_reward_exact_action_bonus",
+    ]
+    payload = [
+        record.get("prompt_messages") if record.get("prompt_messages") is not None else record.get("prompt")
+        for record in records
+    ]
+    text = json.dumps(payload, sort_keys=True, default=str).lower()
+    return sorted({token for token in sidecar_tokens if token.lower() in text})
 
 
 def _optional_int(value: Any) -> int:
@@ -1160,6 +1565,243 @@ if __name__ == "__main__":
 '''
 
 
+_EVAL_SCRIPT = '''"""Run held-out completion evaluation for flatdisk Qwen GRPO prompt samples."""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+from time import gmtime, strftime
+
+import torch
+from PIL import Image
+from peft import PeftModel
+from transformers import AutoModelForImageTextToText, AutoProcessor
+
+
+def read_jsonl(path: Path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def load_image(path: str) -> Image.Image:
+    return Image.open(path).convert("RGB")
+
+
+def canonical_json(value) -> str:
+    return json.dumps(value, sort_keys=True, default=str)
+
+
+def extract_json_object(text: str) -> dict:
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start < 0 or end <= start:
+            return {}
+        try:
+            payload = json.loads(text[start : end + 1])
+        except json.JSONDecodeError:
+            return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def parse_action(text: str) -> dict:
+    payload = extract_json_object(text)
+    if isinstance(payload, dict) and isinstance(payload.get("action"), dict):
+        return payload["action"]
+    return {}
+
+
+def parse_reference_action(value) -> dict:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return {}
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def action_tool(action) -> str | None:
+    if not isinstance(action, dict):
+        return None
+    tool = action.get("tool")
+    return str(tool) if tool is not None else None
+
+
+def action_args(action) -> dict:
+    if not isinstance(action, dict):
+        return {}
+    args = action.get("args")
+    return args if isinstance(args, dict) else {}
+
+
+def arg_match_fraction(parsed_action, expected_action) -> float:
+    expected_args = action_args(expected_action)
+    parsed_args = action_args(parsed_action)
+    if not expected_args:
+        return 1.0 if parsed_args == expected_args else 0.0
+    matches = sum(
+        1
+        for key, expected_value in expected_args.items()
+        if canonical_json(parsed_args.get(key)) == canonical_json(expected_value)
+    )
+    return matches / len(expected_args)
+
+
+def action_reward_diagnostics(parsed_action, expected_action) -> dict:
+    tool_match = bool(parsed_action) and action_tool(parsed_action) == action_tool(expected_action)
+    return {
+        "tool_match": tool_match,
+        "arg_match_fraction": arg_match_fraction(parsed_action, expected_action) if tool_match else 0.0,
+    }
+
+
+def partial_action_reward(parsed_action, expected_action) -> float:
+    diagnostics = action_reward_diagnostics(parsed_action, expected_action)
+    if diagnostics["tool_match"]:
+        return -0.15 + (0.10 * diagnostics["arg_match_fraction"])
+    return -0.30
+
+
+def exact_action_reward(base_reward: float, reward_present: bool, zero_reward_exact_action_bonus: float) -> float:
+    if reward_present and zero_reward_exact_action_bonus > 0.0 and abs(base_reward) <= 1e-12:
+        return zero_reward_exact_action_bonus
+    return base_reward
+
+
+def score_completion(text: str, record: dict, zero_reward_exact_action_bonus: float) -> tuple[float, dict, dict]:
+    expected = record.get("reference_action_canonical")
+    expected_action = parse_reference_action(expected)
+    parsed_action = parse_action(text)
+    diagnostics = action_reward_diagnostics(parsed_action, expected_action)
+    base_reward = float(record.get("candidate_step_reward") or 0.0)
+    reward_present = bool(record.get("candidate_step_reward_present"))
+    if canonical_json(parsed_action) == expected:
+        reward = exact_action_reward(base_reward, reward_present, zero_reward_exact_action_bonus)
+    elif parsed_action:
+        reward = min(partial_action_reward(parsed_action, expected_action), base_reward - 0.05, -0.02)
+    else:
+        reward = min(base_reward - 0.5, -0.5)
+    return reward, parsed_action, diagnostics
+
+
+def prompt_messages(record: dict) -> list[dict]:
+    messages = record.get("prompt_messages") if record.get("prompt_messages") is not None else record.get("prompt")
+    return messages if isinstance(messages, list) else []
+
+
+def model_device(model):
+    try:
+        return next(model.parameters()).device
+    except StopIteration:
+        return torch.device("cpu")
+
+
+def generate_completion(processor, model, record: dict, args: argparse.Namespace) -> str:
+    messages = prompt_messages(record)
+    images = [load_image(path) for path in record.get("image_paths", [])]
+    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    processor_kwargs = {"text": [text], "return_tensors": "pt"}
+    if images:
+        processor_kwargs["images"] = images
+    inputs = processor(**processor_kwargs)
+    if hasattr(inputs, "to"):
+        inputs = inputs.to(model_device(model))
+    generation_kwargs = {"max_new_tokens": args.max_new_tokens}
+    if args.temperature > 0.0:
+        generation_kwargs.update({"do_sample": True, "temperature": args.temperature, "top_p": args.top_p})
+    else:
+        generation_kwargs["do_sample"] = False
+    with torch.no_grad():
+        output_ids = model.generate(**inputs, **generation_kwargs)
+    input_length = inputs["input_ids"].shape[1]
+    generated_ids = output_ids[:, input_length:]
+    return processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+
+
+def write_completion_log(path: Path, rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, sort_keys=True, default=str) + "\\n")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dataset", type=Path, required=True)
+    parser.add_argument("--model-id", required=True)
+    parser.add_argument("--adapter-path", type=Path, default=None)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--completion-log", type=Path, required=True)
+    parser.add_argument("--max-new-tokens", type=int, default=96)
+    parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--top-p", type=float, default=1.0)
+    parser.add_argument("--zero-reward-exact-action-bonus", type=float, default=0.0)
+    args = parser.parse_args()
+    if args.max_new_tokens < 1:
+        parser.error("--max-new-tokens must be positive")
+    if args.temperature < 0.0:
+        parser.error("--temperature must be non-negative")
+    if args.top_p <= 0.0 or args.top_p > 1.0:
+        parser.error("--top-p must be in (0, 1]")
+    if args.zero_reward_exact_action_bonus < 0.0:
+        parser.error("--zero-reward-exact-action-bonus must be non-negative")
+    return args
+
+
+def main() -> None:
+    args = parse_args()
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    processor = AutoProcessor.from_pretrained(args.model_id, padding_side="left")
+    model = AutoModelForImageTextToText.from_pretrained(args.model_id, torch_dtype="auto", device_map="auto")
+    if args.adapter_path:
+        model = PeftModel.from_pretrained(model, str(args.adapter_path))
+    model.eval()
+    records = read_jsonl(args.dataset)
+    rows = []
+    logged_at = strftime("%Y-%m-%dT%H:%M:%SZ", gmtime())
+    for index, record in enumerate(records):
+        completion = generate_completion(processor, model, record, args)
+        reward, parsed_action, diagnostics = score_completion(
+            completion,
+            record,
+            args.zero_reward_exact_action_bonus,
+        )
+        expected_action = parse_reference_action(record.get("reference_action_canonical"))
+        rows.append(
+            {
+                "schema": "flatdisk.qwen_grpo_completion_eval_sample.v1",
+                "logged_at": logged_at,
+                "completion_index": index,
+                "sample_id": record.get("sample_id"),
+                "source_rollout_id": record.get("source_rollout_id"),
+                "reward": reward,
+                "candidate_step_reward": record.get("candidate_step_reward"),
+                "candidate_step_reward_present": record.get("candidate_step_reward_present"),
+                "zero_reward_exact_action_bonus": args.zero_reward_exact_action_bonus,
+                "reference_action_canonical": record.get("reference_action_canonical"),
+                "expected_action": expected_action,
+                "parsed_action": parsed_action,
+                "tool_match": diagnostics["tool_match"],
+                "arg_match_fraction": diagnostics["arg_match_fraction"],
+                "completion_text": completion[:4000],
+                "completion_text_truncated": len(completion) > 4000,
+            }
+        )
+    write_completion_log(args.completion_log, rows)
+    print(json.dumps({"status": "complete", "sample_count": len(rows), "completion_log": str(args.completion_log)}, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, required=True, help="qwen_grpo_training dir or manifest")
@@ -1258,6 +1900,105 @@ def parse_run_args() -> argparse.Namespace:
 def run_main() -> int:
     args = parse_run_args()
     result = run_qwen_grpo_training_job(
+        args.job,
+        result_dir=args.result_dir,
+        dry_run=args.dry_run,
+        check_dependencies=not args.skip_dependency_check,
+        timeout_s=args.timeout_s,
+        launch_command=args.launch_command,
+        tail_chars=args.tail_chars,
+    )
+    print(
+        json.dumps(
+            {
+                "status": result["status"],
+                "returncode": result["returncode"],
+                "blockers": result["blockers"],
+                "result_path": result["result_path"],
+                "launch_command": result["launch_command"],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    if result["status"] in {"complete", "dry_run"}:
+        return 0
+    if result["status"] == "not_ready":
+        return 2
+    return 1
+
+
+def parse_eval_plan_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Plan held-out Qwen GRPO completion evaluation.")
+    parser.add_argument("--training-job", type=Path, required=True, help="qwen_grpo_training_job.json or directory")
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--model-id", default=None)
+    parser.add_argument("--adapter-path", type=Path, default=None)
+    parser.add_argument("--max-samples", type=int, default=None)
+    parser.add_argument("--sample-offset", type=int, default=0)
+    parser.add_argument("--sample-stride", type=int, default=1)
+    parser.add_argument("--max-new-tokens", type=int, default=96)
+    parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--top-p", type=float, default=1.0)
+    parser.add_argument("--zero-reward-exact-action-bonus", type=float, default=None)
+    parser.add_argument("--allow-missing-images", action="store_true")
+    parser.add_argument("--fail-on-not-ready", action="store_true")
+    return parser.parse_args()
+
+
+def eval_plan_main() -> int:
+    args = parse_eval_plan_args()
+    job = plan_qwen_grpo_completion_eval(
+        args.training_job,
+        output_dir=args.output_dir,
+        model_id=args.model_id,
+        adapter_path=args.adapter_path,
+        max_samples=args.max_samples,
+        sample_offset=args.sample_offset,
+        sample_stride=args.sample_stride,
+        max_new_tokens=args.max_new_tokens,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        zero_reward_exact_action_bonus=args.zero_reward_exact_action_bonus,
+        require_existing_images=not args.allow_missing_images,
+    )
+    print(
+        json.dumps(
+            {
+                "status": job["status"],
+                "sample_count": job["dataset"]["eval_sample_count"],
+                "reference_action_tool_counts": job["dataset"]["reference_action_tool_counts"],
+                "missing_image_count": job["dataset"]["missing_image_count"],
+                "forbidden_model_token_hits": job["dataset"]["forbidden_model_token_hits"],
+                "sidecar_prompt_leak_hits": job["dataset"]["sidecar_prompt_leak_hits"],
+                "job_path": str(Path(job["output_dir"]) / "qwen_grpo_completion_eval_job.json"),
+                "eval_script": job["eval_script"],
+                "launch_command": job["launch_command"],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    if args.fail_on_not_ready and job["status"] != "ready":
+        return 2
+    return 0
+
+
+def parse_eval_run_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run or dry-run a planned Qwen GRPO completion eval job.")
+    parser.add_argument("--job", type=Path, required=True, help="qwen_grpo_completion_eval_job.json or directory")
+    parser.add_argument("--result-dir", type=Path, default=None)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--skip-dependency-check", action="store_true")
+    parser.add_argument("--timeout-s", type=float, default=None)
+    parser.add_argument("--launch-command", default=None, help="Override launch command; intended for tests or manual recovery.")
+    parser.add_argument("--tail-chars", type=int, default=4000)
+    return parser.parse_args()
+
+
+def eval_run_main() -> int:
+    args = parse_eval_run_args()
+    result = run_qwen_grpo_completion_eval_job(
         args.job,
         result_dir=args.result_dir,
         dry_run=args.dry_run,

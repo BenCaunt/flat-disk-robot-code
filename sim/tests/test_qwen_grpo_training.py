@@ -655,3 +655,184 @@ def test_run_qwen_grpo_training_cli_dry_run(tmp_path: Path, monkeypatch) -> None
     )
 
     assert qwen_grpo_job.run_main() == 0
+
+
+def test_plan_qwen_grpo_completion_eval_writes_job_without_prompt_leaks(tmp_path: Path) -> None:
+    grpo_dir = _write_ready_grpo_handoff(tmp_path)
+    qwen_grpo_job.plan_qwen_grpo_training(grpo_dir, output_dir=tmp_path / "grpo_job")
+
+    job = qwen_grpo_job.plan_qwen_grpo_completion_eval(
+        tmp_path / "grpo_job",
+        output_dir=tmp_path / "completion_eval",
+        max_samples=1,
+        sample_offset=1,
+        max_new_tokens=48,
+        temperature=0.1,
+        top_p=0.9,
+        zero_reward_exact_action_bonus=0.05,
+    )
+
+    assert job["schema"] == "flatdisk.qwen_grpo_completion_eval_job.v1"
+    assert job["status"] == "ready"
+    assert job["evaluation_method"] == "heldout_qwen_completion_eval"
+    assert job["source_training_job"].endswith("qwen_grpo_training_job.json")
+    assert job["dataset"]["source_sample_count"] == 2
+    assert job["dataset"]["eval_sample_count"] == 1
+    assert job["dataset"]["image_reference_count"] == 1
+    assert job["dataset"]["missing_image_count"] == 0
+    assert job["dataset"]["sidecar_prompt_leak_hits"] == []
+    assert job["dataset"]["forbidden_model_token_hits"] == []
+    assert job["dataset"]["reference_action_tool_counts"] == {"drive_straight": 1}
+    assert job["eval_args"] == {
+        "max_new_tokens": 48,
+        "max_samples": 1,
+        "sample_offset": 1,
+        "sample_stride": 1,
+        "temperature": 0.1,
+        "top_p": 0.9,
+        "zero_reward_exact_action_bonus": 0.05,
+    }
+    assert job["audit"]["evaluation_uses_reference_actions_only_for_scoring"] is True
+    assert job["audit"]["reward_labels_excluded_from_messages"] is True
+    assert job["adapter_path"] == ""
+    assert "trl" not in job["required_packages"]
+    assert "transformers" in job["required_packages"]
+    assert job["launch_argv"][:2] == ["python", str(tmp_path / "completion_eval" / "eval_qwen_grpo_completions.py")]
+    assert "--max-new-tokens 48" in job["launch_command"]
+    assert "--zero-reward-exact-action-bonus 0.05" in job["launch_command"]
+
+    eval_dataset = tmp_path / "completion_eval" / "qwen_grpo_completion_eval_dataset.jsonl"
+    eval_record = json.loads(eval_dataset.read_text(encoding="utf-8").splitlines()[0])
+    prompt_text = json.dumps(eval_record["prompt_messages"])
+    assert "candidate_step_reward" not in prompt_text
+    assert "candidate_episode_reward" not in prompt_text
+    assert "reference_action_canonical" not in prompt_text
+    assert "reference_action_json" not in prompt_text
+    assert "nearest_target" not in prompt_text
+    assert "distance_m" not in prompt_text
+    assert eval_record["reference_action_json"]["tool"] == "drive_straight"
+    assert eval_record["candidate_step_reward_present"] is True
+
+    script_text = Path(job["eval_script"]).read_text(encoding="utf-8")
+    assert "AutoModelForImageTextToText" in script_text
+    assert "PeftModel.from_pretrained" in script_text
+    assert "GRPOTrainer" not in script_text
+    assert "get_peft_model" not in script_text
+    assert "record.get(\"prompt_messages\")" in script_text
+    assert "reference_action_canonical" in script_text
+
+
+def test_plan_qwen_grpo_completion_eval_blocks_missing_adapter_and_images(tmp_path: Path) -> None:
+    grpo_dir = _write_ready_grpo_handoff(tmp_path)
+    qwen_grpo_job.plan_qwen_grpo_training(grpo_dir, output_dir=tmp_path / "grpo_job")
+    for image_path in tmp_path.glob("trial_*/policy/frames/0001.jpg"):
+        image_path.unlink()
+
+    job = qwen_grpo_job.plan_qwen_grpo_completion_eval(
+        tmp_path / "grpo_job",
+        output_dir=tmp_path / "completion_eval",
+        adapter_path=tmp_path / "missing_adapter",
+    )
+
+    assert job["status"] == "not_ready"
+    assert any("image reference" in blocker for blocker in job["blockers"])
+    assert any("missing adapter_path" in blocker for blocker in job["blockers"])
+
+    allowed = qwen_grpo_job.plan_qwen_grpo_completion_eval(
+        tmp_path / "grpo_job",
+        output_dir=tmp_path / "completion_eval_allow_missing_images",
+        require_existing_images=False,
+    )
+    assert allowed["status"] == "ready"
+    assert allowed["warnings"]
+    assert allowed["dataset"]["missing_image_count"] == 2
+
+
+def test_run_qwen_grpo_completion_eval_job_dry_run_writes_result(tmp_path: Path) -> None:
+    grpo_dir = _write_ready_grpo_handoff(tmp_path)
+    qwen_grpo_job.plan_qwen_grpo_training(grpo_dir, output_dir=tmp_path / "grpo_job")
+    qwen_grpo_job.plan_qwen_grpo_completion_eval(
+        tmp_path / "grpo_job",
+        output_dir=tmp_path / "completion_eval",
+    )
+
+    result = qwen_grpo_job.run_qwen_grpo_completion_eval_job(
+        tmp_path / "completion_eval",
+        dry_run=True,
+        check_dependencies=False,
+    )
+
+    assert result["schema"] == "flatdisk.qwen_grpo_completion_eval_result.v1"
+    assert result["status"] == "dry_run"
+    assert result["returncode"] is None
+    assert result["blockers"] == []
+    assert result["dependency_check"]["enabled"] is False
+    assert result["launch_argv"][0] == "python"
+    assert result["sample_count"] == 2
+    assert (tmp_path / "completion_eval" / "qwen_grpo_completion_eval_result.json").exists()
+
+
+def test_run_qwen_grpo_completion_eval_job_executes_ready_fake_eval(tmp_path: Path) -> None:
+    grpo_dir = _write_ready_grpo_handoff(tmp_path)
+    qwen_grpo_job.plan_qwen_grpo_training(grpo_dir, output_dir=tmp_path / "grpo_job")
+    qwen_grpo_job.plan_qwen_grpo_completion_eval(
+        tmp_path / "grpo_job",
+        output_dir=tmp_path / "completion_eval",
+    )
+    job_path = tmp_path / "completion_eval" / "qwen_grpo_completion_eval_job.json"
+    job = json.loads(job_path.read_text(encoding="utf-8"))
+    fake_eval = tmp_path / "completion_eval" / "fake_eval.py"
+    completion_log = Path(job["completion_log_jsonl"])
+    completion_log_payload = (
+        '{"completion_text":"{\\"action\\":{\\"tool\\":\\"alpha_tool\\",\\"args\\":{\\"x\\":1}}}",'
+        '"expected_action":{"args":{"x":1},"tool":"alpha_tool"},'
+        '"parsed_action":{"args":{"x":1},"tool":"alpha_tool"},'
+        '"reward":0.0,'
+        '"reference_action_canonical":"{\\"args\\": {\\"x\\": 1}, \\"tool\\": \\"alpha_tool\\"}",'
+        '"tool_match":true,'
+        '"arg_match_fraction":1.0,'
+        '"completion_text_truncated":false}\n'
+        '{"completion_text":"{\\"action\\":{\\"tool\\":\\"beta_tool\\",\\"args\\":{}}}",'
+        '"expected_action":{"args":{"x":2},"tool":"alpha_tool"},'
+        '"parsed_action":{"args":{},"tool":"beta_tool"},'
+        '"reward":-0.3,'
+        '"reference_action_canonical":"{\\"args\\": {\\"x\\": 2}, \\"tool\\": \\"alpha_tool\\"}",'
+        '"tool_match":false,'
+        '"arg_match_fraction":0.0,'
+        '"completion_text_truncated":false}\n'
+    )
+    fake_eval.write_text(
+        "\n".join(
+            [
+                "from pathlib import Path",
+                f"path = Path({str(completion_log)!r})",
+                "path.parent.mkdir(parents=True, exist_ok=True)",
+                f"path.write_text({completion_log_payload!r}, encoding='utf-8')",
+                "print('completion-eval-ok')",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    job["required_packages"] = []
+    job["eval_script"] = str(fake_eval)
+    job["launch_command"] = f"{shlex.quote(sys.executable)} {shlex.quote(str(fake_eval))}"
+    job["launch_argv"] = [sys.executable, str(fake_eval)]
+    job_path.write_text(json.dumps(job, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    result = qwen_grpo_job.run_qwen_grpo_completion_eval_job(job_path)
+
+    assert result["status"] == "complete"
+    assert result["returncode"] == 0
+    assert "completion-eval-ok" in result["stdout_tail"]
+    assert result["completion_log_sample_count"] == 2
+    metrics = result["completion_log_metrics"]
+    assert metrics["sample_count"] == 2
+    assert metrics["parsed_action_count"] == 2
+    assert metrics["exact_reference_action_count"] == 1
+    assert metrics["positive_non_reference_reward_count"] == 0
+    assert metrics["tool_match_count"] == 1
+    assert metrics["expected_tool_counts"] == {"alpha_tool": 2}
+    assert metrics["parsed_tool_counts"] == {"alpha_tool": 1, "beta_tool": 1}
+    assert metrics["exact_reference_action_count_by_expected_tool"] == {"alpha_tool": 1}
+    assert metrics["tool_match_count_by_expected_tool"] == {"alpha_tool": 1}

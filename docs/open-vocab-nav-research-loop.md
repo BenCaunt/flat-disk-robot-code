@@ -624,6 +624,46 @@ An exact-reference-action bonus ablation then completed in
   `check_object_grounding=7`. Exact-by-tool was `visual_servo_object=0/4`,
   `turn_by_angle=6/14`, and `check_object_grounding=5/14`.
 
+### Held-Out Completion Eval Harness
+
+The GRPO job module now includes a held-out completion-eval path:
+
+- `flatdisk-sim-plan-qwen-grpo-completion-eval` plans an eval job from an
+  existing `qwen_grpo_training_job.json`.
+- `flatdisk-sim-run-qwen-grpo-completion-eval` runs or dry-runs the planned
+  eval job and writes `qwen_grpo_completion_eval_result.json`.
+- The planner writes `qwen_grpo_completion_eval_dataset.jsonl` and
+  `eval_qwen_grpo_completions.py`. The generated script loads base Qwen and
+  optionally `PeftModel.from_pretrained(...)` for an explicit adapter path; it
+  does not create a new trainable LoRA wrapper.
+- The eval script sends only `prompt_messages` and loaded images into the
+  processor. `reference_action_json`, `reference_action_canonical`,
+  `candidate_step_reward`, and related reward fields remain evaluator-only
+  sidecars used after generation for scoring.
+- Completion logs reuse the existing generic action metrics and now include
+  per-tool expected/parsed/exact/tool-match counts, which makes turn overuse
+  visible without an ad hoc parser.
+
+Local smoke:
+
+```bash
+PYTHONPATH=/tmp/codex_no_readline:sim/src uv run --project sim --extra dev \
+  flatdisk-sim-plan-qwen-grpo-completion-eval \
+  --training-job sim/scratch/open_vocab_nav_research_loop/qwen_grpo_jobs/bathroom_cross_run_lora_4step_cap48_tool_balanced/qwen_grpo_training_job.json \
+  --output-dir sim/scratch/open_vocab_nav_research_loop/qwen_grpo_completion_evals/bathroom_cross_run_lora_4step_cap48_tool_balanced_base_eval_smoke \
+  --max-samples 4 \
+  --sample-stride 8 \
+  --max-new-tokens 48 \
+  --fail-on-not-ready
+```
+
+The planner reported `status=ready`, `sample_count=4`,
+`missing_image_count=0`, `forbidden_model_token_hits=[]`, and
+`sidecar_prompt_leak_hits=[]`. A runner dry-run with
+`flatdisk-sim-run-qwen-grpo-completion-eval --dry-run --skip-dependency-check`
+also succeeded. This smoke verified packaging and leakage checks; it did not
+run real Qwen generation.
+
 Resume status for a future continuation:
 
 - This is no longer a verification-only blocker. Runpod auth works when
@@ -639,9 +679,10 @@ Resume status for a future continuation:
   reward is in place, and reference-tool balancing improves early same-tool
   behavior; the 8-step diagnostic still shows weak exact-action selection and
   persistent `turn_by_angle` fallback; the exact-action bonus ablation did not
-  help on the short comparison. Useful next directions are collecting more
-  diverse grouped rollouts with stop/arrival and ambiguous grounding examples,
-  adding a held-out completion eval, auditing whether reference actions are too
+  help on the short comparison; held-out completion-eval planning now exists.
+  Useful next directions are running completion eval on base Qwen and the saved
+  LoRA adapters, collecting more diverse grouped rollouts with stop/arrival and
+  ambiguous grounding examples, auditing whether reference actions are too
   noisy or too correlated with turns, and then running a 24-step balanced
   comparison. Keep `--max-completion-length` explicit so smoke and short
   training jobs cannot spend most of their time generating long completions.

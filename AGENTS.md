@@ -272,6 +272,23 @@ Current handoff for GRPO training, 2026-06-14:
   `turn_by_angle=20`, `check_object_grounding=7`. Exact-by-tool was
   `visual_servo_object=0/4`, `turn_by_angle=6/14`, and
   `check_object_grounding=5/14`.
+- A held-out completion-eval harness now exists for planned GRPO datasets:
+  `flatdisk-sim-plan-qwen-grpo-completion-eval` and
+  `flatdisk-sim-run-qwen-grpo-completion-eval`. It plans a separate eval job
+  from an existing `qwen_grpo_training_job.json`, writes an eval-only prompt
+  dataset, loads the base Qwen model plus an optional explicit PEFT adapter,
+  generates action JSON completions, and scores them with the same generic
+  exact/tool/argument metrics. Reference actions and reward sidecars are used
+  only after generation for scoring; planner validation scans prompt messages
+  for forbidden privileged tokens and scoring-sidecar leaks.
+- A local smoke plan from the balanced 4-step job succeeded at
+  `sim/scratch/open_vocab_nav_research_loop/qwen_grpo_completion_evals/bathroom_cross_run_lora_4step_cap48_tool_balanced_base_eval_smoke`.
+  Command:
+  `flatdisk-sim-plan-qwen-grpo-completion-eval --training-job sim/scratch/open_vocab_nav_research_loop/qwen_grpo_jobs/bathroom_cross_run_lora_4step_cap48_tool_balanced/qwen_grpo_training_job.json --output-dir sim/scratch/open_vocab_nav_research_loop/qwen_grpo_completion_evals/bathroom_cross_run_lora_4step_cap48_tool_balanced_base_eval_smoke --max-samples 4 --sample-stride 8 --max-new-tokens 48 --fail-on-not-ready`.
+  The planned eval job reported `status=ready`, `sample_count=4`,
+  `missing_image_count=0`, `forbidden_model_token_hits=[]`, and
+  `sidecar_prompt_leak_hits=[]`; the runner dry-run also succeeded. This was
+  not a real Qwen generation run yet.
 - The working pod venv is `/workspace/flatdisk-grpo-venv`, created with
   `--system-site-packages` so it can see image Torch `2.9.1+cu128`; install
   `torchvision==0.24.1 --no-deps` to match that Torch build. Do not let pip pull
@@ -284,9 +301,10 @@ Current handoff for GRPO training, 2026-06-14:
   JSON format is stable, generic partial reward exists, and balancing improved
   early same-tool behavior, but doubling the balanced run to 8 steps did not
   solve exact action selection; the exact-action bonus ablation also did not
-  help. Useful next directions: collect more diverse grouped rollouts with
-  stop/arrival and ambiguous grounding examples, add a held-out completion
-  evaluation, inspect whether reference actions are too noisy or too
+  help, and held-out completion-eval planning now exists. Useful next
+  directions: run the completion eval on base Qwen and the saved LoRA adapters,
+  collect more diverse grouped rollouts with stop/arrival and ambiguous
+  grounding examples, inspect whether reference actions are too noisy or too
   correlated with turns, and only then scale to a 24-step balanced run.
 - Future continuation should treat this as past verification, not a blocker.
   There is no known Runpod auth issue when `.env` is loaded as above, and no
