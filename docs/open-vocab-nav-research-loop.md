@@ -956,6 +956,50 @@ train set. It does not yet improve top-level tool choice over base Qwen
 or loss, and the next eval should use a held-out/diverse slice instead of only
 six accepted visual-servo records.
 
+The action-focused follow-up adds `--target-mode action-only` to
+`python -m flatdisk_sim.qwen_sft_training`. The planner preserves the same
+model-facing prompt/images but rewrites each assistant target to compact action
+JSON only, for example:
+
+```json
+{"action":{"args":{"duration_s":2.0,"forward_power":18.0,"prompt":"white toilet with silver rim"},"tool":"visual_servo_object"}}
+```
+
+RunPod action-only SFT result:
+
+- `arrival_stop_six_sample_action_only_sft`: six accepted train-set records,
+  `target_mode=action-only`, `max_steps=18`, `returncode=0`,
+  `duration_s=495.091`, adapter saved under
+  `qwen_sft_jobs/arrival_stop_six_sample_action_only_sft/adapter`. The compact
+  action target was 35 tokens per sample. Loss moved from `0.783775449` on
+  step 1 to `0.056947704` on step 18, with repeated-sample drops such as
+  `0.783775449 -> 0.628596544 -> 0.239740297`.
+- Compact likelihood check
+  `arrival_stop_six_sample_action_only_sft_trainset`: `returncode=0`, all six
+  targets were `visual_servo_object`, compact target mean logprob delta
+  `+0.775926004`, improved rate `1.0`, and action-tool token mean logprob delta
+  `+0.740190588`, improved rate `1.0`.
+- Compact exact-completion check
+  `arrival_stop_six_sample_action_only_sft_trainset_cap96`: `returncode=0`,
+  `max_new_tokens=96`. Base Qwen emitted `visual_servo_object` in `5/6`, parsed
+  full JSON in `1/6`, and exactly matched the compact target action in `0/6`.
+  The action-only adapter emitted `visual_servo_object` in `6/6`, parsed full
+  JSON in `6/6`, exactly matched the compact target action in `2/6`, improved
+  one tool choice, and regressed none.
+- Artifacts copied locally under
+  `sim/scratch/open_vocab_nav_research_loop/qwen_sft_jobs/arrival_stop_six_sample_action_only_sft/`,
+  `sim/scratch/open_vocab_nav_research_loop/qwen_sft_likelihood_checks/arrival_stop_six_sample_action_only_sft_trainset/`,
+  and
+  `sim/scratch/open_vocab_nav_research_loop/qwen_sft_completion_checks/arrival_stop_six_sample_action_only_sft_trainset_cap96/`.
+
+Interpretation: action-only SFT is the first Qwen training diagnostic in this
+loop that improves both the isolated action-tool token likelihood and generated
+tool-call behavior. It is still a six-sample train-set overfit where all targets
+are `visual_servo_object`, so it should not be treated as navigation policy
+success. The next experiment should evaluate compact action-only SFT on a
+held-out/diverse slice with multiple tools, then use that target format for
+DPO/GRPO or larger grouped rollout training.
+
 Resume status for a future continuation:
 
 - This is no longer a verification-only blocker. Runpod auth works when
