@@ -377,6 +377,134 @@ def plan_qwen_grpo_completion_eval(
     return job
 
 
+def plan_qwen_grpo_completion_eval_from_dataset(
+    dataset_input: Path,
+    *,
+    output_dir: Path,
+    model_id: str | None = None,
+    adapter_path: Path | None = None,
+    max_samples: int | None = None,
+    sample_offset: int = 0,
+    sample_stride: int = 1,
+    max_new_tokens: int = 96,
+    temperature: float = 0.0,
+    top_p: float = 1.0,
+    zero_reward_exact_action_bonus: float = 0.0,
+    exclude_sample_ids_path: Path | None = None,
+    require_existing_images: bool = True,
+) -> dict[str, Any]:
+    if sample_offset < 0:
+        raise ValueError("sample_offset must be non-negative")
+    if sample_stride < 1:
+        raise ValueError("sample_stride must be at least 1")
+    if max_samples is not None and max_samples < 1:
+        raise ValueError("max_samples must be positive when set")
+    if max_new_tokens < 1:
+        raise ValueError("max_new_tokens must be positive")
+    if temperature < 0.0:
+        raise ValueError("temperature must be non-negative")
+    if top_p <= 0.0 or top_p > 1.0:
+        raise ValueError("top_p must be in (0, 1]")
+    if zero_reward_exact_action_bonus < 0.0:
+        raise ValueError("zero_reward_exact_action_bonus must be non-negative")
+
+    dataset_path = _resolve_qwen_grpo_eval_dataset(dataset_input)
+    source_records = _read_jsonl_if_exists(dataset_path)
+    excluded_sample_ids = _load_excluded_sample_ids(exclude_sample_ids_path)
+    filtered_records, excluded_records = _filter_excluded_eval_records(source_records, excluded_sample_ids)
+    eval_records = _select_eval_records(
+        filtered_records,
+        max_samples=max_samples,
+        sample_offset=sample_offset,
+        sample_stride=sample_stride,
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    eval_dataset_path = output_dir / "qwen_grpo_completion_eval_dataset.jsonl"
+    eval_script_path = output_dir / "eval_qwen_grpo_completions.py"
+    completion_log_path = output_dir / "completion_eval_samples.jsonl"
+    _write_jsonl(eval_dataset_path, eval_records)
+    _write_eval_script(eval_script_path)
+
+    resolved_model_id = model_id or DEFAULT_MODEL_ID
+    launch_argv = _eval_launch_argv(
+        eval_script_path=eval_script_path,
+        dataset_path=eval_dataset_path,
+        model_id=resolved_model_id,
+        output_dir=output_dir,
+        completion_log_path=completion_log_path,
+        adapter_path=adapter_path,
+        max_new_tokens=max_new_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        zero_reward_exact_action_bonus=zero_reward_exact_action_bonus,
+    )
+    validation = _validate_completion_eval_dataset_inputs(
+        dataset_path=dataset_path,
+        source_records=filtered_records,
+        eval_records=eval_records,
+        require_existing_images=require_existing_images,
+    )
+    validation["dataset"]["unfiltered_source_sample_count"] = len(source_records)
+    validation["dataset"]["excluded_sample_count"] = len(excluded_records)
+    validation["dataset"]["excluded_sample_ids"] = [
+        str(record.get("sample_id") or record.get("balance_original_sample_id") or "")
+        for record in excluded_records
+    ]
+    validation["dataset"]["exclude_sample_ids_path"] = str(exclude_sample_ids_path) if exclude_sample_ids_path else ""
+    if adapter_path is not None and not adapter_path.exists():
+        validation["blockers"].append(f"missing adapter_path: {adapter_path}")
+    job = {
+        "schema": QWEN_GRPO_COMPLETION_EVAL_JOB_SCHEMA,
+        "created_at": strftime("%Y-%m-%dT%H:%M:%SZ", gmtime()),
+        "status": "ready" if not validation["blockers"] else "not_ready",
+        "blockers": validation["blockers"],
+        "warnings": validation["warnings"],
+        "source_training_job": "",
+        "source_training_job_schema": "",
+        "source_training_job_status": "",
+        "source_dataset_jsonl": str(dataset_path),
+        "source_dataset_kind": "qwen_grpo_prompt_samples_jsonl",
+        "qwen_grpo_completion_eval_dataset_jsonl": str(eval_dataset_path),
+        "output_dir": str(output_dir),
+        "eval_script": str(eval_script_path),
+        "eval_script_sha256": _sha256_file(eval_script_path),
+        "completion_log_jsonl": str(completion_log_path),
+        "result_path": str(output_dir / "qwen_grpo_completion_eval_result.json"),
+        "evaluation_method": "heldout_qwen_completion_eval",
+        "model_id": resolved_model_id,
+        "adapter_path": str(adapter_path) if adapter_path else "",
+        "required_packages": DEFAULT_EVAL_REQUIRED_PACKAGES,
+        "launch_argv": launch_argv,
+        "launch_command": _argv_to_command(launch_argv),
+        "eval_args": {
+            "max_samples": max_samples,
+            "sample_offset": sample_offset,
+            "sample_stride": sample_stride,
+            "max_new_tokens": max_new_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "zero_reward_exact_action_bonus": zero_reward_exact_action_bonus,
+            "exclude_sample_ids_path": str(exclude_sample_ids_path) if exclude_sample_ids_path else "",
+        },
+        "dataset": validation["dataset"],
+        "audit": {
+            "prompt_only_dataset": True,
+            "reference_actions_are_sidecar_columns": True,
+            "reward_labels_excluded_from_messages": True,
+            "evaluation_uses_reference_actions_only_for_scoring": True,
+            "online_environment_reward": False,
+            "require_existing_images": require_existing_images,
+            "adapter_optional": True,
+            "source_training_job_required": False,
+        },
+    }
+    (output_dir / "qwen_grpo_completion_eval_job.json").write_text(
+        json.dumps(job, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return job
+
+
 def run_qwen_grpo_completion_eval_job(
     job_input: Path,
     *,
@@ -1345,8 +1473,30 @@ def _validate_completion_eval_job_inputs(
         blockers.append(f"source training job is not ready: {training_job.get('status')}")
     if dataset_path is None or not dataset_path.exists():
         blockers.append(f"missing source qwen_grpo_trl_dataset_jsonl: {training_job.get('qwen_grpo_trl_dataset_jsonl')}")
+    validation = _validate_completion_eval_dataset_inputs(
+        dataset_path=dataset_path,
+        source_records=source_records,
+        eval_records=eval_records,
+        require_existing_images=require_existing_images,
+    )
+    validation["blockers"] = blockers + validation["blockers"]
+    validation["warnings"] = warnings + validation["warnings"]
+    return validation
+
+
+def _validate_completion_eval_dataset_inputs(
+    *,
+    dataset_path: Path | None,
+    source_records: list[dict[str, Any]],
+    eval_records: list[dict[str, Any]],
+    require_existing_images: bool,
+) -> dict[str, Any]:
+    blockers: list[str] = []
+    warnings: list[str] = []
+    if dataset_path is None or not dataset_path.exists():
+        blockers.append(f"missing source qwen_grpo eval dataset jsonl: {dataset_path}")
     if not source_records:
-        blockers.append("source GRPO TRL dataset contains no prompt samples")
+        blockers.append("source GRPO eval dataset contains no prompt samples")
     if not eval_records:
         blockers.append("completion eval dataset contains no prompt samples")
 
@@ -1632,6 +1782,68 @@ def _resolve_qwen_grpo_action_likelihood_job(job_input: Path) -> Path:
         if candidate.exists():
             return candidate
     raise FileNotFoundError(f"could not find qwen_grpo_action_likelihood_job.json under {job_input}")
+
+
+def _resolve_qwen_grpo_eval_dataset(dataset_input: Path) -> Path:
+    path = dataset_input.expanduser()
+    if path.is_file():
+        return path
+    candidates = [
+        path / "qwen_grpo_completion_eval_dataset.jsonl",
+        path / "qwen_grpo_action_likelihood_dataset.jsonl",
+        path / "qwen_grpo_trl_dataset.jsonl",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(f"could not find Qwen GRPO eval dataset jsonl under {dataset_input}")
+
+
+def _load_excluded_sample_ids(path: Path | None) -> set[str]:
+    if path is None:
+        return set()
+    values: set[str] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("{"):
+            try:
+                payload = json.loads(stripped)
+            except json.JSONDecodeError:
+                values.add(stripped)
+                continue
+            if isinstance(payload, dict):
+                values.update(_record_sample_identity_values(payload))
+                continue
+        values.add(stripped)
+    return {value for value in values if value}
+
+
+def _filter_excluded_eval_records(
+    records: list[dict[str, Any]],
+    excluded_sample_ids: set[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if not excluded_sample_ids:
+        return list(records), []
+    kept: list[dict[str, Any]] = []
+    excluded: list[dict[str, Any]] = []
+    for record in records:
+        identities = _record_sample_identity_values(record)
+        if identities.intersection(excluded_sample_ids):
+            excluded.append(record)
+        else:
+            kept.append(record)
+    return kept, excluded
+
+
+def _record_sample_identity_values(record: dict[str, Any]) -> set[str]:
+    keys = (
+        "sample_id",
+        "source_policy_step_id",
+        "balance_original_sample_id",
+    )
+    return {str(record.get(key)) for key in keys if record.get(key)}
 
 
 def _resolve_manifest_path(manifest: dict[str, Any], key: str) -> Path | None:
@@ -3486,7 +3698,13 @@ def run_main() -> int:
 
 def parse_eval_plan_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Plan held-out Qwen GRPO completion evaluation.")
-    parser.add_argument("--training-job", type=Path, required=True, help="qwen_grpo_training_job.json or directory")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--training-job", type=Path, help="qwen_grpo_training_job.json or directory")
+    source.add_argument(
+        "--dataset-jsonl",
+        type=Path,
+        help="Existing qwen_grpo_* prompt/action eval dataset JSONL or containing directory.",
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--model-id", default=None)
     parser.add_argument("--adapter-path", type=Path, default=None)
@@ -3497,6 +3715,12 @@ def parse_eval_plan_args() -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--zero-reward-exact-action-bonus", type=float, default=None)
+    parser.add_argument(
+        "--exclude-sample-ids-jsonl",
+        type=Path,
+        default=None,
+        help="JSONL or newline text file of sample IDs to exclude before sampling.",
+    )
     parser.add_argument("--allow-missing-images", action="store_true")
     parser.add_argument("--fail-on-not-ready", action="store_true")
     return parser.parse_args()
@@ -3504,25 +3728,43 @@ def parse_eval_plan_args() -> argparse.Namespace:
 
 def eval_plan_main() -> int:
     args = parse_eval_plan_args()
-    job = plan_qwen_grpo_completion_eval(
-        args.training_job,
-        output_dir=args.output_dir,
-        model_id=args.model_id,
-        adapter_path=args.adapter_path,
-        max_samples=args.max_samples,
-        sample_offset=args.sample_offset,
-        sample_stride=args.sample_stride,
-        max_new_tokens=args.max_new_tokens,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        zero_reward_exact_action_bonus=args.zero_reward_exact_action_bonus,
-        require_existing_images=not args.allow_missing_images,
-    )
+    if args.dataset_jsonl is not None:
+        job = plan_qwen_grpo_completion_eval_from_dataset(
+            args.dataset_jsonl,
+            output_dir=args.output_dir,
+            model_id=args.model_id,
+            adapter_path=args.adapter_path,
+            max_samples=args.max_samples,
+            sample_offset=args.sample_offset,
+            sample_stride=args.sample_stride,
+            max_new_tokens=args.max_new_tokens,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            zero_reward_exact_action_bonus=args.zero_reward_exact_action_bonus or 0.0,
+            exclude_sample_ids_path=args.exclude_sample_ids_jsonl,
+            require_existing_images=not args.allow_missing_images,
+        )
+    else:
+        job = plan_qwen_grpo_completion_eval(
+            args.training_job,
+            output_dir=args.output_dir,
+            model_id=args.model_id,
+            adapter_path=args.adapter_path,
+            max_samples=args.max_samples,
+            sample_offset=args.sample_offset,
+            sample_stride=args.sample_stride,
+            max_new_tokens=args.max_new_tokens,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            zero_reward_exact_action_bonus=args.zero_reward_exact_action_bonus,
+            require_existing_images=not args.allow_missing_images,
+        )
     print(
         json.dumps(
             {
                 "status": job["status"],
                 "sample_count": job["dataset"]["eval_sample_count"],
+                "excluded_sample_count": job["dataset"].get("excluded_sample_count", 0),
                 "reference_action_tool_counts": job["dataset"]["reference_action_tool_counts"],
                 "missing_image_count": job["dataset"]["missing_image_count"],
                 "forbidden_model_token_hits": job["dataset"]["forbidden_model_token_hits"],

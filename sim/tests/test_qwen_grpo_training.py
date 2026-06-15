@@ -729,6 +729,43 @@ def test_plan_qwen_grpo_completion_eval_writes_job_without_prompt_leaks(tmp_path
     assert "reference_action_canonical" in script_text
 
 
+def test_plan_qwen_grpo_completion_eval_from_dataset_can_exclude_training_ids(tmp_path: Path) -> None:
+    grpo_dir = _write_ready_grpo_handoff(tmp_path)
+    training_job = qwen_grpo_job.plan_qwen_grpo_training(grpo_dir, output_dir=tmp_path / "grpo_job")
+    source_dataset = Path(training_job["qwen_grpo_trl_dataset_jsonl"])
+    source_records = [
+        json.loads(line)
+        for line in source_dataset.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    exclude_path = tmp_path / "exclude_sample_ids.jsonl"
+    exclude_path.write_text(json.dumps({"sample_id": source_records[0]["sample_id"]}) + "\n", encoding="utf-8")
+
+    job = qwen_grpo_job.plan_qwen_grpo_completion_eval_from_dataset(
+        source_dataset,
+        output_dir=tmp_path / "completion_eval_from_dataset",
+        exclude_sample_ids_path=exclude_path,
+    )
+
+    assert job["schema"] == "flatdisk.qwen_grpo_completion_eval_job.v1"
+    assert job["status"] == "ready"
+    assert job["source_training_job"] == ""
+    assert job["source_dataset_jsonl"] == str(source_dataset)
+    assert job["source_dataset_kind"] == "qwen_grpo_prompt_samples_jsonl"
+    assert job["dataset"]["unfiltered_source_sample_count"] == 2
+    assert job["dataset"]["source_sample_count"] == 1
+    assert job["dataset"]["eval_sample_count"] == 1
+    assert job["dataset"]["excluded_sample_count"] == 1
+    assert job["dataset"]["excluded_sample_ids"] == [source_records[0]["sample_id"]]
+    assert job["dataset"]["exclude_sample_ids_path"] == str(exclude_path)
+    assert job["eval_args"]["exclude_sample_ids_path"] == str(exclude_path)
+    assert job["audit"]["source_training_job_required"] is False
+
+    eval_dataset = tmp_path / "completion_eval_from_dataset" / "qwen_grpo_completion_eval_dataset.jsonl"
+    eval_record = json.loads(eval_dataset.read_text(encoding="utf-8").splitlines()[0])
+    assert eval_record["sample_id"] == source_records[1]["sample_id"]
+
+
 def test_plan_qwen_grpo_completion_eval_blocks_missing_adapter_and_images(tmp_path: Path) -> None:
     grpo_dir = _write_ready_grpo_handoff(tmp_path)
     qwen_grpo_job.plan_qwen_grpo_training(grpo_dir, output_dir=tmp_path / "grpo_job")
