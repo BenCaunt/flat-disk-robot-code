@@ -869,6 +869,48 @@ teacher-forced path can change Qwen on a clean action target. Next verify the
 SFT adapter with a teacher-forced likelihood or exact-completion check on the
 same sample, then scale to the six accepted samples before returning to GRPO.
 
+The follow-up SFT likelihood diagnostic adds an eval-only teacher-forced check
+for SFT adapters:
+
+```bash
+python -m flatdisk_sim.qwen_sft_likelihood \
+  --sft-training-job sim/scratch/open_vocab_nav_research_loop/qwen_sft_jobs/arrival_stop_tiny1 \
+  --output-dir sim/scratch/open_vocab_nav_research_loop/qwen_sft_likelihood_checks/arrival_stop_tiny1_same_sample
+
+python -m flatdisk_sim.qwen_sft_likelihood run \
+  --job sim/scratch/open_vocab_nav_research_loop/qwen_sft_likelihood_checks/arrival_stop_tiny1_same_sample/qwen_sft_likelihood_job.json
+```
+
+It loads the base Qwen model plus a PEFT adapter, scores the exact assistant
+message content used by SFT, compares `model.disable_adapter()` against the
+adapter-enabled model under `torch.inference_mode()`, and writes both per-sample
+JSONL and progress JSONL. Local tests cover raw-target preservation,
+image-path precedence, adapter blockers, forbidden-token blockers, malformed
+likelihood logs, metric aggregation, and direct `python -m` plan/run usage.
+
+RunPod results:
+
+- `arrival_stop_tiny1_same_sample`: one trained `visual_servo_object` sample,
+  `returncode=0`, `duration_s=173.557`, full-target mean logprob delta
+  `+0.112574629`, improved rate `1.0`, target logprob sum delta `+15.197574916`.
+  The isolated action-tool token delta was approximately neutral/slightly
+  negative (`-0.00005673`).
+- `arrival_stop_six_sample_sft`: six accepted `visual_servo_object` SFT records,
+  `max_steps=18`, `returncode=0`, `duration_s=487.045`, and loss decreased to
+  `0.118048064`.
+- `arrival_stop_six_sample_sft_trainset`: six-sample likelihood check over that
+  adapter, `returncode=0`, `duration_s=295.687`, full-target mean logprob delta
+  `+0.205490324`, improved rate `1.0`, min/max `+0.193296303/+0.21970717`.
+  The isolated action-tool token delta stayed slightly negative on average
+  (`-0.001529031`).
+
+Interpretation: teacher-forced LoRA SFT gives a robust train-set learning signal
+on the accepted visual-servo action records, unlike the current GRPO recipe.
+However, because the tool-name token itself did not improve, the next diagnostic
+should either add an action-token-focused loss/eval or run exact-completion
+sampling to verify the adapter actually emits the desired tool call, not merely
+the surrounding response structure.
+
 Resume status for a future continuation:
 
 - This is no longer a verification-only blocker. Runpod auth works when
