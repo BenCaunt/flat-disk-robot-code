@@ -675,6 +675,7 @@ def plan_qwen_grpo_action_likelihood_check(
     dataset_path = output_dir / "qwen_grpo_action_likelihood_dataset.jsonl"
     script_path = output_dir / "score_qwen_grpo_action_likelihood.py"
     likelihood_log_path = output_dir / "action_likelihood_samples.jsonl"
+    progress_log_path = output_dir / "action_likelihood_progress.jsonl"
     _write_jsonl(dataset_path, likelihood_records)
     _write_action_likelihood_script(script_path)
 
@@ -686,6 +687,7 @@ def plan_qwen_grpo_action_likelihood_check(
         output_dir=output_dir,
         adapter_path=adapter_path,
         likelihood_log_path=likelihood_log_path,
+        progress_log_path=progress_log_path,
     )
     validation = _validate_action_likelihood_job_inputs(
         completion_eval_job,
@@ -710,6 +712,7 @@ def plan_qwen_grpo_action_likelihood_check(
         "action_likelihood_script": str(script_path),
         "action_likelihood_script_sha256": _sha256_file(script_path),
         "action_likelihood_log_jsonl": str(likelihood_log_path),
+        "action_likelihood_progress_jsonl": str(progress_log_path),
         "result_path": str(output_dir / "qwen_grpo_action_likelihood_result.json"),
         "evaluation_method": "qwen_peft_action_likelihood_check",
         "model_id": resolved_model_id,
@@ -783,10 +786,12 @@ def run_qwen_grpo_action_likelihood_check_job(
         "dependency_check": _dependency_check_payload(job, enabled=check_dependencies),
     }
     if blockers:
+        _attach_action_likelihood_log_summary(result, job, job_path=job_path)
         result["completed_at"] = strftime("%Y-%m-%dT%H:%M:%SZ", gmtime())
         _write_result(result_path, result)
         return result
     if dry_run:
+        _attach_action_likelihood_log_summary(result, job, job_path=job_path)
         result["status"] = "dry_run"
         result["completed_at"] = strftime("%Y-%m-%dT%H:%M:%SZ", gmtime())
         _write_result(result_path, result)
@@ -836,12 +841,20 @@ def _attach_adapter_effect_log_summary(result: dict[str, Any], job: dict[str, An
 
 def _attach_action_likelihood_log_summary(result: dict[str, Any], job: dict[str, Any], *, job_path: Path) -> None:
     likelihood_log = _job_path(job, "action_likelihood_log_jsonl", relative_to=job_path.parent)
+    progress_log = _job_path(job, "action_likelihood_progress_jsonl", relative_to=job_path.parent)
     result["action_likelihood_log_jsonl"] = str(likelihood_log) if likelihood_log else ""
     result["action_likelihood_log_sample_count"] = (
         _count_lines(likelihood_log) if likelihood_log and likelihood_log.exists() else 0
     )
     result["action_likelihood_log_metrics"] = (
         _action_likelihood_log_metrics(likelihood_log) if likelihood_log and likelihood_log.exists() else {}
+    )
+    result["action_likelihood_progress_jsonl"] = str(progress_log) if progress_log else ""
+    result["action_likelihood_progress_count"] = (
+        _count_lines(progress_log) if progress_log and progress_log.exists() else 0
+    )
+    result["action_likelihood_progress_tail"] = (
+        _jsonl_tail(progress_log, limit=8) if progress_log and progress_log.exists() else []
     )
 
 
@@ -1921,6 +1934,7 @@ def _action_likelihood_launch_argv(
     output_dir: Path,
     adapter_path: Path,
     likelihood_log_path: Path,
+    progress_log_path: Path,
 ) -> list[str]:
     return [
         "python",
@@ -1935,6 +1949,8 @@ def _action_likelihood_launch_argv(
         str(output_dir),
         "--action-likelihood-log",
         str(likelihood_log_path),
+        "--progress-log",
+        str(progress_log_path),
     ]
 
 
@@ -1982,6 +1998,18 @@ def _read_jsonl_if_exists(path: Path | None) -> list[dict[str, Any]]:
     if path is None or not path.exists():
         return []
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _jsonl_tail(path: Path, *, limit: int) -> list[dict[str, Any]]:
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            rows.append({"malformed": line[:200]})
+    return rows[-limit:]
 
 
 def _forbidden_message_hits(records: list[dict[str, Any]]) -> list[str]:
@@ -3233,6 +3261,21 @@ def append_likelihood_log(path: Path, row: dict) -> None:
         handle.flush()
 
 
+def write_progress(path: Path, stage: str, **payload) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    row = {
+        "schema": "flatdisk.qwen_grpo_action_likelihood_progress.v1",
+        "logged_at": strftime("%Y-%m-%dT%H:%M:%SZ", gmtime()),
+        "stage": stage,
+        **payload,
+    }
+    line = json.dumps(row, sort_keys=True, default=str)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(line + "\\n")
+        handle.flush()
+    print(line, flush=True)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", type=Path, required=True)
@@ -3240,25 +3283,62 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--adapter-path", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--action-likelihood-log", type=Path, required=True)
+    parser.add_argument("--progress-log", type=Path, required=True)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    args.action_likelihood_log.parent.mkdir(parents=True, exist_ok=True)
+    args.action_likelihood_log.write_text("", encoding="utf-8")
+    args.progress_log.parent.mkdir(parents=True, exist_ok=True)
+    args.progress_log.write_text("", encoding="utf-8")
+    write_progress(
+        args.progress_log,
+        "start",
+        dataset=str(args.dataset),
+        model_id=args.model_id,
+        adapter_path=str(args.adapter_path),
+        output_dir=str(args.output_dir),
+    )
+    write_progress(args.progress_log, "load_processor_start")
     processor = AutoProcessor.from_pretrained(args.model_id, padding_side="left")
+    write_progress(args.progress_log, "load_processor_complete")
+    write_progress(args.progress_log, "load_model_start")
     base_model = AutoModelForImageTextToText.from_pretrained(args.model_id, torch_dtype="auto", device_map="auto")
+    write_progress(args.progress_log, "load_model_complete")
+    write_progress(args.progress_log, "load_adapter_start")
     model = PeftModel.from_pretrained(base_model, str(args.adapter_path))
     model.eval()
     metadata = adapter_metadata(model, args.adapter_path)
+    write_progress(args.progress_log, "load_adapter_complete", adapter_metadata=metadata)
+    write_progress(args.progress_log, "read_dataset_start")
     records = read_jsonl(args.dataset)
-    args.action_likelihood_log.parent.mkdir(parents=True, exist_ok=True)
-    args.action_likelihood_log.write_text("", encoding="utf-8")
+    write_progress(args.progress_log, "read_dataset_complete", sample_count=len(records))
     sample_count = 0
-    for record in records:
+    for index, record in enumerate(records):
+        write_progress(
+            args.progress_log,
+            "sample_start",
+            sample_index=index,
+            sample_id=record.get("sample_id"),
+            source_rollout_id=record.get("source_rollout_id"),
+        )
         row = score_record(processor, model, record, args, metadata)
         append_likelihood_log(args.action_likelihood_log, row)
         sample_count += 1
+        write_progress(
+            args.progress_log,
+            "sample_complete",
+            sample_index=index,
+            sample_id=record.get("sample_id"),
+            expected_tool=row.get("expected_tool"),
+            target_mean_logprob_delta=row.get("target_mean_logprob_delta"),
+            tool_mean_logprob_delta=row.get("tool_mean_logprob_delta"),
+            tool_span_found=row.get("tool_span_found"),
+        )
+    write_progress(args.progress_log, "complete", sample_count=sample_count)
     print(
         json.dumps(
             {

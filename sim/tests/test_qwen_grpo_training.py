@@ -1092,6 +1092,10 @@ def test_plan_qwen_grpo_action_likelihood_check_writes_teacher_forced_job(tmp_pa
         "python",
         str(tmp_path / "action_likelihood" / "score_qwen_grpo_action_likelihood.py"),
     ]
+    assert "--progress-log" in job["launch_argv"]
+    assert job["action_likelihood_progress_jsonl"] == str(
+        tmp_path / "action_likelihood" / "action_likelihood_progress.jsonl"
+    )
 
     likelihood_dataset = tmp_path / "action_likelihood" / "qwen_grpo_action_likelihood_dataset.jsonl"
     likelihood_record = json.loads(likelihood_dataset.read_text(encoding="utf-8").splitlines()[0])
@@ -1111,6 +1115,8 @@ def test_plan_qwen_grpo_action_likelihood_check_writes_teacher_forced_job(tmp_pa
     assert "PeftModel.from_pretrained" in script_text
     assert "model.disable_adapter()" in script_text
     assert "torch.inference_mode()" in script_text
+    assert "write_progress(args.progress_log, \"load_model_start\")" in script_text
+    assert '"sample_start"' in script_text
     assert "reference_action_json" in script_text
     assert "reference_assistant_json" not in script_text
     assert "GRPOTrainer" not in script_text
@@ -1175,6 +1181,7 @@ def test_run_qwen_grpo_action_likelihood_check_job_dry_run_writes_result(tmp_pat
     assert result["dependency_check"]["enabled"] is False
     assert result["launch_argv"][0] == "python"
     assert result["sample_count"] == 2
+    assert result["action_likelihood_progress_count"] == 0
     assert (tmp_path / "action_likelihood" / "qwen_grpo_action_likelihood_result.json").exists()
 
 
@@ -1194,6 +1201,7 @@ def test_run_qwen_grpo_action_likelihood_check_job_executes_ready_fake_check(tmp
     job = json.loads(job_path.read_text(encoding="utf-8"))
     fake_check = tmp_path / "action_likelihood" / "fake_action_likelihood.py"
     likelihood_log = Path(job["action_likelihood_log_jsonl"])
+    progress_log = Path(job["action_likelihood_progress_jsonl"])
     likelihood_payload = (
         '{"expected_tool":"alpha_tool",'
         '"target_token_count":10,'
@@ -1219,6 +1227,12 @@ def test_run_qwen_grpo_action_likelihood_check_job_executes_ready_fake_check(tmp
                 f"path = Path({str(likelihood_log)!r})",
                 "path.parent.mkdir(parents=True, exist_ok=True)",
                 f"path.write_text({likelihood_payload!r}, encoding='utf-8')",
+                f"progress = Path({str(progress_log)!r})",
+                "progress.parent.mkdir(parents=True, exist_ok=True)",
+                "progress.write_text(",
+                "    '{\"stage\":\"start\"}\\n{\"stage\":\"load_model_start\"}\\n{\"stage\":\"sample_complete\",\"sample_index\":1}\\n',",
+                "    encoding='utf-8',",
+                ")",
                 "print('action-likelihood-ok')",
             ]
         )
@@ -1237,6 +1251,8 @@ def test_run_qwen_grpo_action_likelihood_check_job_executes_ready_fake_check(tmp
     assert result["returncode"] == 0
     assert "action-likelihood-ok" in result["stdout_tail"]
     assert result["action_likelihood_log_sample_count"] == 2
+    assert result["action_likelihood_progress_count"] == 3
+    assert result["action_likelihood_progress_tail"][-1]["stage"] == "sample_complete"
     metrics = result["action_likelihood_log_metrics"]
     assert metrics["sample_count"] == 2
     assert metrics["expected_tool_counts"] == {"alpha_tool": 1, "beta_tool": 1}

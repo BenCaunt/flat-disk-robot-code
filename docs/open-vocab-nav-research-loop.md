@@ -810,6 +810,13 @@ This planner reported `status=ready`, `sample_count=2`,
 passed `py_compile`, `sim/tests/test_qwen_grpo_training.py` passed with
 `28 passed`, and the full sim suite passed with `274 passed`.
 
+The first RunPod action-likelihood smoke on the same two-sample slice was
+manually stopped after it loaded Qwen onto the GPU but produced no sample log
+for several minutes. The generated action-likelihood script now writes
+`action_likelihood_progress.jsonl` before processor/model/adapter loading and
+before/after every sample, so future remote smokes can identify whether a stall
+is in model loading, adapter loading, input preparation, or forward scoring.
+
 Resume status for a future continuation:
 
 - This is no longer a verification-only blocker. Runpod auth works when
