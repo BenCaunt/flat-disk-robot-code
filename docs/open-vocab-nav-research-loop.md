@@ -1042,6 +1042,16 @@ multi-tool dataset and paired base/adapter completion eval in one process, so
 we can cheaply separate token-likelihood movement from actual action-choice
 changes.
 
+Follow-up tooling now supports that paired exact-completion check directly:
+`flatdisk-sim-plan-qwen-grpo-completion-eval --compare-base-adapter` requires
+`--adapter-path`, generates base-disabled and adapter-enabled completions from
+one PEFT model load, and aggregates paired metrics such as base/adapter tool
+match, exact reference action match, changed completion/action/tool counts, and
+adapter-improved/regressed counts. A local heldout22 planning probe with the
+action-only SFT adapter was ready and preserved the expected 22-sample,
+multi-tool slice; the next RunPod exact-completion comparison should use this
+paired mode instead of two separate full model loads.
+
 Resume status for a future continuation:
 
 - This is no longer a verification-only blocker. Runpod auth works when

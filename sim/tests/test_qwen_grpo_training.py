@@ -698,6 +698,7 @@ def test_plan_qwen_grpo_completion_eval_writes_job_without_prompt_leaks(tmp_path
         "temperature": 0.1,
         "top_p": 0.9,
         "zero_reward_exact_action_bonus": 0.05,
+        "compare_base_adapter": False,
     }
     assert job["audit"]["evaluation_uses_reference_actions_only_for_scoring"] is True
     assert job["audit"]["reward_labels_excluded_from_messages"] is True
@@ -727,6 +728,40 @@ def test_plan_qwen_grpo_completion_eval_writes_job_without_prompt_leaks(tmp_path
     assert "get_peft_model" not in script_text
     assert "record.get(\"prompt_messages\")" in script_text
     assert "reference_action_canonical" in script_text
+
+
+def test_plan_qwen_grpo_completion_eval_can_compare_base_and_adapter(tmp_path: Path) -> None:
+    grpo_dir = _write_ready_grpo_handoff(tmp_path)
+    qwen_grpo_job.plan_qwen_grpo_training(grpo_dir, output_dir=tmp_path / "grpo_job")
+    adapter_path = _write_fake_adapter(tmp_path / "adapter")
+
+    job = qwen_grpo_job.plan_qwen_grpo_completion_eval(
+        tmp_path / "grpo_job",
+        output_dir=tmp_path / "completion_eval",
+        adapter_path=adapter_path,
+        compare_base_adapter=True,
+        max_samples=1,
+    )
+
+    assert job["status"] == "ready"
+    assert job["adapter_path"] == str(adapter_path)
+    assert job["eval_args"]["compare_base_adapter"] is True
+    assert job["audit"]["adapter_compared_to_base_disabled"] is True
+    assert "--compare-base-adapter" in job["launch_argv"]
+    assert "--compare-base-adapter" in job["launch_command"]
+
+    script_text = Path(job["eval_script"]).read_text(encoding="utf-8")
+    assert "model.disable_adapter()" in script_text
+    assert 'completion_fields("base"' in script_text
+    assert 'completion_fields(\n                    "adapter"' in script_text
+
+    missing_adapter_job = qwen_grpo_job.plan_qwen_grpo_completion_eval(
+        tmp_path / "grpo_job",
+        output_dir=tmp_path / "completion_eval_missing_adapter",
+        compare_base_adapter=True,
+    )
+    assert missing_adapter_job["status"] == "not_ready"
+    assert any("missing adapter_path for compare_base_adapter" in blocker for blocker in missing_adapter_job["blockers"])
 
 
 def test_plan_qwen_grpo_completion_eval_from_dataset_can_exclude_training_ids(tmp_path: Path) -> None:
@@ -880,6 +915,72 @@ def test_run_qwen_grpo_completion_eval_job_executes_ready_fake_eval(tmp_path: Pa
     assert metrics["parsed_tool_counts"] == {"alpha_tool": 1, "beta_tool": 1}
     assert metrics["exact_reference_action_count_by_expected_tool"] == {"alpha_tool": 1}
     assert metrics["tool_match_count_by_expected_tool"] == {"alpha_tool": 1}
+
+
+def test_completion_log_metrics_summarizes_paired_base_adapter_rows(tmp_path: Path) -> None:
+    completion_log = tmp_path / "paired_completion_eval_samples.jsonl"
+    alpha_1 = {"args": {"x": 1}, "tool": "alpha_tool"}
+    alpha_2 = {"args": {"x": 2}, "tool": "alpha_tool"}
+    beta = {"args": {}, "tool": "beta_tool"}
+    rows = [
+        {
+            "comparison_mode": "base_vs_adapter",
+            "expected_action": alpha_1,
+            "reference_action_canonical": qwen_grpo_job._canonical_json(alpha_1),
+            "base_completion_text": '{"action":{"tool":"beta_tool","args":{}}}',
+            "base_completion_text_truncated": False,
+            "base_parsed_action": beta,
+            "base_tool_match": False,
+            "base_arg_match_fraction": 0.0,
+            "base_reward": -0.3,
+            "adapter_completion_text": '{"action":{"tool":"alpha_tool","args":{"x":1}}}',
+            "adapter_completion_text_truncated": False,
+            "adapter_parsed_action": alpha_1,
+            "adapter_tool_match": True,
+            "adapter_arg_match_fraction": 1.0,
+            "adapter_reward": 0.0,
+        },
+        {
+            "comparison_mode": "base_vs_adapter",
+            "expected_action": alpha_2,
+            "reference_action_canonical": qwen_grpo_job._canonical_json(alpha_2),
+            "base_completion_text": '{"action":{"tool":"alpha_tool","args":{"x":2}}}',
+            "base_completion_text_truncated": False,
+            "base_parsed_action": alpha_2,
+            "base_tool_match": True,
+            "base_arg_match_fraction": 1.0,
+            "base_reward": 0.0,
+            "adapter_completion_text": '{"action":{"tool":"beta_tool","args":{}}}',
+            "adapter_completion_text_truncated": False,
+            "adapter_parsed_action": beta,
+            "adapter_tool_match": False,
+            "adapter_arg_match_fraction": 0.0,
+            "adapter_reward": -0.3,
+        },
+    ]
+    completion_log.write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+    metrics = qwen_grpo_job._completion_log_metrics(completion_log)
+
+    assert metrics["comparison_mode"] == "base_vs_adapter"
+    assert metrics["sample_count"] == 2
+    assert metrics["expected_tool_counts"] == {"alpha_tool": 2}
+    assert metrics["base_tool_match_count"] == 1
+    assert metrics["adapter_tool_match_count"] == 1
+    assert metrics["base_exact_reference_action_count"] == 1
+    assert metrics["adapter_exact_reference_action_count"] == 1
+    assert metrics["base_parsed_tool_counts"] == {"alpha_tool": 1, "beta_tool": 1}
+    assert metrics["adapter_parsed_tool_counts"] == {"alpha_tool": 1, "beta_tool": 1}
+    assert metrics["adapter_changed_completion_text_count"] == 2
+    assert metrics["adapter_changed_action_count"] == 2
+    assert metrics["adapter_changed_tool_count"] == 2
+    assert metrics["adapter_improved_tool_match_count"] == 1
+    assert metrics["adapter_regressed_tool_match_count"] == 1
+    assert metrics["adapter_improved_exact_reference_action_count"] == 1
+    assert metrics["adapter_regressed_exact_reference_action_count"] == 1
 
 
 def test_plan_qwen_grpo_adapter_effect_check_writes_prompt_only_job(tmp_path: Path) -> None:

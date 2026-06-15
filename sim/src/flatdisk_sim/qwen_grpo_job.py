@@ -260,6 +260,7 @@ def plan_qwen_grpo_completion_eval(
     output_dir: Path,
     model_id: str | None = None,
     adapter_path: Path | None = None,
+    compare_base_adapter: bool = False,
     max_samples: int | None = None,
     sample_offset: int = 0,
     sample_stride: int = 1,
@@ -318,6 +319,7 @@ def plan_qwen_grpo_completion_eval(
         temperature=temperature,
         top_p=top_p,
         zero_reward_exact_action_bonus=resolved_bonus,
+        compare_base_adapter=compare_base_adapter,
     )
     validation = _validate_completion_eval_job_inputs(
         training_job,
@@ -326,6 +328,8 @@ def plan_qwen_grpo_completion_eval(
         eval_records=eval_records,
         require_existing_images=require_existing_images,
     )
+    if compare_base_adapter and adapter_path is None:
+        validation["blockers"].append("missing adapter_path for compare_base_adapter")
     if adapter_path is not None and not adapter_path.exists():
         validation["blockers"].append(f"missing adapter_path: {adapter_path}")
     job = {
@@ -358,6 +362,7 @@ def plan_qwen_grpo_completion_eval(
             "temperature": temperature,
             "top_p": top_p,
             "zero_reward_exact_action_bonus": resolved_bonus,
+            "compare_base_adapter": compare_base_adapter,
         },
         "dataset": validation["dataset"],
         "audit": {
@@ -368,6 +373,7 @@ def plan_qwen_grpo_completion_eval(
             "online_environment_reward": False,
             "require_existing_images": require_existing_images,
             "adapter_optional": True,
+            "adapter_compared_to_base_disabled": compare_base_adapter,
         },
     }
     (output_dir / "qwen_grpo_completion_eval_job.json").write_text(
@@ -383,6 +389,7 @@ def plan_qwen_grpo_completion_eval_from_dataset(
     output_dir: Path,
     model_id: str | None = None,
     adapter_path: Path | None = None,
+    compare_base_adapter: bool = False,
     max_samples: int | None = None,
     sample_offset: int = 0,
     sample_stride: int = 1,
@@ -437,6 +444,7 @@ def plan_qwen_grpo_completion_eval_from_dataset(
         temperature=temperature,
         top_p=top_p,
         zero_reward_exact_action_bonus=zero_reward_exact_action_bonus,
+        compare_base_adapter=compare_base_adapter,
     )
     validation = _validate_completion_eval_dataset_inputs(
         dataset_path=dataset_path,
@@ -451,6 +459,8 @@ def plan_qwen_grpo_completion_eval_from_dataset(
         for record in excluded_records
     ]
     validation["dataset"]["exclude_sample_ids_path"] = str(exclude_sample_ids_path) if exclude_sample_ids_path else ""
+    if compare_base_adapter and adapter_path is None:
+        validation["blockers"].append("missing adapter_path for compare_base_adapter")
     if adapter_path is not None and not adapter_path.exists():
         validation["blockers"].append(f"missing adapter_path: {adapter_path}")
     job = {
@@ -485,6 +495,7 @@ def plan_qwen_grpo_completion_eval_from_dataset(
             "top_p": top_p,
             "zero_reward_exact_action_bonus": zero_reward_exact_action_bonus,
             "exclude_sample_ids_path": str(exclude_sample_ids_path) if exclude_sample_ids_path else "",
+            "compare_base_adapter": compare_base_adapter,
         },
         "dataset": validation["dataset"],
         "audit": {
@@ -495,6 +506,7 @@ def plan_qwen_grpo_completion_eval_from_dataset(
             "online_environment_reward": False,
             "require_existing_images": require_existing_images,
             "adapter_optional": True,
+            "adapter_compared_to_base_disabled": compare_base_adapter,
             "source_training_job_required": False,
         },
     }
@@ -997,6 +1009,8 @@ def _completion_log_metrics(path: Path) -> dict[str, Any]:
                 records.append(json.loads(line))
             except json.JSONDecodeError:
                 malformed_count += 1
+    if any(record.get("comparison_mode") == "base_vs_adapter" for record in records):
+        return _paired_completion_log_metrics(records, malformed_count)
     completion_texts = [str(record.get("completion_text") or "") for record in records]
     exact_reference_count = 0
     parsed_action_count = 0
@@ -1063,6 +1077,122 @@ def _completion_log_metrics(path: Path) -> dict[str, Any]:
         "exact_reference_action_count_by_expected_tool": dict(sorted(exact_by_expected_tool.items())),
         "tool_match_count_by_expected_tool": dict(sorted(tool_match_by_expected_tool.items())),
     }
+
+
+def _paired_completion_log_metrics(records: list[dict[str, Any]], malformed_count: int) -> dict[str, Any]:
+    expected_tool_counts: Counter[str] = Counter()
+    metrics: dict[str, Any] = {
+        "sample_count": len(records),
+        "malformed_line_count": malformed_count,
+        "comparison_mode": "base_vs_adapter",
+    }
+    prefix_stats: dict[str, dict[str, Any]] = {}
+    exact_flags: dict[str, list[bool]] = {}
+    tool_flags: dict[str, list[bool]] = {}
+    for prefix in ("base", "adapter"):
+        parsed_action_count = 0
+        exact_reference_count = 0
+        positive_non_reference_count = 0
+        tool_match_count = 0
+        arg_match_fractions = []
+        completion_texts = []
+        parsed_tool_counts: Counter[str] = Counter()
+        exact_by_expected_tool: Counter[str] = Counter()
+        tool_match_by_expected_tool: Counter[str] = Counter()
+        exact_flags[prefix] = []
+        tool_flags[prefix] = []
+        for record in records:
+            parsed_action = record.get(f"{prefix}_parsed_action")
+            if not isinstance(parsed_action, dict):
+                parsed_action = {}
+            expected_action = (
+                record.get("expected_action")
+                if isinstance(record.get("expected_action"), dict)
+                else _reference_action_from_canonical(record.get("reference_action_canonical"))
+            )
+            expected_tool = _action_tool(expected_action) or "unknown"
+            if prefix == "base":
+                expected_tool_counts[expected_tool] += 1
+            parsed_tool = _action_tool(parsed_action) or "unparsed"
+            parsed_tool_counts[parsed_tool] += 1
+            if parsed_action:
+                parsed_action_count += 1
+            tool_match = (
+                bool(record.get(f"{prefix}_tool_match"))
+                if f"{prefix}_tool_match" in record
+                else _action_tool(parsed_action) == _action_tool(expected_action)
+            )
+            if parsed_action and tool_match:
+                tool_match_count += 1
+                tool_match_by_expected_tool[expected_tool] += 1
+            tool_flags[prefix].append(bool(parsed_action and tool_match))
+            arg_match_fraction = _optional_float(record.get(f"{prefix}_arg_match_fraction"))
+            if arg_match_fraction is None:
+                arg_match_fraction = (
+                    _arg_match_fraction(parsed_action, expected_action) if parsed_action and tool_match else 0.0
+                )
+            arg_match_fractions.append(arg_match_fraction)
+            exact_reference = _canonical_json(parsed_action) == record.get("reference_action_canonical")
+            exact_flags[prefix].append(exact_reference)
+            if exact_reference:
+                exact_reference_count += 1
+                exact_by_expected_tool[expected_tool] += 1
+            elif _optional_float(record.get(f"{prefix}_reward")) and float(record[f"{prefix}_reward"]) > 0:
+                positive_non_reference_count += 1
+            completion_texts.append(str(record.get(f"{prefix}_completion_text") or ""))
+        prefix_stats[prefix] = {
+            f"{prefix}_parsed_action_count": parsed_action_count,
+            f"{prefix}_exact_reference_action_count": exact_reference_count,
+            f"{prefix}_positive_non_reference_reward_count": positive_non_reference_count,
+            f"{prefix}_tool_match_count": tool_match_count,
+            f"{prefix}_parsed_action_rate": round(parsed_action_count / len(records), 6) if records else 0.0,
+            f"{prefix}_exact_reference_action_rate": round(exact_reference_count / len(records), 6)
+            if records
+            else 0.0,
+            f"{prefix}_tool_match_rate": round(tool_match_count / len(records), 6) if records else 0.0,
+            f"{prefix}_mean_arg_match_fraction": round(sum(arg_match_fractions) / len(arg_match_fractions), 6)
+            if arg_match_fractions
+            else 0.0,
+            f"{prefix}_markdown_fence_count": sum("```" in text for text in completion_texts),
+            f"{prefix}_truncated_text_count": sum(
+                bool(record.get(f"{prefix}_completion_text_truncated")) for record in records
+            ),
+            f"{prefix}_mean_completion_chars": round(
+                sum(len(text) for text in completion_texts) / len(completion_texts), 3
+            )
+            if completion_texts
+            else 0.0,
+            f"{prefix}_parsed_tool_counts": dict(sorted(parsed_tool_counts.items())),
+            f"{prefix}_exact_reference_action_count_by_expected_tool": dict(sorted(exact_by_expected_tool.items())),
+            f"{prefix}_tool_match_count_by_expected_tool": dict(sorted(tool_match_by_expected_tool.items())),
+        }
+    metrics["expected_tool_counts"] = dict(sorted(expected_tool_counts.items()))
+    metrics.update(prefix_stats["base"])
+    metrics.update(prefix_stats["adapter"])
+    metrics["adapter_changed_completion_text_count"] = sum(
+        str(record.get("base_completion_text") or "") != str(record.get("adapter_completion_text") or "")
+        for record in records
+    )
+    metrics["adapter_changed_action_count"] = sum(
+        record.get("base_parsed_action") != record.get("adapter_parsed_action") for record in records
+    )
+    metrics["adapter_changed_tool_count"] = sum(
+        _action_tool(record.get("base_parsed_action")) != _action_tool(record.get("adapter_parsed_action"))
+        for record in records
+    )
+    metrics["adapter_improved_tool_match_count"] = sum(
+        adapter and not base for base, adapter in zip(tool_flags["base"], tool_flags["adapter"], strict=True)
+    )
+    metrics["adapter_regressed_tool_match_count"] = sum(
+        base and not adapter for base, adapter in zip(tool_flags["base"], tool_flags["adapter"], strict=True)
+    )
+    metrics["adapter_improved_exact_reference_action_count"] = sum(
+        adapter and not base for base, adapter in zip(exact_flags["base"], exact_flags["adapter"], strict=True)
+    )
+    metrics["adapter_regressed_exact_reference_action_count"] = sum(
+        base and not adapter for base, adapter in zip(exact_flags["base"], exact_flags["adapter"], strict=True)
+    )
+    return metrics
 
 
 def _adapter_effect_log_metrics(path: Path) -> dict[str, Any]:
@@ -2081,6 +2211,7 @@ def _eval_launch_argv(
     temperature: float,
     top_p: float,
     zero_reward_exact_action_bonus: float,
+    compare_base_adapter: bool,
 ) -> list[str]:
     argv = [
         "python",
@@ -2104,6 +2235,8 @@ def _eval_launch_argv(
     ]
     if adapter_path is not None:
         argv.extend(["--adapter-path", str(adapter_path)])
+    if compare_base_adapter:
+        argv.append("--compare-base-adapter")
     return argv
 
 
@@ -2818,6 +2951,17 @@ def score_completion(text: str, record: dict, zero_reward_exact_action_bonus: fl
     return reward, parsed_action, diagnostics
 
 
+def completion_fields(prefix: str, completion: str, reward: float, parsed_action: dict, diagnostics: dict) -> dict:
+    return {
+        f"{prefix}_reward": reward,
+        f"{prefix}_parsed_action": parsed_action,
+        f"{prefix}_tool_match": diagnostics["tool_match"],
+        f"{prefix}_arg_match_fraction": diagnostics["arg_match_fraction"],
+        f"{prefix}_completion_text": completion[:4000],
+        f"{prefix}_completion_text_truncated": len(completion) > 4000,
+    }
+
+
 def prompt_messages(record: dict) -> list[dict]:
     messages = record.get("prompt_messages") if record.get("prompt_messages") is not None else record.get("prompt")
     return messages if isinstance(messages, list) else []
@@ -2870,6 +3014,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--zero-reward-exact-action-bonus", type=float, default=0.0)
+    parser.add_argument("--compare-base-adapter", action="store_true")
     args = parser.parse_args()
     if args.max_new_tokens < 1:
         parser.error("--max-new-tokens must be positive")
@@ -2879,6 +3024,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--top-p must be in (0, 1]")
     if args.zero_reward_exact_action_bonus < 0.0:
         parser.error("--zero-reward-exact-action-bonus must be non-negative")
+    if args.compare_base_adapter and not args.adapter_path:
+        parser.error("--compare-base-adapter requires --adapter-path")
     return args
 
 
@@ -2894,33 +3041,72 @@ def main() -> None:
     rows = []
     logged_at = strftime("%Y-%m-%dT%H:%M:%SZ", gmtime())
     for index, record in enumerate(records):
-        completion = generate_completion(processor, model, record, args)
-        reward, parsed_action, diagnostics = score_completion(
-            completion,
-            record,
-            args.zero_reward_exact_action_bonus,
-        )
         expected_action = parse_reference_action(record.get("reference_action_canonical"))
-        rows.append(
-            {
-                "schema": "flatdisk.qwen_grpo_completion_eval_sample.v1",
-                "logged_at": logged_at,
-                "completion_index": index,
-                "sample_id": record.get("sample_id"),
-                "source_rollout_id": record.get("source_rollout_id"),
-                "reward": reward,
-                "candidate_step_reward": record.get("candidate_step_reward"),
-                "candidate_step_reward_present": record.get("candidate_step_reward_present"),
-                "zero_reward_exact_action_bonus": args.zero_reward_exact_action_bonus,
-                "reference_action_canonical": record.get("reference_action_canonical"),
-                "expected_action": expected_action,
-                "parsed_action": parsed_action,
-                "tool_match": diagnostics["tool_match"],
-                "arg_match_fraction": diagnostics["arg_match_fraction"],
-                "completion_text": completion[:4000],
-                "completion_text_truncated": len(completion) > 4000,
-            }
-        )
+        row = {
+            "schema": "flatdisk.qwen_grpo_completion_eval_sample.v1",
+            "logged_at": logged_at,
+            "completion_index": index,
+            "sample_id": record.get("sample_id"),
+            "source_rollout_id": record.get("source_rollout_id"),
+            "candidate_step_reward": record.get("candidate_step_reward"),
+            "candidate_step_reward_present": record.get("candidate_step_reward_present"),
+            "zero_reward_exact_action_bonus": args.zero_reward_exact_action_bonus,
+            "reference_action_canonical": record.get("reference_action_canonical"),
+            "expected_action": expected_action,
+        }
+        if args.compare_base_adapter:
+            with model.disable_adapter():
+                base_completion = generate_completion(processor, model, record, args)
+            adapter_completion = generate_completion(processor, model, record, args)
+            base_reward, base_parsed_action, base_diagnostics = score_completion(
+                base_completion,
+                record,
+                args.zero_reward_exact_action_bonus,
+            )
+            adapter_reward, adapter_parsed_action, adapter_diagnostics = score_completion(
+                adapter_completion,
+                record,
+                args.zero_reward_exact_action_bonus,
+            )
+            row["comparison_mode"] = "base_vs_adapter"
+            row.update(completion_fields("base", base_completion, base_reward, base_parsed_action, base_diagnostics))
+            row.update(
+                completion_fields(
+                    "adapter",
+                    adapter_completion,
+                    adapter_reward,
+                    adapter_parsed_action,
+                    adapter_diagnostics,
+                )
+            )
+            row.update(
+                {
+                    "reward": adapter_reward,
+                    "parsed_action": adapter_parsed_action,
+                    "tool_match": adapter_diagnostics["tool_match"],
+                    "arg_match_fraction": adapter_diagnostics["arg_match_fraction"],
+                    "completion_text": adapter_completion[:4000],
+                    "completion_text_truncated": len(adapter_completion) > 4000,
+                }
+            )
+        else:
+            completion = generate_completion(processor, model, record, args)
+            reward, parsed_action, diagnostics = score_completion(
+                completion,
+                record,
+                args.zero_reward_exact_action_bonus,
+            )
+            row.update(
+                {
+                    "reward": reward,
+                    "parsed_action": parsed_action,
+                    "tool_match": diagnostics["tool_match"],
+                    "arg_match_fraction": diagnostics["arg_match_fraction"],
+                    "completion_text": completion[:4000],
+                    "completion_text_truncated": len(completion) > 4000,
+                }
+            )
+        rows.append(row)
     write_completion_log(args.completion_log, rows)
     print(json.dumps({"status": "complete", "sample_count": len(rows), "completion_log": str(args.completion_log)}, sort_keys=True))
 
@@ -3716,6 +3902,11 @@ def parse_eval_plan_args() -> argparse.Namespace:
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--zero-reward-exact-action-bonus", type=float, default=None)
     parser.add_argument(
+        "--compare-base-adapter",
+        action="store_true",
+        help="Generate base-disabled and adapter-enabled completions from one PEFT model load.",
+    )
+    parser.add_argument(
         "--exclude-sample-ids-jsonl",
         type=Path,
         default=None,
@@ -3742,6 +3933,7 @@ def eval_plan_main() -> int:
             top_p=args.top_p,
             zero_reward_exact_action_bonus=args.zero_reward_exact_action_bonus or 0.0,
             exclude_sample_ids_path=args.exclude_sample_ids_jsonl,
+            compare_base_adapter=args.compare_base_adapter,
             require_existing_images=not args.allow_missing_images,
         )
     else:
@@ -3757,6 +3949,7 @@ def eval_plan_main() -> int:
             temperature=args.temperature,
             top_p=args.top_p,
             zero_reward_exact_action_bonus=args.zero_reward_exact_action_bonus,
+            compare_base_adapter=args.compare_base_adapter,
             require_existing_images=not args.allow_missing_images,
         )
     print(
