@@ -25,6 +25,8 @@ QWEN_GRPO_COMPLETION_EVAL_JOB_SCHEMA = "flatdisk.qwen_grpo_completion_eval_job.v
 QWEN_GRPO_COMPLETION_EVAL_RESULT_SCHEMA = "flatdisk.qwen_grpo_completion_eval_result.v1"
 QWEN_GRPO_ADAPTER_EFFECT_JOB_SCHEMA = "flatdisk.qwen_grpo_adapter_effect_job.v1"
 QWEN_GRPO_ADAPTER_EFFECT_RESULT_SCHEMA = "flatdisk.qwen_grpo_adapter_effect_result.v1"
+QWEN_GRPO_ACTION_LIKELIHOOD_JOB_SCHEMA = "flatdisk.qwen_grpo_action_likelihood_job.v1"
+QWEN_GRPO_ACTION_LIKELIHOOD_RESULT_SCHEMA = "flatdisk.qwen_grpo_action_likelihood_result.v1"
 DEFAULT_EVAL_REQUIRED_PACKAGES = ["peft", "pillow", "torch", "torchvision", "transformers"]
 GRPO_RESPONSE_CONTRACT = (
     "GRPO_RESPONSE_CONTRACT\n"
@@ -637,6 +639,185 @@ def run_qwen_grpo_adapter_effect_check_job(
     return result
 
 
+def plan_qwen_grpo_action_likelihood_check(
+    completion_eval_job_input: Path,
+    *,
+    output_dir: Path,
+    adapter_path: Path,
+    model_id: str | None = None,
+    max_samples: int | None = None,
+    sample_offset: int = 0,
+    sample_stride: int = 1,
+    require_existing_images: bool = True,
+) -> dict[str, Any]:
+    if sample_offset < 0:
+        raise ValueError("sample_offset must be non-negative")
+    if sample_stride < 1:
+        raise ValueError("sample_stride must be at least 1")
+    if max_samples is not None and max_samples < 1:
+        raise ValueError("max_samples must be positive when set")
+    completion_eval_job_path = _resolve_qwen_grpo_completion_eval_job(completion_eval_job_input)
+    completion_eval_job = json.loads(completion_eval_job_path.read_text(encoding="utf-8"))
+    source_dataset_path = _job_path(
+        completion_eval_job,
+        "qwen_grpo_completion_eval_dataset_jsonl",
+        relative_to=completion_eval_job_path.parent,
+    )
+    source_records = _read_jsonl_if_exists(source_dataset_path)
+    likelihood_records = _select_eval_records(
+        source_records,
+        max_samples=max_samples,
+        sample_offset=sample_offset,
+        sample_stride=sample_stride,
+    )
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    dataset_path = output_dir / "qwen_grpo_action_likelihood_dataset.jsonl"
+    script_path = output_dir / "score_qwen_grpo_action_likelihood.py"
+    likelihood_log_path = output_dir / "action_likelihood_samples.jsonl"
+    _write_jsonl(dataset_path, likelihood_records)
+    _write_action_likelihood_script(script_path)
+
+    resolved_model_id = model_id or str(completion_eval_job.get("model_id") or DEFAULT_MODEL_ID)
+    launch_argv = _action_likelihood_launch_argv(
+        script_path=script_path,
+        dataset_path=dataset_path,
+        model_id=resolved_model_id,
+        output_dir=output_dir,
+        adapter_path=adapter_path,
+        likelihood_log_path=likelihood_log_path,
+    )
+    validation = _validate_action_likelihood_job_inputs(
+        completion_eval_job,
+        dataset_path=source_dataset_path,
+        source_record_count=len(source_records),
+        eval_records=likelihood_records,
+        adapter_path=adapter_path,
+        require_existing_images=require_existing_images,
+    )
+    job = {
+        "schema": QWEN_GRPO_ACTION_LIKELIHOOD_JOB_SCHEMA,
+        "created_at": strftime("%Y-%m-%dT%H:%M:%SZ", gmtime()),
+        "status": "ready" if not validation["blockers"] else "not_ready",
+        "blockers": validation["blockers"],
+        "warnings": validation["warnings"],
+        "source_completion_eval_job": str(completion_eval_job_path),
+        "source_completion_eval_job_schema": completion_eval_job.get("schema"),
+        "source_completion_eval_job_status": completion_eval_job.get("status"),
+        "source_dataset_jsonl": str(source_dataset_path) if source_dataset_path else "",
+        "qwen_grpo_action_likelihood_dataset_jsonl": str(dataset_path),
+        "output_dir": str(output_dir),
+        "action_likelihood_script": str(script_path),
+        "action_likelihood_script_sha256": _sha256_file(script_path),
+        "action_likelihood_log_jsonl": str(likelihood_log_path),
+        "result_path": str(output_dir / "qwen_grpo_action_likelihood_result.json"),
+        "evaluation_method": "qwen_peft_action_likelihood_check",
+        "model_id": resolved_model_id,
+        "adapter_path": str(adapter_path),
+        "required_packages": DEFAULT_EVAL_REQUIRED_PACKAGES,
+        "launch_argv": launch_argv,
+        "launch_command": _argv_to_command(launch_argv),
+        "action_likelihood_args": {
+            "max_samples": max_samples,
+            "sample_offset": sample_offset,
+            "sample_stride": sample_stride,
+            "target_format": "compact_action_json",
+        },
+        "dataset": validation["dataset"],
+        "audit": {
+            "prompt_only_dataset": True,
+            "reference_actions_are_sidecar_columns": True,
+            "reward_labels_excluded_from_messages": True,
+            "reference_action_json_appended_only_as_teacher_forced_target": True,
+            "reference_action_used_for_offline_teacher_forced_target_scoring": True,
+            "online_environment_reward": False,
+            "require_existing_images": require_existing_images,
+            "adapter_required": True,
+            "adapter_compared_by_disable_enable_on_same_peft_model": True,
+        },
+    }
+    (output_dir / "qwen_grpo_action_likelihood_job.json").write_text(
+        json.dumps(job, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return job
+
+
+def run_qwen_grpo_action_likelihood_check_job(
+    job_input: Path,
+    *,
+    result_dir: Path | None = None,
+    dry_run: bool = False,
+    check_dependencies: bool = True,
+    timeout_s: float | None = None,
+    launch_command: str | None = None,
+    tail_chars: int = 4000,
+) -> dict[str, Any]:
+    job_path = _resolve_qwen_grpo_action_likelihood_job(job_input)
+    job = json.loads(job_path.read_text(encoding="utf-8"))
+    result_dir = result_dir or Path(str(job.get("output_dir") or job_path.parent))
+    result_dir.mkdir(parents=True, exist_ok=True)
+    result_path = result_dir / "qwen_grpo_action_likelihood_result.json"
+    launch_argv = _job_launch_argv(job, launch_command_override=launch_command)
+    blockers = _action_likelihood_job_blockers(job, job_path=job_path, check_dependencies=check_dependencies)
+    if not launch_argv:
+        blockers.append("missing launch_command")
+    result: dict[str, Any] = {
+        "schema": QWEN_GRPO_ACTION_LIKELIHOOD_RESULT_SCHEMA,
+        "created_at": strftime("%Y-%m-%dT%H:%M:%SZ", gmtime()),
+        "completed_at": None,
+        "status": "not_ready",
+        "dry_run": dry_run,
+        "job_manifest": str(job_path),
+        "result_path": str(result_path),
+        "model_id": job.get("model_id"),
+        "adapter_path": job.get("adapter_path"),
+        "sample_count": (job.get("dataset") or {}).get("eval_sample_count"),
+        "launch_command": _argv_to_command(launch_argv),
+        "launch_argv": launch_argv,
+        "returncode": None,
+        "stdout_tail": "",
+        "stderr_tail": "",
+        "duration_s": None,
+        "blockers": blockers,
+        "dependency_check": _dependency_check_payload(job, enabled=check_dependencies),
+    }
+    if blockers:
+        result["completed_at"] = strftime("%Y-%m-%dT%H:%M:%SZ", gmtime())
+        _write_result(result_path, result)
+        return result
+    if dry_run:
+        result["status"] = "dry_run"
+        result["completed_at"] = strftime("%Y-%m-%dT%H:%M:%SZ", gmtime())
+        _write_result(result_path, result)
+        return result
+
+    start = monotonic()
+    try:
+        completed = subprocess.run(
+            launch_argv,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=timeout_s,
+        )
+        result["returncode"] = completed.returncode
+        result["stdout_tail"] = _tail(completed.stdout, tail_chars)
+        result["stderr_tail"] = _tail(completed.stderr, tail_chars)
+        result["status"] = "complete" if completed.returncode == 0 else "failed"
+    except subprocess.TimeoutExpired as exc:
+        result["status"] = "failed"
+        result["blockers"] = [f"action likelihood command timed out after {timeout_s} second(s)"]
+        result["stdout_tail"] = _tail(_decode_timeout_output(exc.stdout), tail_chars)
+        result["stderr_tail"] = _tail(_decode_timeout_output(exc.stderr), tail_chars)
+    finally:
+        result["duration_s"] = round(monotonic() - start, 3)
+        result["completed_at"] = strftime("%Y-%m-%dT%H:%M:%SZ", gmtime())
+        _attach_action_likelihood_log_summary(result, job, job_path=job_path)
+    _write_result(result_path, result)
+    return result
+
+
 def _attach_completion_log_summary(result: dict[str, Any], job: dict[str, Any], *, job_path: Path) -> None:
     completion_log = _job_path(job, "completion_log_jsonl", relative_to=job_path.parent)
     result["completion_log_jsonl"] = str(completion_log) if completion_log else ""
@@ -650,6 +831,17 @@ def _attach_adapter_effect_log_summary(result: dict[str, Any], job: dict[str, An
     result["adapter_effect_log_sample_count"] = _count_lines(effect_log) if effect_log and effect_log.exists() else 0
     result["adapter_effect_log_metrics"] = (
         _adapter_effect_log_metrics(effect_log) if effect_log and effect_log.exists() else {}
+    )
+
+
+def _attach_action_likelihood_log_summary(result: dict[str, Any], job: dict[str, Any], *, job_path: Path) -> None:
+    likelihood_log = _job_path(job, "action_likelihood_log_jsonl", relative_to=job_path.parent)
+    result["action_likelihood_log_jsonl"] = str(likelihood_log) if likelihood_log else ""
+    result["action_likelihood_log_sample_count"] = (
+        _count_lines(likelihood_log) if likelihood_log and likelihood_log.exists() else 0
+    )
+    result["action_likelihood_log_metrics"] = (
+        _action_likelihood_log_metrics(likelihood_log) if likelihood_log and likelihood_log.exists() else {}
     )
 
 
@@ -799,6 +991,96 @@ def _adapter_effect_log_metrics(path: Path) -> dict[str, Any]:
     }
 
 
+def _action_likelihood_log_metrics(path: Path) -> dict[str, Any]:
+    records = []
+    malformed_count = 0
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                malformed_count += 1
+    expected_tool_counts: Counter[str] = Counter()
+    target_delta_by_tool: dict[str, list[float]] = defaultdict(list)
+    tool_delta_by_tool: dict[str, list[float]] = defaultdict(list)
+    target_deltas = []
+    tool_deltas = []
+    target_token_counts = []
+    tool_token_counts = []
+    target_improved_count = 0
+    tool_improved_count = 0
+    tool_span_found_count = 0
+    zero_tool_token_count = 0
+    first_token_deltas = []
+    first_token_improved_count = 0
+    target_nll_deltas = []
+    for record in records:
+        expected_tool = str(record.get("expected_tool") or "unknown")
+        expected_tool_counts[expected_tool] += 1
+        target_delta = _optional_float(record.get("target_mean_logprob_delta"))
+        tool_delta = _optional_float(record.get("tool_mean_logprob_delta"))
+        first_token_delta = _optional_float(record.get("first_target_token_logprob_delta"))
+        target_nll_delta = _optional_float(record.get("target_nll_delta"))
+        target_token_count = _optional_int(record.get("target_token_count"))
+        tool_token_count = _optional_int(record.get("tool_token_count"))
+        target_token_counts.append(target_token_count)
+        tool_token_counts.append(tool_token_count)
+        if bool(record.get("tool_span_found")):
+            tool_span_found_count += 1
+        if target_delta is not None:
+            target_deltas.append(target_delta)
+            target_delta_by_tool[expected_tool].append(target_delta)
+            if target_delta > 0:
+                target_improved_count += 1
+        if tool_delta is not None:
+            tool_deltas.append(tool_delta)
+            tool_delta_by_tool[expected_tool].append(tool_delta)
+            if tool_delta > 0:
+                tool_improved_count += 1
+        if first_token_delta is not None:
+            first_token_deltas.append(first_token_delta)
+            if first_token_delta > 0:
+                first_token_improved_count += 1
+        if target_nll_delta is not None:
+            target_nll_deltas.append(target_nll_delta)
+        if tool_token_count == 0:
+            zero_tool_token_count += 1
+    return {
+        "sample_count": len(records),
+        "malformed_line_count": malformed_count,
+        "expected_tool_counts": dict(sorted(expected_tool_counts.items())),
+        "target_token_count_mean": _rounded_mean(target_token_counts),
+        "tool_token_count_mean": _rounded_mean(tool_token_counts),
+        "zero_tool_token_count": zero_tool_token_count,
+        "tool_span_found_count": tool_span_found_count,
+        "tool_span_found_rate": round(tool_span_found_count / len(records), 6) if records else 0.0,
+        "target_mean_logprob_delta_mean": _rounded_mean(target_deltas, digits=9),
+        "target_mean_logprob_delta_min": round(min(target_deltas), 9) if target_deltas else 0.0,
+        "target_mean_logprob_delta_max": round(max(target_deltas), 9) if target_deltas else 0.0,
+        "target_mean_logprob_improved_count": target_improved_count,
+        "target_mean_logprob_improved_rate": round(target_improved_count / len(records), 6) if records else 0.0,
+        "target_nll_delta_mean": _rounded_mean(target_nll_deltas, digits=9),
+        "first_target_token_logprob_delta_mean": _rounded_mean(first_token_deltas, digits=9),
+        "first_target_token_logprob_improved_count": first_token_improved_count,
+        "first_target_token_logprob_improved_rate": round(first_token_improved_count / len(records), 6)
+        if records
+        else 0.0,
+        "tool_mean_logprob_delta_mean": _rounded_mean(tool_deltas, digits=9),
+        "tool_mean_logprob_delta_min": round(min(tool_deltas), 9) if tool_deltas else 0.0,
+        "tool_mean_logprob_delta_max": round(max(tool_deltas), 9) if tool_deltas else 0.0,
+        "tool_mean_logprob_improved_count": tool_improved_count,
+        "tool_mean_logprob_improved_rate": round(tool_improved_count / len(records), 6) if records else 0.0,
+        "target_mean_logprob_delta_by_expected_tool": {
+            tool: _rounded_mean(values, digits=9) for tool, values in sorted(target_delta_by_tool.items())
+        },
+        "tool_mean_logprob_delta_by_expected_tool": {
+            tool: _rounded_mean(values, digits=9) for tool, values in sorted(tool_delta_by_tool.items())
+        },
+    }
+
+
 def _trl_dataset_records(ppo_step_records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     records = []
     for record in ppo_step_records:
@@ -922,6 +1204,10 @@ def _reward_summary(values: list[float]) -> dict[str, Any]:
         "zero_count": sum(value == 0 for value in values),
         "positive_count": sum(value > 0 for value in values),
     }
+
+
+def _rounded_mean(values: list[float | int], *, digits: int = 6) -> float:
+    return round(sum(values) / len(values), digits) if values else 0.0
 
 
 def _append_grpo_response_contract(messages: Any) -> list[dict[str, Any]]:
@@ -1171,6 +1457,87 @@ def _validate_adapter_effect_job_inputs(
     }
 
 
+def _validate_action_likelihood_job_inputs(
+    completion_eval_job: dict[str, Any],
+    *,
+    dataset_path: Path | None,
+    source_record_count: int,
+    eval_records: list[dict[str, Any]],
+    adapter_path: Path,
+    require_existing_images: bool,
+) -> dict[str, Any]:
+    blockers: list[str] = []
+    warnings: list[str] = []
+    if completion_eval_job.get("schema") != QWEN_GRPO_COMPLETION_EVAL_JOB_SCHEMA:
+        blockers.append(f"unexpected source completion eval job schema: {completion_eval_job.get('schema')}")
+    if completion_eval_job.get("status") != "ready":
+        blockers.append(f"source completion eval job is not ready: {completion_eval_job.get('status')}")
+    if dataset_path is None or not dataset_path.exists():
+        blockers.append(
+            "missing source qwen_grpo_completion_eval_dataset_jsonl: "
+            f"{completion_eval_job.get('qwen_grpo_completion_eval_dataset_jsonl')}"
+        )
+    if not eval_records:
+        blockers.append("action likelihood dataset contains no prompt samples")
+
+    missing_images = sorted(
+        {
+            str(path)
+            for record in eval_records
+            for path in record.get("image_paths", [])
+            if not Path(str(path)).exists()
+        }
+    )
+    malformed_count = sum(
+        1
+        for record in eval_records
+        if not isinstance(record.get("prompt_messages") or record.get("prompt"), list)
+        or not isinstance(record.get("reference_action_json"), dict)
+        or not record.get("reference_action_canonical")
+    )
+    empty_target_count = sum(
+        1
+        for record in eval_records
+        if not _compact_action_response(record.get("reference_action_json")).strip()
+    )
+    forbidden_hits = _forbidden_prompt_message_hits(eval_records)
+    sidecar_leak_hits = _sidecar_prompt_leak_hits(eval_records)
+    adapter_blockers = _adapter_path_blockers(adapter_path)
+    if malformed_count:
+        blockers.append(f"{malformed_count} action likelihood sample(s) are malformed")
+    if empty_target_count:
+        blockers.append(f"{empty_target_count} action likelihood sample(s) have empty target action JSON")
+    if require_existing_images and missing_images:
+        blockers.append(f"{len(missing_images)} action likelihood image reference(s) are missing")
+    elif missing_images:
+        warnings.append(f"{len(missing_images)} action likelihood image reference(s) are missing")
+    if forbidden_hits:
+        blockers.append("action likelihood prompt messages contain forbidden privileged token(s): " + ", ".join(forbidden_hits))
+    if sidecar_leak_hits:
+        blockers.append("action likelihood prompt messages contain scoring sidecar token(s): " + ", ".join(sidecar_leak_hits))
+    blockers.extend(adapter_blockers)
+    return {
+        "blockers": blockers,
+        "warnings": warnings,
+        "dataset": {
+            "source_sample_count": source_record_count,
+            "eval_sample_count": len(eval_records),
+            "image_reference_count": sum(
+                len(record.get("image_paths", []))
+                for record in eval_records
+                if isinstance(record.get("image_paths"), list)
+            ),
+            "missing_image_count": len(missing_images),
+            "missing_images": missing_images,
+            "forbidden_model_token_hits": forbidden_hits,
+            "sidecar_prompt_leak_hits": sidecar_leak_hits,
+            "reference_action_tool_counts": _grpo_dataset_action_summary(eval_records)["reference_action_tool_counts"],
+            "adapter_path_blockers": adapter_blockers,
+            "empty_target_count": empty_target_count,
+        },
+    }
+
+
 def _adapter_path_blockers(adapter_path: Path) -> list[str]:
     if not adapter_path.exists():
         return [f"missing adapter_path: {adapter_path}"]
@@ -1238,6 +1605,20 @@ def _resolve_qwen_grpo_adapter_effect_job(job_input: Path) -> Path:
         if candidate.exists():
             return candidate
     raise FileNotFoundError(f"could not find qwen_grpo_adapter_effect_job.json under {job_input}")
+
+
+def _resolve_qwen_grpo_action_likelihood_job(job_input: Path) -> Path:
+    path = job_input.expanduser()
+    if path.is_file() and path.name == "qwen_grpo_action_likelihood_job.json":
+        return path
+    candidates = [
+        path / "qwen_grpo_action_likelihood_job.json",
+        path / "qwen_grpo_action_likelihood" / "qwen_grpo_action_likelihood_job.json",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(f"could not find qwen_grpo_action_likelihood_job.json under {job_input}")
 
 
 def _resolve_manifest_path(manifest: dict[str, Any], key: str) -> Path | None:
@@ -1353,6 +1734,38 @@ def _adapter_effect_job_blockers(
         missing_packages = _missing_required_packages(job)
         if missing_packages:
             blockers.append("missing required adapter effect package(s): " + ", ".join(missing_packages))
+    return blockers
+
+
+def _action_likelihood_job_blockers(
+    job: dict[str, Any],
+    *,
+    job_path: Path,
+    check_dependencies: bool,
+) -> list[str]:
+    blockers: list[str] = []
+    if job.get("schema") != QWEN_GRPO_ACTION_LIKELIHOOD_JOB_SCHEMA:
+        blockers.append(f"unexpected action likelihood job schema: {job.get('schema')}")
+    if job.get("status") != "ready":
+        blockers.append(f"action likelihood job is not ready: {job.get('status')}")
+    script_path = _job_path(job, "action_likelihood_script", relative_to=job_path.parent)
+    if script_path is None or not script_path.exists():
+        blockers.append(f"missing action_likelihood_script: {job.get('action_likelihood_script')}")
+    dataset_path = _job_path(job, "qwen_grpo_action_likelihood_dataset_jsonl", relative_to=job_path.parent)
+    if dataset_path is None or not dataset_path.exists():
+        blockers.append(
+            "missing qwen_grpo_action_likelihood_dataset_jsonl: "
+            f"{job.get('qwen_grpo_action_likelihood_dataset_jsonl')}"
+        )
+    adapter_path_value = str(job.get("adapter_path") or "")
+    if not adapter_path_value:
+        blockers.append("missing adapter_path")
+    else:
+        blockers.extend(_adapter_path_blockers(Path(adapter_path_value)))
+    if check_dependencies:
+        missing_packages = _missing_required_packages(job)
+        if missing_packages:
+            blockers.append("missing required action likelihood package(s): " + ", ".join(missing_packages))
     return blockers
 
 
@@ -1500,6 +1913,31 @@ def _adapter_effect_launch_argv(
     ]
 
 
+def _action_likelihood_launch_argv(
+    *,
+    script_path: Path,
+    dataset_path: Path,
+    model_id: str,
+    output_dir: Path,
+    adapter_path: Path,
+    likelihood_log_path: Path,
+) -> list[str]:
+    return [
+        "python",
+        str(script_path),
+        "--dataset",
+        str(dataset_path),
+        "--model-id",
+        model_id,
+        "--adapter-path",
+        str(adapter_path),
+        "--output-dir",
+        str(output_dir),
+        "--action-likelihood-log",
+        str(likelihood_log_path),
+    ]
+
+
 def _job_launch_argv(job: dict[str, Any], *, launch_command_override: str | None) -> list[str]:
     if launch_command_override:
         return shlex.split(launch_command_override)
@@ -1524,6 +1962,10 @@ def _write_eval_script(path: Path) -> None:
 
 def _write_adapter_effect_script(path: Path) -> None:
     path.write_text(_ADAPTER_EFFECT_SCRIPT, encoding="utf-8")
+
+
+def _write_action_likelihood_script(path: Path) -> None:
+    path.write_text(_ACTION_LIKELIHOOD_SCRIPT, encoding="utf-8")
 
 
 def _write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
@@ -1596,6 +2038,21 @@ def _optional_float(value: Any) -> float | None:
 
 def _canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, default=str)
+
+
+def _compact_action_response(action: Any) -> str:
+    if not isinstance(action, dict) or not action:
+        return ""
+    tool = action.get("tool")
+    args = action.get("args") if isinstance(action.get("args"), dict) else {}
+    if tool is None:
+        return ""
+    return json.dumps(
+        {"action": {"tool": str(tool), "args": args}},
+        ensure_ascii=True,
+        separators=(",", ":"),
+        default=str,
+    )
 
 
 def _reference_action_from_canonical(value: Any) -> dict[str, Any]:
@@ -2240,6 +2697,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 from pathlib import Path
 from time import gmtime, strftime
 
@@ -2476,6 +2934,337 @@ def main() -> None:
                 "status": "complete",
                 "sample_count": sample_count,
                 "adapter_effect_log": str(args.adapter_effect_log),
+                "adapter_metadata": metadata,
+            },
+            sort_keys=True,
+        )
+    )
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+
+_ACTION_LIKELIHOOD_SCRIPT = '''"""Score reference action JSON likelihood under base-disabled and adapter-enabled Qwen."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+from pathlib import Path
+from time import gmtime, strftime
+
+import torch
+from PIL import Image
+from peft import PeftModel
+from transformers import AutoModelForImageTextToText, AutoProcessor
+
+
+def read_jsonl(path: Path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def load_image(path: str) -> Image.Image:
+    return Image.open(path).convert("RGB")
+
+
+def compact_action_response(action) -> str:
+    if not isinstance(action, dict) or not action:
+        return ""
+    tool = action.get("tool")
+    args = action.get("args") if isinstance(action.get("args"), dict) else {}
+    if tool is None:
+        return ""
+    return json.dumps(
+        {"action": {"tool": str(tool), "args": args}},
+        ensure_ascii=True,
+        separators=(",", ":"),
+        default=str,
+    )
+
+
+def parse_reference_action(value) -> dict:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return {}
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def action_tool(action) -> str | None:
+    if not isinstance(action, dict):
+        return None
+    tool = action.get("tool")
+    return str(tool) if tool is not None else None
+
+
+def prompt_messages(record: dict) -> list[dict]:
+    messages = record.get("prompt_messages") if record.get("prompt_messages") is not None else record.get("prompt")
+    return messages if isinstance(messages, list) else []
+
+
+def model_device(model):
+    try:
+        return next(model.parameters()).device
+    except StopIteration:
+        return torch.device("cpu")
+
+
+def decode_token(processor, token_id: int) -> str:
+    try:
+        return processor.decode([int(token_id)], skip_special_tokens=False)
+    except Exception:
+        return ""
+
+
+def token_char_spans(pieces: list[str]) -> list[tuple[int, int]]:
+    spans = []
+    cursor = 0
+    for piece in pieces:
+        start = cursor
+        cursor += len(piece)
+        spans.append((start, cursor))
+    return spans
+
+
+def overlap(start_a: int, end_a: int, start_b: int, end_b: int) -> bool:
+    return start_a < end_b and start_b < end_a
+
+
+def prepare_teacher_forced_inputs(processor, model, record: dict, target_text: str) -> tuple[dict, dict]:
+    messages = prompt_messages(record)
+    images = [load_image(path) for path in record.get("image_paths", [])]
+    prompt_text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    prompt_kwargs = {"text": [prompt_text], "return_tensors": "pt"}
+    full_kwargs = {"text": [prompt_text + target_text], "return_tensors": "pt"}
+    if images:
+        prompt_kwargs["images"] = images
+        full_kwargs["images"] = images
+    prompt_inputs = processor(**prompt_kwargs)
+    full_inputs = processor(**full_kwargs)
+    prompt_input_ids = prompt_inputs.get("input_ids")
+    full_input_ids = full_inputs.get("input_ids")
+    target_start = int(prompt_input_ids.shape[1]) if prompt_input_ids is not None else 0
+    full_token_count = int(full_input_ids.shape[1]) if full_input_ids is not None else 0
+    target_token_count = max(0, full_token_count - target_start)
+    if hasattr(full_inputs, "to"):
+        full_inputs = full_inputs.to(model_device(model))
+    return full_inputs, {
+        "image_count": len(images),
+        "prompt_text_sha256": hashlib.sha256(prompt_text.encode("utf-8")).hexdigest(),
+        "target_text_sha256": hashlib.sha256(target_text.encode("utf-8")).hexdigest(),
+        "input_token_count": full_token_count,
+        "prompt_token_count": target_start,
+        "target_start_token_index": target_start,
+        "target_token_count": target_token_count,
+    }
+
+
+def logprobs_for_target(logits: torch.Tensor, input_ids: torch.Tensor, target_start: int, target_count: int) -> torch.Tensor:
+    if target_count <= 0 or target_start <= 0:
+        return torch.empty(0, dtype=torch.float32)
+    target_ids = input_ids[0, target_start : target_start + target_count].detach().cpu()
+    prediction_logits = logits[0, target_start - 1 : target_start + target_count - 1, :].detach().float().cpu()
+    log_probs = torch.log_softmax(prediction_logits, dim=-1)
+    return log_probs.gather(1, target_ids.unsqueeze(1)).squeeze(1)
+
+
+def mean(values: list[float]) -> float:
+    return sum(values) / len(values) if values else 0.0
+
+
+def adapter_metadata(model, adapter_path: Path) -> dict:
+    peft_config = getattr(model, "peft_config", {})
+    active_adapter = getattr(model, "active_adapter", None)
+    if callable(active_adapter):
+        try:
+            active_adapter = active_adapter()
+        except TypeError:
+            active_adapter = str(active_adapter)
+    adapter_param_count = 0
+    for name, parameter in model.named_parameters():
+        lower_name = name.lower()
+        if "lora" in lower_name or "adapter" in lower_name:
+            adapter_param_count += int(parameter.numel())
+    return {
+        "adapter_path": str(adapter_path),
+        "active_adapter": str(active_adapter) if active_adapter is not None else "",
+        "peft_adapter_names": sorted(str(key) for key in peft_config.keys()) if isinstance(peft_config, dict) else [],
+        "adapter_parameter_count": adapter_param_count,
+    }
+
+
+def safe_exp(value: float) -> float:
+    return math.exp(min(float(value), 50.0))
+
+
+def target_tool_token_indices(processor, target_ids: list[int], target_text: str, tool: str) -> tuple[list[int], bool]:
+    if not tool:
+        return [], False
+    pieces = [decode_token(processor, token_id) for token_id in target_ids]
+    spans = token_char_spans(pieces)
+    tool_segment = f'"tool":"{tool}"'
+    tool_start = target_text.find(tool_segment)
+    tool_end = tool_start + len(tool_segment) if tool_start >= 0 else -1
+    if tool_start < 0:
+        tool_start = target_text.find(tool)
+        tool_end = tool_start + len(tool) if tool_start >= 0 else -1
+    span_found = tool_start >= 0
+    if not span_found:
+        fallback = [index for index, piece in enumerate(pieces) if tool in piece or piece in tool]
+        return fallback, False
+    indices = [
+        index
+        for index, (start, end) in enumerate(spans)
+        if overlap(start, end, tool_start, tool_end) or tool in pieces[index]
+    ]
+    if not indices:
+        fallback = [index for index, piece in enumerate(pieces) if tool in piece or piece in tool]
+        return fallback, False
+    return indices, True
+
+
+def score_record(processor, model, record: dict, args: argparse.Namespace, metadata: dict) -> dict:
+    expected_action = record.get("reference_action_json") if isinstance(record.get("reference_action_json"), dict) else {}
+    if not expected_action:
+        expected_action = parse_reference_action(record.get("reference_action_canonical"))
+    expected_tool = action_tool(expected_action) or "unknown"
+    target_text = compact_action_response(expected_action)
+    full_inputs, input_meta = prepare_teacher_forced_inputs(processor, model, record, target_text)
+    input_ids = full_inputs.get("input_ids")
+    target_start = int(input_meta["target_start_token_index"])
+    target_count = int(input_meta["target_token_count"])
+    with torch.inference_mode():
+        with model.disable_adapter():
+            base_outputs = model(**full_inputs)
+        adapter_outputs = model(**full_inputs)
+    base_logprobs = logprobs_for_target(base_outputs.logits, input_ids, target_start, target_count)
+    adapter_logprobs = logprobs_for_target(adapter_outputs.logits, input_ids, target_start, target_count)
+    target_ids = input_ids[0, target_start : target_start + target_count].detach().cpu().tolist() if target_count else []
+    target_tokens = [decode_token(processor, token_id) for token_id in target_ids]
+    tool_indices, tool_span_found = target_tool_token_indices(processor, target_ids, target_text, expected_tool)
+    token_rows = []
+    deltas = []
+    for index, (token_id, token_text, base_lp, adapter_lp) in enumerate(
+        zip(target_ids, target_tokens, base_logprobs.tolist(), adapter_logprobs.tolist(), strict=True)
+    ):
+        delta = float(adapter_lp - base_lp)
+        deltas.append(delta)
+        if index in tool_indices:
+            token_rows.append(
+                {
+                    "target_token_index": index,
+                    "token_id": int(token_id),
+                    "token": token_text,
+                    "base_logprob": round(float(base_lp), 9),
+                    "adapter_logprob": round(float(adapter_lp), 9),
+                    "logprob_delta": round(delta, 9),
+                }
+            )
+    base_values = [float(value) for value in base_logprobs.tolist()]
+    adapter_values = [float(value) for value in adapter_logprobs.tolist()]
+    tool_base_values = [base_values[index] for index in tool_indices if index < len(base_values)]
+    tool_adapter_values = [adapter_values[index] for index in tool_indices if index < len(adapter_values)]
+    target_base_sum = sum(base_values)
+    target_adapter_sum = sum(adapter_values)
+    tool_base_sum = sum(tool_base_values)
+    tool_adapter_sum = sum(tool_adapter_values)
+    base_target_mean = mean(base_values)
+    adapter_target_mean = mean(adapter_values)
+    base_tool_mean = mean(tool_base_values)
+    adapter_tool_mean = mean(tool_adapter_values)
+    base_target_nll = -base_target_mean
+    adapter_target_nll = -adapter_target_mean
+    first_target_token_delta = deltas[0] if deltas else 0.0
+    return {
+        "schema": "flatdisk.qwen_grpo_action_likelihood_sample.v1",
+        "logged_at": strftime("%Y-%m-%dT%H:%M:%SZ", gmtime()),
+        "sample_id": record.get("sample_id"),
+        "source_rollout_id": record.get("source_rollout_id"),
+        "expected_action": expected_action,
+        "expected_tool": expected_tool,
+        "reference_action_canonical": record.get("reference_action_canonical"),
+        "target_text": target_text,
+        "target_text_sha256": input_meta["target_text_sha256"],
+        "target_token_count": target_count,
+        "tool_token_count": len(tool_indices),
+        "tool_span_found": tool_span_found,
+        "base_target_logprob_sum": round(target_base_sum, 9),
+        "adapter_target_logprob_sum": round(target_adapter_sum, 9),
+        "target_logprob_sum_delta": round(target_adapter_sum - target_base_sum, 9),
+        "base_target_mean_logprob": round(base_target_mean, 9),
+        "adapter_target_mean_logprob": round(adapter_target_mean, 9),
+        "target_mean_logprob_delta": round(adapter_target_mean - base_target_mean, 9),
+        "base_target_nll": round(base_target_nll, 9),
+        "adapter_target_nll": round(adapter_target_nll, 9),
+        "target_nll_delta": round(adapter_target_nll - base_target_nll, 9),
+        "base_target_perplexity": round(safe_exp(base_target_nll), 9),
+        "adapter_target_perplexity": round(safe_exp(adapter_target_nll), 9),
+        "base_tool_logprob_sum": round(tool_base_sum, 9),
+        "adapter_tool_logprob_sum": round(tool_adapter_sum, 9),
+        "tool_logprob_sum_delta": round(tool_adapter_sum - tool_base_sum, 9),
+        "base_tool_mean_logprob": round(base_tool_mean, 9),
+        "adapter_tool_mean_logprob": round(adapter_tool_mean, 9),
+        "tool_mean_logprob_delta": round(adapter_tool_mean - base_tool_mean, 9)
+        if tool_indices
+        else None,
+        "first_target_token_logprob_delta": round(first_target_token_delta, 9),
+        "adapter_improved_target_mean_logprob": adapter_target_mean > base_target_mean,
+        "adapter_improved_tool_mean_logprob": adapter_tool_mean > base_tool_mean
+        if tool_indices
+        else False,
+        "target_token_mean_abs_logprob_delta": round(mean([abs(value) for value in deltas]), 9),
+        "tool_token_scores": token_rows,
+        "adapter_metadata": metadata,
+        **input_meta,
+    }
+
+
+def append_likelihood_log(path: Path, row: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, sort_keys=True, default=str) + "\\n")
+        handle.flush()
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dataset", type=Path, required=True)
+    parser.add_argument("--model-id", required=True)
+    parser.add_argument("--adapter-path", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--action-likelihood-log", type=Path, required=True)
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    processor = AutoProcessor.from_pretrained(args.model_id, padding_side="left")
+    base_model = AutoModelForImageTextToText.from_pretrained(args.model_id, torch_dtype="auto", device_map="auto")
+    model = PeftModel.from_pretrained(base_model, str(args.adapter_path))
+    model.eval()
+    metadata = adapter_metadata(model, args.adapter_path)
+    records = read_jsonl(args.dataset)
+    args.action_likelihood_log.parent.mkdir(parents=True, exist_ok=True)
+    args.action_likelihood_log.write_text("", encoding="utf-8")
+    sample_count = 0
+    for record in records:
+        row = score_record(processor, model, record, args, metadata)
+        append_likelihood_log(args.action_likelihood_log, row)
+        sample_count += 1
+    print(
+        json.dumps(
+            {
+                "status": "complete",
+                "sample_count": sample_count,
+                "action_likelihood_log": str(args.action_likelihood_log),
                 "adapter_metadata": metadata,
             },
             sort_keys=True,
@@ -2814,6 +3603,112 @@ def adapter_effect_run_main() -> int:
                 "result_path": result["result_path"],
                 "launch_command": result["launch_command"],
                 "adapter_effect_log_metrics": result.get("adapter_effect_log_metrics", {}),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    if result["status"] in {"complete", "dry_run"}:
+        return 0
+    if result["status"] == "not_ready":
+        return 2
+    return 1
+
+
+def parse_action_likelihood_plan_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Plan a Qwen GRPO PEFT action-likelihood check.")
+    parser.add_argument(
+        "--completion-eval-job",
+        type=Path,
+        required=True,
+        help="qwen_grpo_completion_eval_job.json or directory",
+    )
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--adapter-path", type=Path, required=True)
+    parser.add_argument("--model-id", default=None)
+    parser.add_argument("--max-samples", type=int, default=None)
+    parser.add_argument("--sample-offset", type=int, default=0)
+    parser.add_argument("--sample-stride", type=int, default=1)
+    parser.add_argument("--allow-missing-images", action="store_true")
+    parser.add_argument("--fail-on-not-ready", action="store_true")
+    args = parser.parse_args()
+    if args.sample_offset < 0:
+        parser.error("--sample-offset must be non-negative")
+    if args.sample_stride < 1:
+        parser.error("--sample-stride must be at least 1")
+    if args.max_samples is not None and args.max_samples < 1:
+        parser.error("--max-samples must be positive when set")
+    return args
+
+
+def action_likelihood_plan_main() -> int:
+    args = parse_action_likelihood_plan_args()
+    job = plan_qwen_grpo_action_likelihood_check(
+        args.completion_eval_job,
+        output_dir=args.output_dir,
+        adapter_path=args.adapter_path,
+        model_id=args.model_id,
+        max_samples=args.max_samples,
+        sample_offset=args.sample_offset,
+        sample_stride=args.sample_stride,
+        require_existing_images=not args.allow_missing_images,
+    )
+    print(
+        json.dumps(
+            {
+                "status": job["status"],
+                "sample_count": job["dataset"]["eval_sample_count"],
+                "reference_action_tool_counts": job["dataset"]["reference_action_tool_counts"],
+                "missing_image_count": job["dataset"]["missing_image_count"],
+                "forbidden_model_token_hits": job["dataset"]["forbidden_model_token_hits"],
+                "sidecar_prompt_leak_hits": job["dataset"]["sidecar_prompt_leak_hits"],
+                "adapter_path_blockers": job["dataset"]["adapter_path_blockers"],
+                "empty_target_count": job["dataset"]["empty_target_count"],
+                "job_path": str(Path(job["output_dir"]) / "qwen_grpo_action_likelihood_job.json"),
+                "action_likelihood_script": job["action_likelihood_script"],
+                "launch_command": job["launch_command"],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    if args.fail_on_not_ready and job["status"] != "ready":
+        return 2
+    return 0
+
+
+def parse_action_likelihood_run_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run or dry-run a planned Qwen GRPO action-likelihood check.")
+    parser.add_argument("--job", type=Path, required=True, help="qwen_grpo_action_likelihood_job.json or directory")
+    parser.add_argument("--result-dir", type=Path, default=None)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--skip-dependency-check", action="store_true")
+    parser.add_argument("--timeout-s", type=float, default=None)
+    parser.add_argument("--launch-command", default=None, help="Override launch command; intended for tests or manual recovery.")
+    parser.add_argument("--tail-chars", type=int, default=4000)
+    return parser.parse_args()
+
+
+def action_likelihood_run_main() -> int:
+    args = parse_action_likelihood_run_args()
+    result = run_qwen_grpo_action_likelihood_check_job(
+        args.job,
+        result_dir=args.result_dir,
+        dry_run=args.dry_run,
+        check_dependencies=not args.skip_dependency_check,
+        timeout_s=args.timeout_s,
+        launch_command=args.launch_command,
+        tail_chars=args.tail_chars,
+    )
+    print(
+        json.dumps(
+            {
+                "status": result["status"],
+                "returncode": result["returncode"],
+                "blockers": result["blockers"],
+                "result_path": result["result_path"],
+                "launch_command": result["launch_command"],
+                "action_likelihood_log_metrics": result.get("action_likelihood_log_metrics", {}),
             },
             indent=2,
             sort_keys=True,

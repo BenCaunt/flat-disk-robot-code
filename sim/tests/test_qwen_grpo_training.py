@@ -1045,3 +1045,210 @@ def test_run_qwen_grpo_adapter_effect_check_job_executes_ready_fake_check(tmp_pa
     assert metrics["expected_tool_counts"] == {"turn_by_angle": 1, "visual_servo_object": 1}
     assert metrics["nonzero_delta_count_by_expected_tool"] == {"turn_by_angle": 1}
     assert metrics["top1_changed_count_by_expected_tool"] == {"turn_by_angle": 1}
+
+
+def test_plan_qwen_grpo_action_likelihood_check_writes_teacher_forced_job(tmp_path: Path) -> None:
+    grpo_dir = _write_ready_grpo_handoff(tmp_path)
+    qwen_grpo_job.plan_qwen_grpo_training(grpo_dir, output_dir=tmp_path / "grpo_job")
+    qwen_grpo_job.plan_qwen_grpo_completion_eval(
+        tmp_path / "grpo_job",
+        output_dir=tmp_path / "completion_eval",
+    )
+    adapter_path = _write_fake_adapter(tmp_path / "adapter")
+
+    job = qwen_grpo_job.plan_qwen_grpo_action_likelihood_check(
+        tmp_path / "completion_eval",
+        output_dir=tmp_path / "action_likelihood",
+        adapter_path=adapter_path,
+        max_samples=1,
+        sample_offset=1,
+    )
+
+    assert job["schema"] == "flatdisk.qwen_grpo_action_likelihood_job.v1"
+    assert job["status"] == "ready"
+    assert job["evaluation_method"] == "qwen_peft_action_likelihood_check"
+    assert job["source_completion_eval_job"].endswith("qwen_grpo_completion_eval_job.json")
+    assert job["dataset"]["source_sample_count"] == 2
+    assert job["dataset"]["eval_sample_count"] == 1
+    assert job["dataset"]["image_reference_count"] == 1
+    assert job["dataset"]["missing_image_count"] == 0
+    assert job["dataset"]["sidecar_prompt_leak_hits"] == []
+    assert job["dataset"]["forbidden_model_token_hits"] == []
+    assert job["dataset"]["adapter_path_blockers"] == []
+    assert job["dataset"]["empty_target_count"] == 0
+    assert job["dataset"]["reference_action_tool_counts"] == {"drive_straight": 1}
+    assert job["action_likelihood_args"] == {
+        "max_samples": 1,
+        "sample_offset": 1,
+        "sample_stride": 1,
+        "target_format": "compact_action_json",
+    }
+    assert job["audit"]["reference_action_used_for_offline_teacher_forced_target_scoring"] is True
+    assert job["audit"]["reference_action_json_appended_only_as_teacher_forced_target"] is True
+    assert job["adapter_path"] == str(adapter_path)
+    assert "trl" not in job["required_packages"]
+    assert "peft" in job["required_packages"]
+    assert job["launch_argv"][:2] == [
+        "python",
+        str(tmp_path / "action_likelihood" / "score_qwen_grpo_action_likelihood.py"),
+    ]
+
+    likelihood_dataset = tmp_path / "action_likelihood" / "qwen_grpo_action_likelihood_dataset.jsonl"
+    likelihood_record = json.loads(likelihood_dataset.read_text(encoding="utf-8").splitlines()[0])
+    prompt_text = json.dumps(likelihood_record["prompt_messages"])
+    assert "candidate_step_reward" not in prompt_text
+    assert "candidate_episode_reward" not in prompt_text
+    assert "reference_action_canonical" not in prompt_text
+    assert "reference_action_json" not in prompt_text
+    assert "nearest_target" not in prompt_text
+    assert "distance_m" not in prompt_text
+    assert likelihood_record["reference_action_json"]["tool"] == "drive_straight"
+    assert qwen_grpo_job._compact_action_response(likelihood_record["reference_action_json"]).startswith(
+        '{"action":{"tool":"drive_straight"'
+    )
+
+    script_text = Path(job["action_likelihood_script"]).read_text(encoding="utf-8")
+    assert "PeftModel.from_pretrained" in script_text
+    assert "model.disable_adapter()" in script_text
+    assert "torch.inference_mode()" in script_text
+    assert "reference_action_json" in script_text
+    assert "reference_assistant_json" not in script_text
+    assert "GRPOTrainer" not in script_text
+    assert "get_peft_model" not in script_text
+    assert "target_start - 1" in script_text
+
+
+def test_plan_qwen_grpo_action_likelihood_check_blocks_missing_adapter_and_images(tmp_path: Path) -> None:
+    grpo_dir = _write_ready_grpo_handoff(tmp_path)
+    qwen_grpo_job.plan_qwen_grpo_training(grpo_dir, output_dir=tmp_path / "grpo_job")
+    qwen_grpo_job.plan_qwen_grpo_completion_eval(
+        tmp_path / "grpo_job",
+        output_dir=tmp_path / "completion_eval",
+    )
+    for image_path in tmp_path.glob("trial_*/policy/frames/0001.jpg"):
+        image_path.unlink()
+
+    job = qwen_grpo_job.plan_qwen_grpo_action_likelihood_check(
+        tmp_path / "completion_eval",
+        output_dir=tmp_path / "action_likelihood",
+        adapter_path=tmp_path / "missing_adapter",
+    )
+
+    assert job["status"] == "not_ready"
+    assert any("image reference" in blocker for blocker in job["blockers"])
+    assert any("missing adapter_path" in blocker for blocker in job["blockers"])
+
+    allowed = qwen_grpo_job.plan_qwen_grpo_action_likelihood_check(
+        tmp_path / "completion_eval",
+        output_dir=tmp_path / "action_likelihood_allow_missing_images",
+        adapter_path=_write_fake_adapter(tmp_path / "adapter"),
+        require_existing_images=False,
+    )
+    assert allowed["status"] == "ready"
+    assert allowed["warnings"]
+    assert allowed["dataset"]["missing_image_count"] == 2
+
+
+def test_run_qwen_grpo_action_likelihood_check_job_dry_run_writes_result(tmp_path: Path) -> None:
+    grpo_dir = _write_ready_grpo_handoff(tmp_path)
+    qwen_grpo_job.plan_qwen_grpo_training(grpo_dir, output_dir=tmp_path / "grpo_job")
+    qwen_grpo_job.plan_qwen_grpo_completion_eval(
+        tmp_path / "grpo_job",
+        output_dir=tmp_path / "completion_eval",
+    )
+    qwen_grpo_job.plan_qwen_grpo_action_likelihood_check(
+        tmp_path / "completion_eval",
+        output_dir=tmp_path / "action_likelihood",
+        adapter_path=_write_fake_adapter(tmp_path / "adapter"),
+    )
+
+    result = qwen_grpo_job.run_qwen_grpo_action_likelihood_check_job(
+        tmp_path / "action_likelihood",
+        dry_run=True,
+        check_dependencies=False,
+    )
+
+    assert result["schema"] == "flatdisk.qwen_grpo_action_likelihood_result.v1"
+    assert result["status"] == "dry_run"
+    assert result["returncode"] is None
+    assert result["blockers"] == []
+    assert result["dependency_check"]["enabled"] is False
+    assert result["launch_argv"][0] == "python"
+    assert result["sample_count"] == 2
+    assert (tmp_path / "action_likelihood" / "qwen_grpo_action_likelihood_result.json").exists()
+
+
+def test_run_qwen_grpo_action_likelihood_check_job_executes_ready_fake_check(tmp_path: Path) -> None:
+    grpo_dir = _write_ready_grpo_handoff(tmp_path)
+    qwen_grpo_job.plan_qwen_grpo_training(grpo_dir, output_dir=tmp_path / "grpo_job")
+    qwen_grpo_job.plan_qwen_grpo_completion_eval(
+        tmp_path / "grpo_job",
+        output_dir=tmp_path / "completion_eval",
+    )
+    qwen_grpo_job.plan_qwen_grpo_action_likelihood_check(
+        tmp_path / "completion_eval",
+        output_dir=tmp_path / "action_likelihood",
+        adapter_path=_write_fake_adapter(tmp_path / "adapter"),
+    )
+    job_path = tmp_path / "action_likelihood" / "qwen_grpo_action_likelihood_job.json"
+    job = json.loads(job_path.read_text(encoding="utf-8"))
+    fake_check = tmp_path / "action_likelihood" / "fake_action_likelihood.py"
+    likelihood_log = Path(job["action_likelihood_log_jsonl"])
+    likelihood_payload = (
+        '{"expected_tool":"alpha_tool",'
+        '"target_token_count":10,'
+        '"tool_token_count":3,'
+        '"tool_span_found":true,'
+        '"target_mean_logprob_delta":0.12,'
+        '"tool_mean_logprob_delta":0.4,'
+        '"target_nll_delta":-0.12,'
+        '"first_target_token_logprob_delta":0.01}\n'
+        '{"expected_tool":"beta_tool",'
+        '"target_token_count":8,'
+        '"tool_token_count":0,'
+        '"tool_span_found":false,'
+        '"target_mean_logprob_delta":-0.05,'
+        '"tool_mean_logprob_delta":null,'
+        '"target_nll_delta":0.05,'
+        '"first_target_token_logprob_delta":-0.02}\n'
+    )
+    fake_check.write_text(
+        "\n".join(
+            [
+                "from pathlib import Path",
+                f"path = Path({str(likelihood_log)!r})",
+                "path.parent.mkdir(parents=True, exist_ok=True)",
+                f"path.write_text({likelihood_payload!r}, encoding='utf-8')",
+                "print('action-likelihood-ok')",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    job["required_packages"] = []
+    job["action_likelihood_script"] = str(fake_check)
+    job["launch_command"] = f"{shlex.quote(sys.executable)} {shlex.quote(str(fake_check))}"
+    job["launch_argv"] = [sys.executable, str(fake_check)]
+    job_path.write_text(json.dumps(job, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    result = qwen_grpo_job.run_qwen_grpo_action_likelihood_check_job(job_path)
+
+    assert result["status"] == "complete"
+    assert result["returncode"] == 0
+    assert "action-likelihood-ok" in result["stdout_tail"]
+    assert result["action_likelihood_log_sample_count"] == 2
+    metrics = result["action_likelihood_log_metrics"]
+    assert metrics["sample_count"] == 2
+    assert metrics["expected_tool_counts"] == {"alpha_tool": 1, "beta_tool": 1}
+    assert metrics["target_token_count_mean"] == 9
+    assert metrics["tool_token_count_mean"] == 1.5
+    assert metrics["zero_tool_token_count"] == 1
+    assert metrics["tool_span_found_count"] == 1
+    assert metrics["target_mean_logprob_delta_mean"] == 0.035
+    assert metrics["target_mean_logprob_improved_count"] == 1
+    assert metrics["tool_mean_logprob_delta_mean"] == 0.4
+    assert metrics["tool_mean_logprob_improved_count"] == 1
+    assert metrics["target_nll_delta_mean"] == -0.035
+    assert metrics["first_target_token_logprob_delta_mean"] == -0.005
+    assert metrics["target_mean_logprob_delta_by_expected_tool"] == {"alpha_tool": 0.12, "beta_tool": -0.05}
+    assert metrics["tool_mean_logprob_delta_by_expected_tool"] == {"alpha_tool": 0.4}

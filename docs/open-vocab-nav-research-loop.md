@@ -770,6 +770,46 @@ greedy action completions on this small smoke. The next training/debug step
 should focus on whether the learning signal shifts action/tool tokens enough
 under the response contract, not on PEFT path loading.
 
+### Action-Likelihood Teacher-Forced Check
+
+The GRPO job module now includes a teacher-forced action-likelihood diagnostic:
+
+- `flatdisk-sim-plan-qwen-grpo-action-likelihood` plans a check from an
+  existing `qwen_grpo_completion_eval_job.json`.
+- `flatdisk-sim-run-qwen-grpo-action-likelihood` runs or dry-runs the planned
+  check and writes `qwen_grpo_action_likelihood_result.json`.
+- The planner copies a selected completion-eval prompt/image slice into
+  `qwen_grpo_action_likelihood_dataset.jsonl`, with `--max-samples`,
+  `--sample-offset`, and `--sample-stride`.
+- The generated `score_qwen_grpo_action_likelihood.py` builds the same Qwen
+  prompt/images as completion eval, appends only compact
+  `{"action":{"tool":"...","args":{...}}}` JSON as a teacher-forced assistant
+  target, and compares base-disabled versus adapter-enabled logprobs using the
+  same loaded PEFT model.
+- Metrics include target mean logprob delta, target NLL delta, first target
+  token logprob delta, tool-span logprob delta, tool-span found rate, and
+  per-expected-tool aggregates. Reward sidecars and hidden evaluator fields
+  remain excluded from prompt messages.
+
+Local validation:
+
+```bash
+PYTHONPATH=/tmp/codex_no_readline:sim/src uv run --project sim --extra dev \
+  flatdisk-sim-plan-qwen-grpo-action-likelihood \
+  --completion-eval-job sim/scratch/open_vocab_nav_research_loop/qwen_grpo_completion_evals/stride5_24/base \
+  --output-dir sim/scratch/open_vocab_nav_research_loop/qwen_grpo_action_likelihood_checks/stride5_24_lora8_toolbalanced_local_smoke2 \
+  --adapter-path sim/scratch/open_vocab_nav_research_loop/qwen_grpo_jobs/bathroom_cross_run_lora_8step_cap48_tool_balanced/adapter \
+  --max-samples 2 \
+  --fail-on-not-ready
+```
+
+This planner reported `status=ready`, `sample_count=2`,
+`missing_image_count=0`, `empty_target_count=0`,
+`adapter_path_blockers=[]`, `forbidden_model_token_hits=[]`, and
+`sidecar_prompt_leak_hits=[]`. A runner dry-run succeeded, the generated script
+passed `py_compile`, `sim/tests/test_qwen_grpo_training.py` passed with
+`28 passed`, and the full sim suite passed with `274 passed`.
+
 Resume status for a future continuation:
 
 - This is no longer a verification-only blocker. Runpod auth works when
