@@ -1112,6 +1112,7 @@ def test_plan_qwen_grpo_action_likelihood_check_writes_teacher_forced_job(tmp_pa
     )
 
     script_text = Path(job["action_likelihood_script"]).read_text(encoding="utf-8")
+    assert "import math" in script_text
     assert "PeftModel.from_pretrained" in script_text
     assert "model.disable_adapter()" in script_text
     assert "torch.inference_mode()" in script_text
