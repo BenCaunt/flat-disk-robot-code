@@ -817,6 +817,35 @@ for several minutes. The generated action-likelihood script now writes
 before/after every sample, so future remote smokes can identify whether a stall
 is in model loading, adapter loading, input preparation, or forward scoring.
 
+Follow-up RunPod action-likelihood checks used the pushed math-import fix
+(`308b70a`) and the saved 8-step tool-balanced LoRA adapter:
+
+```text
+sim/scratch/open_vocab_nav_research_loop/qwen_grpo_action_likelihood_checks/
+  stride5_24_lora8_toolbalanced_remote_mathfix_smoke1
+  stride5_24_lora8_toolbalanced_remote_mathfix_24
+```
+
+The one-sample smoke completed cleanly and proved the diagnostic can load the
+processor, Qwen model, PEFT adapter, dataset, and score a reference action. The
+24-sample held-out slice also completed (`returncode=0`, `duration_s=745.751`,
+`progress_count=58`, `tool_span_found_rate=1.0`), but the adapter did not show
+a useful action-choice learning signal:
+
+- Overall target mean logprob delta: `-0.008491996`; improved rate: `0.375`.
+- Overall tool mean logprob delta: `-0.028123895`; improved rate: `0.291667`.
+- By expected tool, target/tool deltas were
+  `check_object_grounding=-0.024772845/-0.064817849`,
+  `turn_by_angle=0.003706752/0.003371282`,
+  `visual_servo_object=-0.005039766/-0.02620013`, and
+  `stop=-0.00000081/-0.000000042`.
+
+This is a go/no-go datapoint against scaling the current offline GRPO recipe
+unchanged: it slightly improves `turn_by_angle`, but makes grounding and visual
+servo action tokens less likely. The next training attempt should pivot to a
+tiny overfit/SFT or action-token reward-shaping diagnostic before launching
+larger GRPO runs.
+
 Resume status for a future continuation:
 
 - This is no longer a verification-only blocker. Runpod auth works when
