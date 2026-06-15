@@ -93,6 +93,10 @@ constexpr uint32_t kZenohVideoPeriodMs = 100;
 constexpr uint32_t kZenohImuPeriodUs = 16667;
 constexpr uint32_t kZenohEncoderPeriodMs = 20;
 constexpr uint32_t kZenohStatusPeriodMs = 1000;
+constexpr uint8_t kImuReportFlagRotationVector = 1 << 0;
+constexpr uint8_t kImuReportFlagAccelerometer = 1 << 1;
+constexpr uint8_t kImuReportFlagGyro = 1 << 2;
+constexpr uint8_t kImuReportFlagLinearAccel = 1 << 3;
 constexpr size_t kZenohVideoHeaderBytes = 32;
 constexpr size_t kZenohImuPayloadBytes = 76;
 constexpr size_t kZenohSyncRequestBytes = 16;
@@ -154,6 +158,7 @@ z_owned_subscriber_t zenohMotorPwmSub;
 z_owned_subscriber_t zenohMotorStopSub;
 SemaphoreHandle_t zenohPublishMutex = nullptr;
 bool zenohReady = false;
+bool zenohStartupBlocked = false;
 uint32_t zenohVideoSeq = 0;
 uint32_t zenohImuSeq = 0;
 uint32_t zenohStatusSeq = 0;
@@ -2449,6 +2454,10 @@ bool initImuDirect() {
   const bool rotationWriteOk = sendSetFeature(0x05, kShtpDirectReportIntervalUs, false);
   delay(20);
   const bool accelWriteOk = sendSetFeature(0x01, kShtpDirectReportIntervalUs, false);
+  delay(20);
+  const bool gyroWriteOk = sendSetFeature(0x02, kShtpDirectReportIntervalUs, false);
+  delay(20);
+  const bool linearAccelWriteOk = sendSetFeature(0x04, kShtpDirectReportIntervalUs, false);
   const uint16_t updates = drainDirectShtpPackets(1000, true);
 
   imuAddress = kImuPrimaryAddress;
@@ -2457,7 +2466,7 @@ bool initImuDirect() {
   Wire.setClock(kImuI2cClockHz);
 
   if (!imuReportsEnabled) {
-    imuLastError = rotationWriteOk || accelWriteOk
+    imuLastError = rotationWriteOk || accelWriteOk || gyroWriteOk || linearAccelWriteOk
                      ? "direct SHTP configured but no reports received"
                      : "direct SHTP report enable write failed";
     Serial.println(imuLastError);
@@ -3085,7 +3094,13 @@ void publishZenohImuSample(uint64_t timestampUs) {
   payload[4] = 1;
   payload[5] = imuState.quatAccuracy;
   payload[6] = imuState.accelAccuracy;
-  payload[7] = imuReportsEnabled ? 1 : 0;
+  payload[7] = 0;
+  if (imuReportsEnabled) {
+    payload[7] |= kImuReportFlagRotationVector;
+    payload[7] |= kImuReportFlagAccelerometer;
+    payload[7] |= kImuReportFlagGyro;
+    payload[7] |= kImuReportFlagLinearAccel;
+  }
   writeLe32(payload + 8, zenohImuSeq++);
   writeLe64(payload + 12, timestampUs);
   writeLeFloat(payload + 20, imuState.qi);
@@ -3534,7 +3549,11 @@ void zenohStreamSetup() {
     Serial.println("IMU setup failed; Zenoh status will report imu_ready=false.");
   }
 
-  connectZenohWifi();
+  if (!connectZenohWifi()) {
+    zenohStartupBlocked = true;
+    Serial.println("Zenoh startup skipped; configure include/secrets.h and reflash.");
+    return;
+  }
   zenohPublishMutex = xSemaphoreCreateMutex();
   while (!startZenohSession()) {
     delay(1000);
@@ -3550,6 +3569,11 @@ void zenohStreamSetup() {
 }
 
 void zenohStreamLoop() {
+  if (zenohStartupBlocked) {
+    delay(1000);
+    return;
+  }
+
   updateMotorFailsafe();
 
   if (WiFi.status() != WL_CONNECTED) {

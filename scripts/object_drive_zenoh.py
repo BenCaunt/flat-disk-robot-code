@@ -79,6 +79,10 @@ def select_detection(
     prompt: str,
     image_size: tuple[int, int],
     max_area_fraction: float,
+    target_yaw_rad: float | None = None,
+    current_yaw_rad: float | None = None,
+    hfov_deg: float = DEFAULT_HFOV_DEG,
+    max_target_bearing_error_deg: float | None = None,
 ) -> Detection | None:
     if not detections:
         return None
@@ -92,6 +96,31 @@ def select_detection(
         candidates.append(det)
     if not candidates:
         return None
+
+    target_lock_active = (
+        target_yaw_rad is not None
+        and current_yaw_rad is not None
+        and max_target_bearing_error_deg is not None
+        and max_target_bearing_error_deg > 0.0
+    )
+    target_lock_errors: dict[Detection, float] = {}
+    if target_lock_active:
+        locked_candidates: list[Detection] = []
+        gate_deg = max(0.0, float(max_target_bearing_error_deg))
+        for det in candidates:
+            candidate_yaw = target_yaw_from_bbox(
+                det.bbox_xyxy,
+                image_width=width,
+                current_yaw_rad=float(current_yaw_rad),
+                hfov_deg=hfov_deg,
+            )
+            error_deg = abs(math.degrees(wrap_pi(candidate_yaw - float(target_yaw_rad))))
+            target_lock_errors[det] = error_deg
+            if error_deg <= gate_deg:
+                locked_candidates.append(det)
+        if not locked_candidates:
+            return None
+        candidates = locked_candidates
 
     prompt_words = set(re.findall(r"[a-z0-9]+", prompt.lower()))
     prefer_closest = bool(prompt_words & {"closest", "nearest", "front", "foreground"})
@@ -109,6 +138,9 @@ def select_detection(
             value += 0.35 * math.sqrt(max(0.0, area_fraction))
             value += 0.20 * lower_fraction
             value += 0.10 * height_fraction
+        if target_lock_active and target_lock_errors:
+            gate_deg = max(1e-6, float(max_target_bearing_error_deg))
+            value += 0.75 * max(0.0, 1.0 - target_lock_errors.get(det, gate_deg) / gate_deg)
         return value
 
     return max(candidates, key=score)
@@ -1109,6 +1141,7 @@ class ObjectDriveRunner:
             min_turn_percent=args.min_turn_percent,
             heading_deadband_deg=args.heading_deadband_deg,
             imu_timeout_s=args.imu_timeout,
+            frame_timeout_s=args.frame_timeout,
             control_hz=args.control_hz,
             rotate_frames_180=args.rotate_180,
         )
@@ -1134,6 +1167,10 @@ class ObjectDriveRunner:
         self.track_count = 0
         self.imu_predict_count = 0
         self.lost_count = 0
+        self.latest_detection_count = 0
+        self.target_lock_reject_count = 0
+        self.latest_target_lock_gate_deg: float | None = None
+        self.latest_target_lock_error_deg: float | None = None
         self.overlay_count = 0
         self.raw_frame_count = 0
         self.next_report_ns = time.monotonic_ns() + 1_000_000_000
@@ -1248,6 +1285,8 @@ class ObjectDriveRunner:
         frame = self.robot.last_frame
         imu = self.robot.last_imu
         if frame is None or imu is None:
+            return None
+        if self.robot._frame_age_s(frame) > self.args.frame_timeout:
             return None
         if self.robot._imu_age_s(imu) > self.args.imu_timeout:
             return None
@@ -1375,27 +1414,82 @@ class ObjectDriveRunner:
                 self.lost_count += 1
                 continue
             self.prediction_count += 1
+            self.latest_detection_count = len(result.detections)
+            origin_index = None
+            frame_buffer = list(self.frame_buffer)
+            for index, frame_state in enumerate(frame_buffer):
+                if frame_state.frame.seq == result.frame_seq:
+                    origin_index = index
+                    break
+            origin = frame_buffer[origin_index] if origin_index is not None else None
+            lock_target_yaw = None
+            lock_current_yaw = None
+            lock_gate_deg = None
+            if self.args.target_lock and self.target_filter.initialized:
+                if origin is None:
+                    self.target_lock_reject_count += 1
+                    self.latest_target_lock_gate_deg = None
+                    self.latest_target_lock_error_deg = None
+                    continue
+                lock_target_yaw = self.target_filter.target_yaw_rad
+                lock_current_yaw = origin.imu.yaw_rad
+                lock_gate_deg = float(self.args.target_lock_max_bearing_deg)
+                self.latest_target_lock_gate_deg = lock_gate_deg
             best = select_detection(
                 result.detections,
                 prompt=self.args.prompt,
                 image_size=result.image_size,
                 max_area_fraction=self.args.max_bbox_area_fraction,
+                target_yaw_rad=lock_target_yaw,
+                current_yaw_rad=lock_current_yaw,
+                hfov_deg=self.camera_hfov_deg,
+                max_target_bearing_error_deg=lock_gate_deg,
             )
             if best is None:
-                self.lost_count += 1
+                if lock_gate_deg is not None and result.detections:
+                    self.target_lock_reject_count += 1
+                    self.latest_target_lock_error_deg = min(
+                        abs(
+                            math.degrees(
+                                wrap_pi(
+                                    target_yaw_from_bbox(
+                                        det.bbox_xyxy,
+                                        image_width=result.image_size[0],
+                                        current_yaw_rad=float(lock_current_yaw),
+                                        hfov_deg=self.camera_hfov_deg,
+                                    )
+                                    - float(lock_target_yaw)
+                                )
+                            )
+                        )
+                        for det in result.detections
+                    )
+                else:
+                    self.lost_count += 1
                 continue
-            origin_index = None
-            for index, frame_state in enumerate(self.frame_buffer):
-                if frame_state.frame.seq == result.frame_seq:
-                    origin_index = index
-                    break
+            if lock_gate_deg is not None and lock_current_yaw is not None and lock_target_yaw is not None:
+                self.latest_target_lock_error_deg = abs(
+                    math.degrees(
+                        wrap_pi(
+                            target_yaw_from_bbox(
+                                best.bbox_xyxy,
+                                image_width=result.image_size[0],
+                                current_yaw_rad=float(lock_current_yaw),
+                                hfov_deg=self.camera_hfov_deg,
+                            )
+                            - float(lock_target_yaw)
+                        )
+                    )
+                )
+            else:
+                self.latest_target_lock_error_deg = None
             if origin_index is None:
                 self.active_detection = best
                 self.active_detection_frame_ns = time.monotonic_ns()
                 self.last_visual_correction_ns = self.active_detection_frame_ns
                 self.target_filter_source = best.source
                 continue
-            origin = list(self.frame_buffer)[origin_index]
+            assert origin is not None
             self.tracker.reset(origin, best.bbox_xyxy, source=best.source)
             self._correct_target_filter(
                 origin,
@@ -1405,7 +1499,7 @@ class ObjectDriveRunner:
             )
             current_bbox = best.bbox_xyxy
             current_source = best.source
-            for replay_frame in list(self.frame_buffer)[origin_index + 1 :]:
+            for replay_frame in frame_buffer[origin_index + 1 :]:
                 if self.args.target_filter and self.target_filter.initialized:
                     self.target_filter.predict(now_ns=replay_frame.monotonic_ns)
                 replay_bbox = self.tracker.track(replay_frame)
@@ -1430,7 +1524,7 @@ class ObjectDriveRunner:
                 source=current_source,
                 raw=best.raw,
             )
-            self.active_detection_frame_ns = (list(self.frame_buffer)[-1].monotonic_ns if self.frame_buffer else origin.monotonic_ns)
+            self.active_detection_frame_ns = (frame_buffer[-1].monotonic_ns if frame_buffer else origin.monotonic_ns)
         return result_count
 
     def _make_command(self, frame_state: FrameState | None) -> tuple[DriveCommand | None, float | None]:
@@ -1500,23 +1594,52 @@ class ObjectDriveRunner:
     def _report(self, now_ns: int, *, detector_pending: bool) -> None:
         if now_ns < self.next_report_ns:
             return
+        frame_seq_text = "none"
+        frame_age_text = "nan"
+        bbox_cx_text = "none"
+        bbox_cy_text = "none"
+        bbox_w_text = "none"
+        bbox_h_text = "none"
+        if self.robot.last_frame is not None:
+            frame_seq_text = str(self.robot.last_frame.seq)
+            frame_age_text = f"{self.robot._frame_age_s(self.robot.last_frame):.3f}"
         cmd = self.last_command
         if cmd is None:
             cmd_text = "none"
             err_text = "nan"
+            target_yaw_text = "nan"
+            turn_text = "nan"
+            forward_text = "nan"
         else:
             cmd_text = f"{cmd.motor1_percent}/{cmd.motor2_percent}%"
             err_text = f"{cmd.heading_error_deg:.1f}deg"
+            target_yaw_text = f"{cmd.target_yaw_deg:.1f}deg"
+            turn_text = f"{cmd.turn_percent:.1f}"
+            forward_text = f"{cmd.forward_percent:.1f}"
         det = self.active_detection
+        if det is not None and self.robot.last_frame is not None:
+            x0, y0, x1, y1 = det.bbox_xyxy
+            width = max(float(self.robot.last_frame.width), 1.0)
+            height = max(float(self.robot.last_frame.height), 1.0)
+            bbox_cx_text = f"{((x0 + x1) * 0.5 / width):.3f}"
+            bbox_cy_text = f"{((y0 + y1) * 0.5 / height):.3f}"
+            bbox_w_text = f"{((x1 - x0) / width):.3f}"
+            bbox_h_text = f"{((y1 - y0) / height):.3f}"
         det_text = "none" if det is None else f"{det.label}:{det.source}:{det.score:.2f}"
         filter_text = "off"
         if self.args.target_filter and self.target_filter.initialized:
             filter_text = f"{self.target_filter_source}:{self.target_filter.uncertainty_deg:.1f}deg"
+        lock_gate_text = "none" if self.latest_target_lock_gate_deg is None else f"{self.latest_target_lock_gate_deg:.1f}deg"
+        lock_err_text = "none" if self.latest_target_lock_error_deg is None else f"{self.latest_target_lock_error_deg:.1f}deg"
         print(
             f"object-drive armed={self.args.arm} pred={self.prediction_count} track={self.track_count} "
-            f"imu_pred={self.imu_predict_count} filter={filter_text} "
-            f"pub={self.publish_count} cmd={cmd_text} heading_error={err_text} det={det_text} "
-            f"pending={detector_pending} lost={self.lost_count}",
+            f"imu_pred={self.imu_predict_count} frame_seq={frame_seq_text} frame_age_s={frame_age_text} "
+            f"filter={filter_text} pub={self.publish_count} cmd={cmd_text} heading_error={err_text} "
+            f"target_yaw={target_yaw_text} turn={turn_text} forward={forward_text} "
+            f"bbox_cx_frac={bbox_cx_text} bbox_cy_frac={bbox_cy_text} "
+            f"bbox_w_frac={bbox_w_text} bbox_h_frac={bbox_h_text} det={det_text} "
+            f"det_count={self.latest_detection_count} lock_rej={self.target_lock_reject_count} "
+            f"lock_gate={lock_gate_text} lock_err={lock_err_text} pending={detector_pending} lost={self.lost_count}",
             flush=True,
         )
         self.next_report_ns = now_ns + 1_000_000_000
@@ -1621,6 +1744,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-track-age", type=float, default=2.5)
     parser.add_argument("--target-filter", dest="target_filter", action="store_true")
     parser.add_argument("--no-target-filter", dest="target_filter", action="store_false")
+    parser.add_argument("--target-lock", dest="target_lock", action="store_true")
+    parser.add_argument("--no-target-lock", dest="target_lock", action="store_false")
     parser.add_argument(
         "--imu-heading-noise-deg",
         type=float,
@@ -1646,6 +1771,12 @@ def parse_args() -> argparse.Namespace:
         help="Target world-yaw process noise; raise for moving targets or heavy drift.",
     )
     parser.add_argument(
+        "--target-lock-max-bearing-deg",
+        type=float,
+        default=12.0,
+        help="After initial lock, reject detector boxes whose implied world bearing differs by more than this many degrees.",
+    )
+    parser.add_argument(
         "--max-bbox-area-fraction",
         type=float,
         default=0.75,
@@ -1654,12 +1785,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--heading-kp", type=float, default=18.0)
     parser.add_argument("--max-turn-percent", type=float, default=16.0)
     parser.add_argument("--min-turn-percent", type=float, default=1.5)
-    parser.add_argument("--heading-deadband-deg", type=float, default=1.0)
-    parser.add_argument("--max-abs-output", type=float, default=50.0)
+    parser.add_argument("--heading-deadband-deg", type=float, default=0.0)
+    parser.add_argument("--max-abs-output", type=float, default=20.0)
     parser.add_argument("--camera-hfov-deg", type=float, default=DEFAULT_HFOV_DEG)
     parser.add_argument("--imu-timeout", type=float, default=0.5)
+    parser.add_argument("--frame-timeout", type=float, default=0.5)
     parser.add_argument("--startup-timeout", type=float, default=10.0)
-    parser.add_argument("--stop-when-lost", action="store_true", help="Publish 0/0 while armed and no fresh tracked bbox exists.")
+    parser.add_argument(
+        "--stop-when-lost",
+        dest="stop_when_lost",
+        action="store_true",
+        help="Publish 0/0 while armed and no fresh tracked bbox exists.",
+    )
+    parser.add_argument("--no-stop-when-lost", dest="stop_when_lost", action="store_false")
     parser.add_argument("--reverse-yaw", dest="reverse_yaw", action="store_true")
     parser.add_argument("--no-reverse-yaw", dest="reverse_yaw", action="store_false")
     parser.add_argument("--reverse-correction", action="store_true")
@@ -1679,7 +1817,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--overlay-every", type=int, default=3, help="Save one overlay every N camera frame sequence numbers.")
     parser.add_argument("--raw-frame-dir", type=Path, default=None, help="Write raw robot POV JPEG frames for planner motion strips.")
     parser.add_argument("--raw-frame-every", type=int, default=3, help="Save one raw frame every N camera frame sequence numbers.")
-    parser.set_defaults(stop_on_exit=True, rotate_180=True, reverse_yaw=True, target_filter=True)
+    parser.set_defaults(
+        stop_on_exit=True,
+        rotate_180=True,
+        reverse_yaw=True,
+        target_filter=True,
+        target_lock=True,
+        stop_when_lost=True,
+    )
     args = parser.parse_args()
     if args.duration <= 0.0:
         parser.error("--duration must be positive")
@@ -1699,6 +1844,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--track-bearing-noise-deg must be positive")
     if args.target_process_noise_deg_s <= 0.0:
         parser.error("--target-process-noise-deg-s must be positive")
+    if args.target_lock_max_bearing_deg < 0.0:
+        parser.error("--target-lock-max-bearing-deg must be non-negative")
     if args.rerun_save == AUTO_RERUN_SAVE:
         args.rerun_save = unique_rerun_save_path(args.prompt)
     return args

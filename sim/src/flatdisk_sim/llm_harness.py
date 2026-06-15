@@ -30,6 +30,7 @@ ALLOWED_OBSERVATION_KEYS = {"path", "yaw_deg", "frame_seq", "brightness_center"}
 ALLOWED_ACTIONS = {
     "turn_by_angle",
     "drive_straight",
+    "reverse",
     "visual_servo_object",
     "check_object_grounding",
     "query_topomap_memory",
@@ -52,12 +53,16 @@ FORBIDDEN_PRIVILEGED_KEYS = {
 
 TOOL_CONTRACT: dict[str, Any] = {
     "turn_by_angle": {
-        "args": {"degrees": "float -35..35", "power_percent": "float 8..14 optional"},
-        "effect": "Rotate in place by a bounded relative angle.",
+        "args": {"degrees": "float -180..180", "power_percent": "float 8..14 optional"},
+        "effect": "Rotate in place by a bounded normalized relative angle.",
     },
     "drive_straight": {
         "args": {"power_percent": "float 18..24", "duration_s": "float 0.25..0.9"},
         "effect": "Drive forward briefly.",
+    },
+    "reverse": {
+        "args": {"power_percent": "float 8..24 optional", "duration_s": "float 0.25..1.0"},
+        "effect": "Drive backward briefly while holding heading.",
     },
     "visual_servo_object": {
         "args": {
@@ -115,19 +120,26 @@ PROMPT_TEXT_LIMIT = 220
 PROMPT_LIST_LIMIT = 4
 PROMPT_TOOL_RESULT_KEYS = {
     "action",
+    "actor_frame_path",
+    "actor_frame_seq",
+    "actor_obs_age_s_at_tool_start",
+    "actor_yaw_deg",
     "cost",
     "debug_overlay_contact_sheet",
     "detector",
     "detection_coverage_fraction",
     "detection_count",
     "detection_status_count",
+    "drive_action",
     "duration_s",
     "elapsed_s",
     "ever_detected",
+    "effective_power_percent",
     "failure_reason",
     "final_yaw_deg",
     "forward_power",
     "frame_count",
+    "first_motion_frame_seq",
     "goal_candidates",
     "goal_query",
     "grounding_geometry_warning",
@@ -135,19 +147,33 @@ PROMPT_TOOL_RESULT_KEYS = {
     "heading_error_deg",
     "image_path",
     "last_command",
+    "last_bbox_center_x_fraction",
+    "last_bbox_center_y_fraction",
+    "last_bbox_height_fraction",
+    "last_bbox_width_fraction",
+    "last_forward_percent",
+    "last_heading_error_deg",
+    "last_motion_frame_seq",
+    "last_target_yaw_deg",
+    "last_turn_percent",
     "markdown_path",
     "map_summary",
     "matching_mode",
     "motion_contact_sheet",
+    "motion_frame_seq_delta_from_actor",
+    "motion_frame_seq_delta_from_preflight",
     "motor_commands_sent",
+    "max_forward_power_percent",
     "moved",
     "ok",
     "overlay_path",
     "planner_note",
+    "power_percent",
     "prompt",
     "reason",
     "ready_for_visual_servo",
     "recommendation",
+    "requested_power_percent",
     "report_path",
     "route_length",
     "route_node_ids",
@@ -167,19 +193,29 @@ PROMPT_TOOL_RESULT_KEYS = {
     "servo_status",
     "started_yaw_deg",
     "grounding_stability",
+    "status_frame_age_s",
+    "status_frame_seq",
+    "status_frame_seq_delta_from_actor",
     "status_sample_count",
     "target_detected",
     "target_yaw_deg",
     "timed_out",
     "topomap_contact_sheet",
+    "tool_preflight_frame_age_s",
+    "tool_preflight_frame_delta_from_actor",
+    "tool_preflight_frame_seq",
+    "tool_preflight_imu_age_s",
+    "tool_preflight_imu_seq",
+    "tool_preflight_yaw_deg",
 }
 
 ACTION_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "required": ["thought", "action", "grounding_audit"],
+    "required": ["thought", "action", "grounding_audit", "completion_check"],
     "additionalProperties": False,
     "properties": {
         "thought": {"type": "string"},
+        "decision_summary": {"type": ["string", "null"]},
         "action": {
             "type": "object",
             "required": ["tool", "args"],
@@ -214,6 +250,17 @@ ACTION_OUTPUT_SCHEMA: dict[str, Any] = {
                 "evidence": {"type": ["string", "null"]},
                 "check_overlay_evidence": {"type": ["string", "null"]},
                 "next_prompt_should_change": {"type": ["boolean", "null"]},
+            },
+        },
+        "completion_check": {
+            "type": ["object", "null"],
+            "additionalProperties": False,
+            "properties": {
+                "current_phase": {"type": ["string", "null"]},
+                "done_condition": {"type": ["string", "null"]},
+                "latest_evidence": {"type": ["string", "null"]},
+                "phase_done": {"type": ["boolean", "null"]},
+                "next_phase_or_action": {"type": ["string", "null"]},
             },
         },
         "save_frames": {
@@ -260,6 +307,15 @@ CRITIC_OUTPUT_SCHEMA: dict[str, Any] = {
 
 class RobotTools(Protocol):
     def observe(self, *, label: str = "observe", timeout_s: float = 2.0) -> Any:
+        ...
+
+    def preview_frame(self, *, label: str = "dashboard_preview", timeout_s: float = 0.25) -> Any:
+        ...
+
+    def preview_frame_bytes(self, *, timeout_s: float = 0.1) -> Any:
+        ...
+
+    def preview_telemetry(self, *, timeout_s: float = 0.05) -> Any:
         ...
 
     def turn_by_angle(self, degrees: float, *, power_percent: float = 10.0) -> Any:
@@ -330,12 +386,15 @@ class HarnessStatus:
     mode: str = "idle"
     goal: str = ""
     step: int = 0
+    context_generation: int = 0
+    context_reset_t: float | None = None
     last_observation: dict[str, Any] | None = None
     last_action: dict[str, Any] | None = None
     last_critic: dict[str, Any] | None = None
     latest_frame_path: str | None = None
     worker_active: bool = False
     error: str | None = None
+    completion_reason: str | None = None
 
 
 class CodexExecRunner:
@@ -435,9 +494,17 @@ class OpenAICompatibleVisionRunner:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.timeout_s = timeout_s
+        self.last_response_metadata: dict[str, Any] = {}
 
     def run(self, prompt: str, *, role: str, image_paths: list[Path] | None = None) -> str:
-        del role
+        started = time.perf_counter()
+        self.last_response_metadata = {
+            "role": role,
+            "endpoint": self.endpoint,
+            "model": self.model,
+            "image_count": len(image_paths or []),
+            "prompt_chars": len(prompt),
+        }
         content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
         for image_path in image_paths or []:
             content.append({"type": "image_url", "image_url": {"url": _image_data_url(image_path)}})
@@ -468,11 +535,27 @@ class OpenAICompatibleVisionRunner:
                     continue
                 raise RuntimeError(f"Qwen endpoint returned HTTP {exc.code}: {body[:1000]}") from exc
         if data is None:
+            self.last_response_metadata["elapsed_s"] = round(time.perf_counter() - started, 3)
             raise RuntimeError(f"Qwen endpoint returned context-window errors after token budget retries: {last_context_body[:1000]}")
         choices = data.get("choices")
         if not isinstance(choices, list) or not choices:
             raise RuntimeError(f"Qwen endpoint response has no choices: {data!r}")
-        message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+        choice = choices[0] if isinstance(choices[0], dict) else {}
+        message = choice.get("message", {}) if isinstance(choice, dict) else {}
+        if isinstance(message, dict):
+            self.last_response_metadata = {
+                **self.last_response_metadata,
+                "elapsed_s": round(time.perf_counter() - started, 3),
+                "usage": data.get("usage"),
+                "finish_reason": choice.get("finish_reason"),
+                "message_keys": sorted(str(key) for key in message.keys()),
+                "reasoning_content": _truncate_text(
+                    message.get("reasoning_content")
+                    or message.get("reasoning")
+                    or message.get("reasoning_trace")
+                    or message.get("thinking")
+                ),
+            }
         content_text = message.get("content") if isinstance(message, dict) else None
         if isinstance(content_text, list):
             parts = [part.get("text", "") for part in content_text if isinstance(part, dict)]
@@ -531,7 +614,22 @@ class DeterministicHarnessRunner:
         else:
             action = {"tool": "drive_straight", "args": {"power_percent": 22.0, "duration_s": 0.7}}
             thought = "Move forward in a short bounded segment while keeping the next observation available."
-        return json.dumps({"thought": thought, "action": action}, sort_keys=True)
+        return json.dumps(
+            {
+                "thought": thought,
+                "decision_summary": thought,
+                "action": action,
+                "grounding_audit": {},
+                "completion_check": {
+                    "current_phase": "smoke-test bounded motion",
+                    "done_condition": "stop after the bounded smoke sequence completes",
+                    "latest_evidence": "deterministic smoke runner does not evaluate semantic completion",
+                    "phase_done": action["tool"] == "stop",
+                    "next_phase_or_action": action["tool"],
+                },
+            },
+            sort_keys=True,
+        )
 
 
 class ScriptedOpenVocabRunner:
@@ -578,7 +676,16 @@ class ScriptedOpenVocabRunner:
         return json.dumps(
             {
                 "thought": note,
+                "decision_summary": note,
                 "action": action,
+                "grounding_audit": {},
+                "completion_check": {
+                    "current_phase": "scripted open-vocab smoke sequence",
+                    "done_condition": "exercise bounded scan, drive, and visual servo calls without claiming success",
+                    "latest_evidence": note,
+                    "phase_done": False,
+                    "next_phase_or_action": action["tool"],
+                },
                 "memory_update": {
                     "observation_note": note,
                     "beliefs": [f"goal={state.get('goal', '')}", "use previous motion strip to detect progress"],
@@ -661,6 +768,7 @@ class HarnessSession:
         self._status = HarnessStatus()
         self._lock = threading.RLock()
         self._stop_requested = False
+        self._run_generation = 0
         self.log_event("session", {"model": config.model, "reasoning_effort": config.reasoning_effort})
         if self.rerun is not None:
             self._log_rerun_metadata()
@@ -670,19 +778,55 @@ class HarnessSession:
     def mode(self) -> str:
         return self._status.mode
 
-    def start_goal(self, goal: str) -> None:
+    def start_goal(self, goal: str, *, reset_context: bool = True) -> None:
         goal = goal.strip()
         if not goal:
             raise ValueError("goal cannot be empty")
         with self._lock:
+            if reset_context:
+                self._clear_model_context_locked()
+                self._status.context_generation += 1
+                self._status.context_reset_t = time.time()
             self._status.goal = goal
             self._status.mode = "auto"
             self._status.step = 0
+            self._status.last_observation = None
+            self._status.last_action = None
+            self._status.last_critic = None
+            self._status.latest_frame_path = None
             self._status.error = None
+            self._status.completion_reason = None
             self._reset_runners()
             self._stop_requested = False
+            self._run_generation += 1
+            if reset_context:
+                self.log_event("context_reset", {"reason": "new_goal", "context_generation": self._status.context_generation})
             self.log_event("user_goal", {"goal": goal})
             self._log_mode("auto")
+
+    def reset_context(self, *, reason: str = "user_reset") -> None:
+        with self._lock:
+            self._run_generation += 1
+            self._stop_requested = False
+            try:
+                self.tools.stop()
+            except Exception as exc:  # noqa: BLE001 - reset should still clear model context.
+                self.log_event("tool_error", {"source": "reset_context", "action": {"tool": "stop", "args": {}}, "error": str(exc)})
+            self._clear_model_context_locked()
+            self._reset_runners()
+            self._status.mode = "idle"
+            self._status.goal = ""
+            self._status.step = 0
+            self._status.context_generation += 1
+            self._status.context_reset_t = time.time()
+            self._status.last_observation = None
+            self._status.last_action = None
+            self._status.last_critic = None
+            self._status.latest_frame_path = None
+            self._status.error = None
+            self._status.completion_reason = "context_reset"
+            self.log_event("context_reset", {"reason": reason, "context_generation": self._status.context_generation})
+            self._log_mode("idle")
 
     def pause(self) -> None:
         with self._lock:
@@ -702,6 +846,8 @@ class HarnessSession:
         with self._lock:
             self._stop_requested = True
             self._status.mode = "complete"
+            self._status.completion_reason = "user_stop"
+            self._run_generation += 1
             self.tools.stop()
             self.log_event("user_stop", {})
             self._log_mode("complete")
@@ -716,9 +862,11 @@ class HarnessSession:
                 return None
             step = self._status.step
             goal = self._status.goal
+            run_generation = self._run_generation
         try:
             observation = self.tools.observe(label=f"llm_{step:03d}", timeout_s=3.0)
             observation_summary = sanitize_observation(observation.summary())
+            observation_wall_t = time.time()
             prompt_observation = prompt_safe_observation(observation_summary, root=self.run_dir)
             self._record_observation(observation_summary)
             recent_memory = self.read_memory_tail()
@@ -737,6 +885,20 @@ class HarnessSession:
             )
             self._write_prompt(step, "actor", prompt)
             image_paths = _actor_image_paths(observation_summary, recent_memory, root=self.run_dir)
+            actor_prompt_path = str(Path("prompts") / f"{step:03d}_actor.txt")
+            actor_image_paths = _event_image_paths(image_paths, root=self.run_dir)
+            self.log_event(
+                "actor_request",
+                {
+                    "step": step,
+                    "role": "actor",
+                    "runner": self.actor.__class__.__name__,
+                    "prompt_path": actor_prompt_path,
+                    "prompt_chars": len(prompt),
+                    "prompt_preview": _truncate_text(prompt, max_chars=1400),
+                    "image_paths": actor_image_paths,
+                },
+            )
             actor_output = ""
             actor_attempt_outputs: list[str] = []
             try:
@@ -748,13 +910,26 @@ class HarnessSession:
                 except Exception as first_exc:
                     retry_prompt = build_actor_json_repair_prompt(prompt, error=str(first_exc))
                     self._write_prompt(step, "actor_retry", retry_prompt)
+                    retry_prompt_path = str(Path("prompts") / f"{step:03d}_actor_retry.txt")
                     self.log_event(
                         "actor_parse_retry",
                         {
                             "step": step,
                             "error": str(first_exc),
-                            "prompt_path": str(Path("prompts") / f"{step:03d}_actor_retry.txt"),
+                            "prompt_path": retry_prompt_path,
                             "previous_output": actor_output[:1200],
+                        },
+                    )
+                    self.log_event(
+                        "actor_request",
+                        {
+                            "step": step,
+                            "role": "actor_retry",
+                            "runner": self.actor.__class__.__name__,
+                            "prompt_path": retry_prompt_path,
+                            "prompt_chars": len(retry_prompt),
+                            "prompt_preview": _truncate_text(retry_prompt, max_chars=1400),
+                            "image_paths": actor_image_paths,
                         },
                     )
                     actor_output = self.actor.run(retry_prompt, role="actor", image_paths=image_paths)
@@ -776,15 +951,19 @@ class HarnessSession:
                     raise
                 action = HarnessAction("wait", {"duration_s": 0.2}, "actor JSON parse fallback")
                 actor_side_effects = {
+                    "decision_summary": "actor JSON parse failed after retry; using bounded wait fallback",
                     "grounding_audit": {},
+                    "completion_check": {},
                     "memory_update": {"actor_parse_error": str(exc)[:PROMPT_TEXT_LIMIT]},
                     "save_frames": [],
                 }
                 actor_output = json.dumps(
                     {
                         "thought": "actor JSON parse failed after retry; using bounded wait fallback",
+                        "decision_summary": actor_side_effects["decision_summary"],
                         "action": {"tool": action.tool, "args": action.args},
                         "grounding_audit": {},
+                        "completion_check": {},
                         "memory_update": actor_side_effects["memory_update"],
                     }
                 )
@@ -799,14 +978,45 @@ class HarnessSession:
                 {
                     "output": actor_output,
                     "parsed_action": action_to_dict(action),
+                    "decision_summary": actor_side_effects["decision_summary"],
                     "grounding_audit": actor_side_effects["grounding_audit"],
+                    "completion_check": actor_side_effects["completion_check"],
                     "memory_update": actor_side_effects["memory_update"],
                     "saved_frames": saved_frames,
-                    "prompt_path": str(Path("prompts") / f"{step:03d}_actor.txt"),
-                    "image_paths": [str(path.relative_to(self.run_dir)) if _path_is_relative_to(path, self.run_dir) else path.name for path in image_paths],
+                    "prompt_path": actor_prompt_path,
+                    "image_paths": actor_image_paths,
+                    "runner_trace": _runner_trace_metadata(self.actor),
                 },
             )
-            self.log_event("actor", {"step": step, "output": actor_output, "action": action_to_dict(action)})
+            self.log_event(
+                "actor",
+                {
+                    "step": step,
+                    "output": actor_output,
+                    "thought": _actor_thought(actor_output),
+                    "decision_summary": actor_side_effects["decision_summary"],
+                    "grounding_audit": actor_side_effects["grounding_audit"],
+                    "completion_check": actor_side_effects["completion_check"],
+                    "memory_update": actor_side_effects["memory_update"],
+                    "action": action_to_dict(action),
+                    "prompt_path": actor_prompt_path,
+                    "image_paths": actor_image_paths,
+                    "runner_trace": _runner_trace_metadata(self.actor),
+                },
+            )
+            stale = self._stale_run_details(generation=run_generation, step=step, goal=goal)
+            if stale is not None:
+                self.log_event(
+                    "actor_stale",
+                    {
+                        **stale,
+                        "output": actor_output,
+                        "action": action_to_dict(action),
+                        "prompt_path": actor_prompt_path,
+                        "image_paths": actor_image_paths,
+                    },
+                )
+                return None
 
             critic_prompt = build_critic_prompt(
                 goal=goal,
@@ -819,6 +1029,19 @@ class HarnessSession:
                 extra_rules=self.config.critic_rules,
             )
             self._write_prompt(step, "critic", critic_prompt)
+            critic_prompt_path = str(Path("prompts") / f"{step:03d}_critic.txt")
+            self.log_event(
+                "critic_request",
+                {
+                    "step": step,
+                    "role": "critic",
+                    "runner": self.critic.__class__.__name__,
+                    "prompt_path": critic_prompt_path,
+                    "prompt_chars": len(critic_prompt),
+                    "prompt_preview": _truncate_text(critic_prompt, max_chars=1400),
+                    "image_paths": actor_image_paths,
+                },
+            )
             critic_output = self.critic.run(critic_prompt, role="critic", image_paths=image_paths)
             model_decision = parse_critic_decision(critic_output)
             decision = apply_deterministic_safety_gate(model_decision, action, recent_memory)
@@ -830,7 +1053,8 @@ class HarnessSession:
                     "model_decision": critic_to_dict(model_decision),
                     "final_decision": critic_to_dict(decision),
                     "candidate_action": action_to_dict(action),
-                    "prompt_path": str(Path("prompts") / f"{step:03d}_critic.txt"),
+                    "prompt_path": critic_prompt_path,
+                    "runner_trace": _runner_trace_metadata(self.critic),
                 },
             )
             if decision != model_decision:
@@ -852,16 +1076,56 @@ class HarnessSession:
                     "model_decision": critic_to_dict(model_decision),
                     "decision": critic_to_dict(decision),
                     "selected_action": action_to_dict(selected_action),
+                    "runner_trace": _runner_trace_metadata(self.critic),
                 },
             )
-            result_summary = prompt_safe_tool_result(self.execute_action(selected_action, source="actor"), root=self.run_dir)
+            stale = self._stale_run_details(generation=run_generation, step=step, goal=goal)
+            if stale is not None:
+                self.log_event(
+                    "tool_skipped",
+                    {
+                        **stale,
+                        "source": "actor",
+                        "action": action_to_dict(selected_action),
+                        "stage": "before_execute",
+                    },
+                )
+                return None
+            tool_context = self._tool_execution_context(observation_summary, observation_wall_t)
+            self.log_event(
+                "tool_preflight",
+                {
+                    "step": step,
+                    "source": "actor",
+                    "action": action_to_dict(selected_action),
+                    **tool_context,
+                },
+            )
+            result_summary = prompt_safe_tool_result(
+                self.execute_action(selected_action, source="actor", context=tool_context),
+                root=self.run_dir,
+            )
+            stale = self._stale_run_details(generation=run_generation, step=step, goal=goal)
+            if stale is not None:
+                self.log_event(
+                    "tool_result_stale",
+                    {
+                        **stale,
+                        "source": "actor",
+                        "action": action_to_dict(selected_action),
+                        "result": result_summary,
+                    },
+                )
+                return None
             memory_record = {
                 "step": step,
                 "goal": goal,
                 "mode": "auto",
                 "observation": prompt_observation,
                 "actor_action": action_to_dict(action),
+                "actor_decision_summary": actor_side_effects["decision_summary"],
                 "actor_grounding_audit": actor_side_effects["grounding_audit"],
+                "actor_completion_check": actor_side_effects["completion_check"],
                 "actor_memory_update": actor_side_effects["memory_update"],
                 "saved_frames": saved_frames,
                 "critic": critic_to_dict(decision),
@@ -873,8 +1137,15 @@ class HarnessSession:
                 self._status.step += 1
                 self._status.last_action = action_to_dict(selected_action)
                 self._status.last_critic = critic_to_dict(decision)
-                if selected_action.tool == "stop" or self._status.step >= self.config.max_steps:
+                if selected_action.tool == "stop":
                     self._status.mode = "complete"
+                    self._status.completion_reason = "model_stop"
+                    self.log_event("run_complete", {"reason": "model_stop", "step": self._status.step})
+                    self._log_mode("complete")
+                elif self._status.step >= self.config.max_steps:
+                    self._status.mode = "complete"
+                    self._status.completion_reason = "max_steps"
+                    self.log_event("run_complete", {"reason": "max_steps", "step": self._status.step})
                     self._log_mode("complete")
             return memory_record
         except Exception as exc:  # noqa: BLE001 - errors are surfaced in UI/logs.
@@ -885,9 +1156,37 @@ class HarnessSession:
             self.log_event("error", {"message": str(exc)})
             raise
 
+    def _stale_run_details(self, *, generation: int, step: int, goal: str) -> dict[str, Any] | None:
+        with self._lock:
+            current_generation = self._run_generation
+            current_goal = self._status.goal
+            current_mode = self._status.mode
+            stop_requested = self._stop_requested
+        reason = None
+        if current_generation != generation:
+            reason = "generation_changed"
+        elif stop_requested:
+            reason = "stop_requested"
+        elif current_mode != "auto":
+            reason = "mode_changed"
+        elif current_goal != goal:
+            reason = "goal_changed"
+        if reason is None:
+            return None
+        return {
+            "step": step,
+            "goal": goal,
+            "current_goal": current_goal,
+            "captured_generation": generation,
+            "current_generation": current_generation,
+            "current_mode": current_mode,
+            "reason": reason,
+        }
+
     def teleop(self, command: str, value: float | None = None) -> dict[str, Any]:
         mapping = {
             "forward": HarnessAction("drive_straight", {"power_percent": 20.0, "duration_s": value or 0.5}, "teleop"),
+            "reverse": HarnessAction("reverse", {"power_percent": 20.0, "duration_s": value or 0.5}, "teleop"),
             "left": HarnessAction("turn_by_angle", {"degrees": -(value or 18.0), "power_percent": 10.0}, "teleop"),
             "right": HarnessAction("turn_by_angle", {"degrees": value or 18.0, "power_percent": 10.0}, "teleop"),
             "stop": HarnessAction("stop", {}, "teleop"),
@@ -901,10 +1200,36 @@ class HarnessSession:
         self.log_event("teleop", {"command": command, "result": result})
         return result
 
-    def execute_action(self, action: HarnessAction, *, source: str) -> dict[str, Any]:
+    def execute_action(self, action: HarnessAction, *, source: str, context: dict[str, Any] | None = None) -> dict[str, Any]:
         action = validate_harness_action(action)
+        step = self._status.step
+        action_payload = action_to_dict(action)
         if self.rerun is not None:
-            self.rerun.log_command(self._status.step, source, action_to_dict(action))
+            self.rerun.log_command(step, source, action_payload)
+        start_payload = {"step": step, "source": source, "action": action_payload}
+        if context:
+            start_payload["execution_context"] = context
+        self.log_event("tool_start", start_payload)
+        try:
+            result = self._execute_action_impl(action, source=source)
+        except Exception as exc:
+            self.log_event("tool_error", {"step": step, "source": source, "action": action_payload, "error": str(exc)})
+            raise
+        if context:
+            result = annotate_tool_execution_result(result, context)
+        self.log_event(
+            "tool_result",
+            {
+                "step": step,
+                "source": source,
+                "action": action_payload,
+                "execution_context": context or {},
+                "result": prompt_safe_tool_result(result, root=self.run_dir),
+            },
+        )
+        return result
+
+    def _execute_action_impl(self, action: HarnessAction, *, source: str) -> dict[str, Any]:
         if action.tool == "observe":
             obs = self.tools.observe(label=f"{source}_observe_{self._status.step:03d}", timeout_s=3.0)
             summary = sanitize_observation(obs.summary())
@@ -919,6 +1244,16 @@ class HarnessSession:
         if action.tool == "drive_straight":
             result = self.tools.drive_straight(action.args["power_percent"], action.args["duration_s"])
             return motion_result_summary(result)
+        if action.tool == "reverse":
+            requested_power = float(action.args["power_percent"])
+            result = self.tools.drive_straight(-requested_power, action.args["duration_s"])
+            summary = motion_result_summary(result)
+            summary["action"] = "reverse"
+            if "command" in summary:
+                summary["command"] = "reverse"
+            summary["drive_action"] = "drive_straight"
+            summary["power_percent"] = -requested_power
+            return summary
         if action.tool == "visual_servo_object":
             result = self.tools.visual_servo_object(
                 action.args["prompt"],
@@ -974,8 +1309,9 @@ class HarnessSession:
                 "run_dir": str(self.run_dir),
                 "events_path": str(self.events_path),
                 "memory_path": str(self.memory_path),
+                "memory_record_count": _jsonl_record_count(self.memory_path),
                 "metadata": self.metadata(),
-                "recent_events": self.read_events_tail(80),
+                "recent_events": self.read_events_tail(160),
                 "recent_memory": self.read_memory_tail(12),
             }
 
@@ -1002,7 +1338,7 @@ class HarnessSession:
         }
 
     def log_event(self, event: str, payload: dict[str, Any]) -> None:
-        record = {"t": time.time(), "event": event, **payload}
+        record = {"t": time.time(), "event": event, "context_generation": self._status.context_generation, **payload}
         with self.events_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
         if self.rerun is not None:
@@ -1017,6 +1353,70 @@ class HarnessSession:
 
     def read_events_tail(self, limit: int = 80) -> list[dict[str, Any]]:
         return _read_jsonl_tail(self.events_path, limit)
+
+    def _clear_model_context_locked(self) -> None:
+        self.memory_path.unlink(missing_ok=True)
+        if self.prompt_dir.exists():
+            shutil.rmtree(self.prompt_dir)
+        self.prompt_dir.mkdir(parents=True, exist_ok=True)
+
+    def _tool_execution_context(self, observation_summary: dict[str, Any], observation_wall_t: float) -> dict[str, Any]:
+        context: dict[str, Any] = {
+            "actor_frame_path": observation_summary.get("path"),
+            "actor_frame_seq": observation_summary.get("frame_seq"),
+            "actor_yaw_deg": observation_summary.get("yaw_deg"),
+            "actor_obs_age_s_at_tool_start": round(max(0.0, time.time() - observation_wall_t), 3),
+        }
+        try:
+            telemetry = self.preview_telemetry(timeout_s=0.05)
+        except Exception as exc:  # noqa: BLE001 - diagnostic only.
+            context["tool_preflight_error"] = str(exc)[:240]
+            return context
+        context.update(
+            {
+                "tool_preflight_frame_seq": telemetry.get("frame_seq"),
+                "tool_preflight_frame_age_s": telemetry.get("frame_received_age_s"),
+                "tool_preflight_imu_seq": telemetry.get("imu_seq"),
+                "tool_preflight_imu_age_s": telemetry.get("imu_received_age_s"),
+                "tool_preflight_yaw_deg": telemetry.get("yaw_deg"),
+            }
+        )
+        actor_seq = _int_or_none(context.get("actor_frame_seq"))
+        preflight_seq = _int_or_none(context.get("tool_preflight_frame_seq"))
+        if actor_seq is not None and preflight_seq is not None:
+            context["tool_preflight_frame_delta_from_actor"] = preflight_seq - actor_seq
+        return {key: value for key, value in context.items() if value is not None}
+
+    def preview_observation(self, *, timeout_s: float = 0.25) -> dict[str, Any]:
+        observation = self.tools.observe(label="dashboard_preview", timeout_s=timeout_s)
+        summary = sanitize_observation(observation.summary())
+        self._record_observation(summary)
+        return summary
+
+    def preview_frame(self, *, timeout_s: float = 0.25) -> dict[str, Any]:
+        preview = getattr(self.tools, "preview_frame", None)
+        if callable(preview):
+            return sanitize_preview_frame(motion_result_summary(preview(label="dashboard_preview", timeout_s=timeout_s)))
+        observation = self.tools.observe(label="dashboard_preview", timeout_s=timeout_s)
+        return sanitize_preview_frame(observation.summary())
+
+    def preview_frame_bytes(self, *, timeout_s: float = 0.1) -> dict[str, Any]:
+        preview = getattr(self.tools, "preview_frame_bytes", None)
+        if callable(preview):
+            payload = motion_result_summary(preview(timeout_s=timeout_s))
+            jpeg = payload.get("jpeg")
+            if not isinstance(jpeg, bytes):
+                raise RuntimeError("preview_frame_bytes did not return JPEG bytes")
+            return {"jpeg": jpeg, **sanitize_live_telemetry(payload)}
+        frame = self.preview_frame(timeout_s=timeout_s)
+        path = Path(str(frame["path"]))
+        return {"jpeg": path.read_bytes(), **sanitize_preview_frame(frame)}
+
+    def preview_telemetry(self, *, timeout_s: float = 0.05) -> dict[str, Any]:
+        preview = getattr(self.tools, "preview_telemetry", None)
+        if callable(preview):
+            return sanitize_live_telemetry(motion_result_summary(preview(timeout_s=timeout_s)))
+        return {}
 
     def close(self) -> None:
         self.tools.close()
@@ -1119,6 +1519,49 @@ def _use_action_history_summary(*, prompt_profile: str, extra_rules: list[str]) 
     return any("action_history_summary" in rule for rule in extra_rules)
 
 
+def goal_phase_hints(goal: str) -> dict[str, Any]:
+    text = str(goal or "").strip()
+    lower = text.lower()
+    raw_phases = [
+        phase.strip(" .")
+        for phase in re.split(r"\b(?:and\s+then|then)\b", text, flags=re.IGNORECASE)
+        if phase.strip(" .")
+    ]
+    normalized_phases = [_normalize_goal_phase(phase) for phase in raw_phases]
+    hints: dict[str, Any] = {
+        "compound_goal": len(raw_phases) > 1,
+        "raw_phases": raw_phases[:5],
+        "normalized_phases": [phase for phase in normalized_phases if phase][:5],
+        "stop_tool_note": "stop ends the whole harness; use it only after every requested phase is complete or for safety",
+        "motion_tool_note": "drive_straight, reverse, turn_by_angle, and visual_servo_object stop their motors at the end of each tool call",
+    }
+    if re.search(r"\bstop\b.*\b(turn|reverse|drive|go|rotate|back)\b", lower):
+        hints["intermediate_stop_warning"] = (
+            "The word stop appears before another requested motion phase. Treat it as a request to finish the current "
+            "motion segment before the next phase, not as permission to call the final stop tool."
+        )
+    if "chair" in lower:
+        hints["chair_approach_done_cues"] = (
+            "For a drive-to-chair phase, mark the approach done only from latest visual evidence that the chair or seat "
+            "is close, large, foreground, edge-cropped, or no longer benefits from more servoing."
+        )
+    if "visual" in lower or "drive to" in lower or "go to" in lower:
+        hints["visual_servo_done_note"] = (
+            "A moved=true servo result is progress evidence, not completion evidence; compare the newest RGB frame and "
+            "motion strip to completion_check.done_condition before repeating visual_servo_object."
+        )
+    if "180" in lower or "around" in lower or "turn" in lower or "rotate" in lower:
+        hints["turn_phase_note"] = "For a turn-around phase, use turn_by_angle around 180 degrees once the prior approach phase is done."
+    return compact_prompt_value(hints)
+
+
+def _normalize_goal_phase(phase: str) -> str:
+    text = phase.strip(" .,")
+    text = re.sub(r"^(?:stop|pause|settle)(?:\s*,?\s*(?:and|then))?\s+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*,?\s*(?:and\s+)?(?:stop|pause|settle)\s*,?\s*$", "", text, flags=re.IGNORECASE)
+    return text.strip(" .,")
+
+
 def build_actor_prompt(
     *,
     goal: str,
@@ -1154,9 +1597,17 @@ def build_actor_prompt(
         "Use the image, IMU yaw, and recent motion history to choose exactly one bounded action.",
         "visual_servo_object can steer only toward a currently visible object or landmark; it cannot discover a hidden goal object by itself.",
         "The visual_servo_object prompt may name the final goal or any useful visible waypoint selected from the latest RGB frame.",
+        "Tool JSON must match the schema exactly: for visual_servo_object write action as {\"tool\":\"visual_servo_object\",\"args\":{\"prompt\":\"the chair\",\"duration_s\":2.0}}; never put the prompt string directly in action.args.",
         "If the final goal is not clearly visible, do not call visual_servo_object with the final-goal phrase just to search; use a visible waypoint, bounded turn, or short drive to change viewpoint.",
         "After using a non-goal waypoint, re-check the latest RGB frame and previous motion strip; turn or rescan when that waypoint dominates the view or stops improving goal evidence.",
         "Treat visual_servo_object moved=true and last_detection as evidence that some phrase-grounded track moved the robot, not proof of semantic identity or goal completion.",
+        "Before choosing visual_servo_object, write completion_check.done_condition for what will count as done for that visible servo phase; after each servo, compare the latest RGB frame and previous motion strip against that condition.",
+        "For goals like 'drive to the chair', the approach phase is done only when the latest RGB frame or motion strip gives arrival evidence: the chair/seat region is close, large, foreground, cropped by an edge, or further servoing would no longer add useful approach progress.",
+        "If the floor/carpet dominates the frame and the chair remains small or mid-distance, the drive-to-chair phase is not done even when the chair is visible.",
+        "Do not write completion_check.phase_done=false when completion_check.latest_evidence already satisfies completion_check.done_condition; either mark the phase done and choose the next phase, or write more accurate latest_evidence.",
+        "Do not repeatedly call visual_servo_object just because it returned moved=true; if the target is already close/foreground/dominant or repeated same-prompt servo attempts have weak grounding, mark the approach phase done or switch strategy.",
+        "For compound goals with words like 'then', track the current phase in completion_check.current_phase and choose the next requested phase once the current phase is done.",
+        "The stop tool ends the whole harness run. Do not use stop as an intermediate pause in a compound goal; all motion tools already stop their motors when each tool call ends. Use stop only when every requested phase is complete or for safety.",
         "A previous visual_servo_object prompt is control history, not proof that the named object was truly visible; verify the current RGB frame yourself before repeating it.",
         "query_topomap_memory is a non-motion lookup; use it when route/image memory could help choose where to explore next, then inspect its returned contact sheet on the next step.",
         "Treat topomap route hints as memory evidence, not ground-truth completion; prefer the live camera when topomap memory disagrees with the current RGB frame.",
@@ -1166,6 +1617,7 @@ def build_actor_prompt(
         "The JSON action is the only command executed. Before returning, verify action.tool and action.args agree with thought, grounding_audit, and any action_history_summary when provided.",
         "If visual_servo_object reports moved=false or failure_reason, switch strategy with a bounded turn or drive instead of waiting.",
         "The harness already captures a fresh observation before each actor call; do not request another observation as your action.",
+        "Always include decision_summary and completion_check in actor output; keep them concise and visible for operator debugging.",
         "Prefer short bounded movements; turn to search or center the target, drive only briefly when the path or target evidence is plausible.",
         "You may write scratchpad facts in memory_update and request durable frame copies in save_frames.",
         "For save_frames, source must be latest or previous_motion; frame_index is zero-based.",
@@ -1190,8 +1642,10 @@ def build_actor_prompt(
         "tool_contract": TOOL_CONTRACT,
         "output_schema": {
             "thought": "short private control rationale",
-            "action": {"tool": "one of turn_by_angle, drive_straight, visual_servo_object, check_object_grounding, query_topomap_memory, stop, wait", "args": "object"},
+            "decision_summary": "short visible rationale for operator debugging, not a long chain-of-thought",
+            "action": {"tool": f"one of {', '.join(sorted(ALLOWED_ACTIONS))}", "args": "object"},
             "grounding_audit": "required after visual_servo_object or check_object_grounding history; object with previous_visual_servo_box_matches_intended_object, previous_check_box_matches_intended_object, evidence, check_overlay_evidence, next_prompt_should_change",
+            "completion_check": "required object with current_phase, done_condition, latest_evidence, phase_done, next_phase_or_action; use it to decide whether to stop repeating visual_servo_object and move to the next phase",
             "memory_update": "optional object with observation_note, beliefs, next_strategy, or other non-privileged scratchpad facts",
             "save_frames": "optional list of {id, source, frame_index, note} requests",
         },
@@ -1204,6 +1658,7 @@ def build_actor_prompt(
         "observation": sanitize_observation(observation),
         "previous_motion": compact_prompt_value(previous_motion or {}),
         "recent_memory": prompt_memory_tail(recent_memory),
+        "goal_phase_hints": goal_phase_hints(goal),
     }
     if use_action_history:
         dynamic_state["action_history_summary"] = action_history_summary(recent_memory)
@@ -1257,6 +1712,8 @@ def build_critic_prompt(
         "Approve visual_servo_object toward a non-goal visible landmark when it is a bounded waypoint move intended to improve viewpoint.",
         "Approve check_object_grounding when it tests a plausible visible phrase before a risky or repeated visual_servo_object call.",
         "Approve query_topomap_memory when route/image memory could guide exploration; it is non-motion and should not be treated as goal completion.",
+        "For compound goals, warn or reject actor output that calls stop before every requested phase is complete; the stop tool is final-only in this harness.",
+        "Warn repeated visual_servo_object calls when the actor output has no concrete completion_check.done_condition for the visible approach phase.",
         "Reject stop unless repeated observations show the described goal object is reached or very close.",
         "Do not request or use privileged simulator state.",
         "Return exactly one JSON object and no prose.",
@@ -1289,18 +1746,41 @@ def parse_actor_action(text: str) -> HarnessAction:
     if not isinstance(action_payload, dict):
         raise ValueError("actor action must be a JSON object")
     tool = str(action_payload.get("tool", action_payload.get("action", ""))).strip()
-    args = action_payload.get("args", {})
-    if not isinstance(args, dict):
-        args = {}
+    args = _normalize_actor_action_args(tool, action_payload.get("args", {}), payload)
     thought = str(payload.get("thought", payload.get("reason", "")))[:500]
     return validate_harness_action(HarnessAction(tool=tool, args=args, thought=thought))
 
 
+def _normalize_actor_action_args(tool: str, raw_args: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(raw_args, dict):
+        return raw_args
+    if isinstance(raw_args, str):
+        text = raw_args.strip()
+        if tool in {"visual_servo_object", "check_object_grounding"} and text:
+            return {"prompt": text}
+        if tool == "query_topomap_memory" and text:
+            return {"goal_query": text}
+    if isinstance(raw_args, (int, float)):
+        if tool == "turn_by_angle":
+            return {"degrees": float(raw_args)}
+        if tool in {"drive_straight", "reverse"}:
+            return {"duration_s": float(raw_args)}
+    top_level_args: dict[str, Any] = {}
+    for key in ("prompt", "goal_query", "duration_s", "degrees", "power_percent", "forward_power", "detector"):
+        if key in payload:
+            top_level_args[key] = payload[key]
+    return top_level_args
+
+
 def parse_actor_side_effects(text: str) -> dict[str, Any]:
     payload = parse_json_object(text)
+    decision_summary = str(payload.get("decision_summary") or payload.get("rationale") or payload.get("reason") or "")[:PROMPT_TEXT_LIMIT]
     grounding_audit = payload.get("grounding_audit")
     if not isinstance(grounding_audit, dict):
         grounding_audit = {}
+    completion_check = payload.get("completion_check")
+    if not isinstance(completion_check, dict):
+        completion_check = {}
     memory_update = payload.get("memory_update", {})
     if not isinstance(memory_update, dict):
         memory_update = {}
@@ -1320,7 +1800,9 @@ def parse_actor_side_effects(text: str) -> dict[str, Any]:
             }
         )
     return {
+        "decision_summary": decision_summary,
         "grounding_audit": compact_prompt_value(grounding_audit),
+        "completion_check": compact_prompt_value(sanitize_memory(completion_check)),
         "memory_update": sanitize_memory(memory_update),
         "save_frames": cleaned_requests,
     }
@@ -1378,13 +1860,22 @@ def validate_harness_action(action: HarnessAction) -> HarnessAction:
     args = dict(action.args)
     if tool == "turn_by_angle":
         args = {
-            "degrees": clamp_float(args.get("degrees", 0.0), -35.0, 35.0),
+            "degrees": clamp_float(args.get("degrees", 0.0), -180.0, 180.0),
             "power_percent": clamp_float(args.get("power_percent", 10.0), 8.0, 14.0),
         }
     elif tool == "drive_straight":
         args = {
             "power_percent": clamp_float(args.get("power_percent", 20.0), 18.0, 24.0),
             "duration_s": clamp_float(args.get("duration_s", 0.5), 0.25, 0.9),
+        }
+    elif tool == "reverse":
+        try:
+            reverse_power = abs(float(args.get("power_percent", 20.0)))
+        except (TypeError, ValueError):
+            reverse_power = 20.0
+        args = {
+            "power_percent": clamp_float(reverse_power, 8.0, 24.0),
+            "duration_s": clamp_float(args.get("duration_s", 0.5), 0.25, 1.0),
         }
     elif tool == "visual_servo_object":
         prompt = str(args.get("prompt", "")).strip()[:160]
@@ -1417,6 +1908,24 @@ def validate_harness_action(action: HarnessAction) -> HarnessAction:
 
 def sanitize_observation(observation: dict[str, Any]) -> dict[str, Any]:
     return {key: observation[key] for key in sorted(ALLOWED_OBSERVATION_KEYS) if key in observation}
+
+
+def sanitize_preview_frame(frame: dict[str, Any]) -> dict[str, Any]:
+    allowed = {"path", "frame_seq", "width", "height", "received_age_s", "frame_received_age_s"}
+    return {key: frame[key] for key in sorted(allowed) if key in frame}
+
+
+def sanitize_live_telemetry(value: dict[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "frame_seq",
+        "width",
+        "height",
+        "frame_received_age_s",
+        "imu_seq",
+        "yaw_deg",
+        "imu_received_age_s",
+    }
+    return {key: value[key] for key in sorted(allowed) if key in value}
 
 
 def prompt_safe_observation(observation: dict[str, Any], *, root: Path) -> dict[str, Any]:
@@ -1467,6 +1976,7 @@ def action_history_summary(records: list[dict[str, Any]], limit: int = PROMPT_ME
     summary: dict[str, Any] = {}
     recent_actions: list[dict[str, Any]] = []
     visual_servo_attempts: list[dict[str, Any]] = []
+    recent_completion_checks: list[dict[str, Any]] = []
     close_evidence_steps: list[int] = []
     latest_audit: dict[str, Any] = {}
 
@@ -1479,6 +1989,20 @@ def action_history_summary(records: list[dict[str, Any]], limit: int = PROMPT_ME
         audit = record.get("actor_grounding_audit")
         if isinstance(audit, dict) and audit:
             latest_audit = compact_prompt_value(audit)
+        completion_check = record.get("actor_completion_check")
+        if isinstance(completion_check, dict) and completion_check:
+            recent_completion_checks.append(
+                compact_prompt_value(
+                    {
+                        "step": step,
+                        "current_phase": completion_check.get("current_phase"),
+                        "done_condition": completion_check.get("done_condition"),
+                        "latest_evidence": completion_check.get("latest_evidence"),
+                        "phase_done": completion_check.get("phase_done"),
+                        "next_phase_or_action": completion_check.get("next_phase_or_action"),
+                    }
+                )
+            )
         if _record_has_close_arrival_evidence(record) and step is not None:
             close_evidence_steps.append(step)
         tool_result = record.get("tool_result")
@@ -1502,6 +2026,8 @@ def action_history_summary(records: list[dict[str, Any]], limit: int = PROMPT_ME
             summary["recent_turn_oscillation"] = turn_oscillation
     if latest_audit:
         summary["latest_grounding_audit"] = latest_audit
+    if recent_completion_checks:
+        summary["recent_completion_checks"] = recent_completion_checks[-4:]
     if close_evidence_steps:
         summary["close_or_foreground_evidence_steps"] = close_evidence_steps[-4:]
     if visual_servo_attempts:
@@ -1546,6 +2072,7 @@ def _record_step(record: dict[str, Any]) -> int | None:
 
 def _record_has_close_arrival_evidence(record: dict[str, Any]) -> bool:
     evidence_payload = {
+        "actor_completion_check": record.get("actor_completion_check"),
         "actor_memory_update": record.get("actor_memory_update"),
         "saved_frames": record.get("saved_frames"),
     }
@@ -1597,9 +2124,15 @@ def compact_prompt_record(record: dict[str, Any]) -> dict[str, Any]:
         cleaned["executed_action"] = executed_action
     if actor_action and actor_action != executed_action:
         cleaned["actor_action"] = actor_action
+    actor_decision_summary = record.get("actor_decision_summary")
+    if isinstance(actor_decision_summary, str) and actor_decision_summary.strip():
+        cleaned["actor_decision_summary"] = actor_decision_summary[:PROMPT_TEXT_LIMIT]
     actor_grounding_audit = record.get("actor_grounding_audit")
     if isinstance(actor_grounding_audit, dict) and actor_grounding_audit:
         cleaned["actor_grounding_audit"] = compact_prompt_value(actor_grounding_audit)
+    actor_completion_check = record.get("actor_completion_check")
+    if isinstance(actor_completion_check, dict) and actor_completion_check:
+        cleaned["actor_completion_check"] = compact_prompt_value(actor_completion_check)
     memory_update = record.get("actor_memory_update")
     if isinstance(memory_update, dict):
         cleaned["actor_memory_update"] = compact_prompt_value(memory_update)
@@ -1714,6 +2247,30 @@ def motion_result_summary(result: Any) -> dict[str, Any]:
     return {"result": str(result)}
 
 
+def annotate_tool_execution_result(result: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        return result
+    annotated = dict(result)
+    for key, value in context.items():
+        if value is not None:
+            annotated.setdefault(key, value)
+    first_seq, last_seq = _motion_frame_seq_bounds(annotated)
+    if first_seq is not None:
+        annotated.setdefault("first_motion_frame_seq", first_seq)
+    if last_seq is not None:
+        annotated.setdefault("last_motion_frame_seq", last_seq)
+    actor_seq = _int_or_none(annotated.get("actor_frame_seq"))
+    preflight_seq = _int_or_none(annotated.get("tool_preflight_frame_seq"))
+    status_seq = _int_or_none(annotated.get("status_frame_seq"))
+    if actor_seq is not None and first_seq is not None:
+        annotated.setdefault("motion_frame_seq_delta_from_actor", first_seq - actor_seq)
+    if preflight_seq is not None and first_seq is not None:
+        annotated.setdefault("motion_frame_seq_delta_from_preflight", first_seq - preflight_seq)
+    if actor_seq is not None and status_seq is not None:
+        annotated.setdefault("status_frame_seq_delta_from_actor", status_seq - actor_seq)
+    return annotated
+
+
 def parse_prompt_action(payload: Any) -> HarnessAction:
     if not isinstance(payload, dict):
         return HarnessAction("wait", {"duration_s": 0.2}, "missing action")
@@ -1782,7 +2339,7 @@ def _stale_drive_sequence(records: list[Any]) -> bool:
         if not isinstance(record, dict):
             return False
         action = _memory_action(record)
-        if action.tool != "drive_straight":
+        if action.tool not in {"drive_straight", "reverse"}:
             return False
         actions.append(action)
         observation = record.get("observation", {})
@@ -1791,6 +2348,36 @@ def _stale_drive_sequence(records: list[Any]) -> bool:
         brightness.append(float(observation["brightness_center"]))
     del actions
     return max(brightness) - min(brightness) < 0.015
+
+
+def _motion_frame_seq_bounds(result: dict[str, Any]) -> tuple[int | None, int | None]:
+    frame_seqs = result.get("frame_seqs")
+    if isinstance(frame_seqs, list):
+        parsed = [_int_or_none(value) for value in frame_seqs]
+        seqs = [seq for seq in parsed if seq is not None]
+        if seqs:
+            return min(seqs), max(seqs)
+    paths = result.get("motion_frame_paths")
+    if isinstance(paths, list):
+        parsed = [_frame_seq_from_path(path) for path in paths]
+        seqs = [seq for seq in parsed if seq is not None]
+        if seqs:
+            return min(seqs), max(seqs)
+    return None, None
+
+
+def _frame_seq_from_path(path: Any) -> int | None:
+    match = re.search(r"_seq(\d+)(?:\D|$)", str(path))
+    if match is None:
+        return None
+    return _int_or_none(match.group(1))
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _observation_image_paths(observation: dict[str, Any]) -> list[Path]:
@@ -1936,6 +2523,37 @@ def _model_facing_path(path: Path, *, root: Path) -> str:
         return path.name
 
 
+def _event_image_paths(paths: list[Path], *, root: Path) -> list[str]:
+    return [_model_facing_path(path, root=root) for path in paths]
+
+
+def _truncate_text(value: Any, *, max_chars: int = 2400) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 20].rstrip() + "\n... [truncated]"
+
+
+def _runner_trace_metadata(runner: Any) -> dict[str, Any]:
+    metadata = getattr(runner, "last_response_metadata", None)
+    if not isinstance(metadata, dict):
+        return {}
+    return {key: value for key, value in metadata.items() if value is not None and value != ""}
+
+
+def _actor_thought(output: str) -> str:
+    try:
+        parsed = parse_json_object(output)
+    except Exception:
+        return ""
+    if not isinstance(parsed, dict):
+        return ""
+    thought = parsed.get("thought")
+    return str(thought) if thought is not None else ""
+
+
 def _safe_artifact_id(value: str) -> str:
     text = re.sub(r"[^A-Za-z0-9_.-]+", "_", value.strip())
     text = text.strip("._-")
@@ -1996,3 +2614,9 @@ def _read_jsonl_tail(path: Path, limit: int) -> list[dict[str, Any]]:
         if isinstance(parsed, dict):
             records.append(parsed)
     return records
+
+
+def _jsonl_record_count(path: Path) -> int:
+    if not path.exists():
+        return 0
+    return sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip())

@@ -2,6 +2,8 @@
 .venv/
 captures/
 runs/
+scratch/
+sim/scratch/
 __pycache__/
 .vscode/
 .vscode/.browse.c_cpp.db*

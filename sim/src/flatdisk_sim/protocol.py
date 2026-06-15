@@ -23,6 +23,9 @@ DEFAULT_CONNECT = ""
 
 VIDEO_FORMAT_JPEG = 1
 IMU_REPORT_FLAGS_ROTATION_VECTOR = 1 << 0
+IMU_REPORT_FLAGS_ACCELEROMETER = 1 << 1
+IMU_REPORT_FLAGS_GYRO = 1 << 2
+IMU_REPORT_FLAGS_LINEAR_ACCEL = 1 << 3
 
 
 def build_config(mode: str = "peer", listen: str = DEFAULT_LISTEN, connect: str = DEFAULT_CONNECT) -> zenoh.Config:
@@ -105,7 +108,7 @@ def pack_imu(
         1,
         3,
         3,
-        IMU_REPORT_FLAGS_ROTATION_VECTOR,
+        IMU_REPORT_FLAGS_ROTATION_VECTOR | IMU_REPORT_FLAGS_ACCELEROMETER | IMU_REPORT_FLAGS_GYRO | IMU_REPORT_FLAGS_LINEAR_ACCEL,
         int(seq) & 0xFFFFFFFF,
         int(esp_us) & 0xFFFFFFFFFFFFFFFF,
         *values,

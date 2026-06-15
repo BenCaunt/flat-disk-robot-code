@@ -25,9 +25,9 @@ For serial-only BNO085 debugging, use the separate environment:
 ~/.platformio/penv/bin/pio device monitor --port /dev/cu.usbmodem2101 --baud 115200
 ```
 
-The debug firmware does not start the `XIAO-CAM` access point or web server. It connects only as a Wi-Fi station using `include/secrets.h`, then accepts serial commands. The most useful IMU command is `direct`, which resets the BNO085, drains the SHTP advertisement packet, enables rotation-vector and accelerometer reports, then streams decoded packets. Other commands include `help`, `pins`, `scan`, `raw`, `dump`, `prod`, `getfeat`, `init`, `softreset`, and `reset`.
+The debug firmware does not start the `XIAO-CAM` access point or web server. It connects only as a Wi-Fi station using `include/secrets.h`, then accepts serial commands. The most useful IMU command is `direct`, which resets the BNO085, drains the SHTP advertisement packet, enables rotation-vector, accelerometer, gyro, and linear-acceleration reports, then streams decoded packets. Other commands include `help`, `pins`, `scan`, `raw`, `dump`, `prod`, `getfeat`, `init`, `softreset`, and `reset`.
 
-For the Zenoh streaming prototype, copy `include/local_zenoh.example.h` to `include/local_zenoh.h`, set the laptop IP in `ZENOH_CONNECT`, then upload:
+For the Zenoh streaming prototype, copy `include/secrets.example.h` to `include/secrets.h`, copy `include/local_zenoh.example.h` to `include/local_zenoh.h`, set the laptop IP in `ZENOH_CONNECT`, then upload:
 
 ```sh
 ~/.platformio/penv/bin/pio run -e zenoh_stream -t upload --upload-port /dev/cu.usbmodem2101
@@ -87,6 +87,95 @@ For a small desktop motor-control GUI with live camera preview:
 ```sh
 .venv/bin/python scripts/motor_gui.py
 ```
+
+## Visible Object Drive
+
+`scripts/object_drive_zenoh.py` is the inner phrase-grounded visual-servo tool
+used by the hardware LLM harness. Test it directly before a full outer-loop run.
+
+Dry run with Florence detections and Rerun logging, but no motor commands:
+
+```sh
+cd sim
+uv run --extra harness python ../scripts/object_drive_zenoh.py \
+  --prompt "chair" \
+  --duration 6 \
+  --forward-power 18 \
+  --rerun \
+  --rerun-save
+```
+
+Armed visible-object drive:
+
+```sh
+cd sim
+uv run --extra harness python ../scripts/object_drive_zenoh.py \
+  --prompt "chair" \
+  --duration 6 \
+  --forward-power 18 \
+  --arm \
+  --rerun \
+  --rerun-save
+```
+
+## Hardware LLM Harness
+
+`flatdisk-sim-run-hardware-harness` runs the Qwen/Codex outer loop directly
+against the physical robot over Zenoh. It reuses the same harness session and
+bounded tools as the THOR research eval, but it does not launch THOR and does
+not use hidden evaluator state. The policy sees only the live robot camera
+frame, IMU yaw, bounded tool results, motion strips, and harness memory.
+
+The command is conservative by default: motor-capable tools are blocked unless
+`--arm` is present.
+
+Install the harness-side local dependencies:
+
+```sh
+cd sim
+uv sync --extra harness
+```
+
+Preflight one camera/IMU observation without asking the model to act:
+
+```sh
+uv run --extra harness flatdisk-sim-run-hardware-harness \
+  --goal "go to the chair" \
+  --preflight-only
+```
+
+Run the Qwen outer loop while still blocking motor commands. Point
+`--qwen-endpoint` at the OpenAI-compatible Qwen server you are using:
+
+```sh
+uv run --extra harness flatdisk-sim-run-hardware-harness \
+  --goal "go to the chair" \
+  --qwen-endpoint http://127.0.0.1:8000/v1/chat/completions \
+  --qwen-model Qwen/Qwen3-VL-8B-Instruct \
+  --max-steps 3 \
+  --rerun
+```
+
+After the prompt, detector overlays, and proposed actions look sane, arm the
+bounded tool executor:
+
+```sh
+uv run --extra harness flatdisk-sim-run-hardware-harness \
+  --goal "go to the chair" \
+  --qwen-endpoint http://127.0.0.1:8000/v1/chat/completions \
+  --qwen-model Qwen/Qwen3-VL-8B-Instruct \
+  --object-drive-detector florence-mlx \
+  --turn-heading-kp 24 \
+  --min-turn-percent 8 \
+  --max-steps 4 \
+  --arm \
+  --rerun
+```
+
+Artifacts are written under `sim/scratch/hardware_llm_harness/<timestamp>/`.
+Inspect `hardware_harness_summary.json`, `hardware_harness_report.md`,
+`policy/memory.jsonl`, `policy/prompts/`, saved camera frames, motion strips,
+and optional `policy/hardware_harness.rrd`.
 
 ## ACT Training
 
@@ -283,6 +372,6 @@ The IMU is configured for a BNO085/GY-BNO080-BNO085 module over I2C using a dire
 - RST: D8 / GPIO7
 - I2C clock: 400 kHz after initialization
 - Address: `0x4B`
-- Reports enabled by the normal web firmware: rotation vector and accelerometer
+- Reports enabled by the normal web firmware: rotation vector, accelerometer, gyro, and linear acceleration
 
 Connect IMU `VCC` to 3V3 unless your exact breakout explicitly requires 5V. Connect all grounds together. Leave `PS0` and `PS1` at the breakout's default/floating state for I2C on this module; tying both low stopped I2C ACKs during bring-up.

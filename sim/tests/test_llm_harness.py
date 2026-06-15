@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import threading
 import urllib.error
 
 import pytest
@@ -20,6 +21,7 @@ from flatdisk_sim.llm_harness import (
     action_history_summary,
     build_actor_prompt,
     build_critic_prompt,
+    goal_phase_hints,
     parse_critic_decision,
     parse_actor_action,
     parse_actor_side_effects,
@@ -28,6 +30,7 @@ from flatdisk_sim.llm_harness import (
     prompt_memory_tail,
     sanitize_memory,
     validate_harness_action,
+    annotate_tool_execution_result,
 )
 from fakes import FakeHarnessTools
 
@@ -48,6 +51,29 @@ class _AlwaysApproveCritic:
     def run(self, prompt: str, *, role: str, image_paths=None) -> str:  # noqa: ANN001
         del prompt, role, image_paths
         return json.dumps({"verdict": "approve", "reason": "model approved repeated turn", "replacement_action": None})
+
+
+class _BlockingActor:
+    def __init__(self, action: HarnessAction) -> None:
+        self.action = action
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def run(self, prompt: str, *, role: str, image_paths=None) -> str:  # noqa: ANN001
+        del prompt, role, image_paths
+        self.started.set()
+        assert self.release.wait(timeout=3.0)
+        return json.dumps({"thought": self.action.thought, "action": {"tool": self.action.tool, "args": self.action.args}})
+
+
+class _RecordingDriveTools(FakeHarnessTools):
+    def __init__(self, **kwargs) -> None:  # noqa: ANN003
+        super().__init__(**kwargs)
+        self.drive_calls: list[tuple[float, float]] = []
+
+    def drive_straight(self, power_percent: float, duration_s: float):  # noqa: ANN201
+        self.drive_calls.append((float(power_percent), float(duration_s)))
+        return super().drive_straight(power_percent, duration_s)
 
 
 class _MotionAwareActor:
@@ -271,8 +297,27 @@ def test_actor_prompt_declares_camera_image_authoritative_and_strips_legacy_dete
     assert "ready_for_visual_servo=true as detector-box existence only" in prompt
     assert "grounding_geometry_warning" in prompt
     assert "previous_check_box_matches_intended_object" in prompt
+    assert "completion_check.done_condition" in prompt
+    assert "stop tool ends the whole harness run" in prompt
+    assert "motion tools already stop their motors" in prompt
+    assert "never put the prompt string directly in action.args" in prompt
+    assert "floor/carpet dominates the frame" in prompt
+    assert "phase_done=false" in prompt
+    assert '"completion_check"' in prompt
     assert "detections" not in prompt
     assert "toilet" not in prompt
+
+
+def test_goal_phase_hints_flag_intermediate_stop_before_turn() -> None:
+    hints = goal_phase_hints("drive to the chair, stop, then turn around 180 degrees")
+
+    assert hints["compound_goal"] is True
+    assert hints["raw_phases"] == ["drive to the chair, stop,", "turn around 180 degrees"]
+    assert hints["normalized_phases"] == ["drive to the chair", "turn around 180 degrees"]
+    assert "stop ends the whole harness" in hints["stop_tool_note"]
+    assert "before another requested motion phase" in hints["intermediate_stop_warning"]
+    assert "chair or seat is close" in hints["chair_approach_done_cues"]
+    assert "turn_by_angle around 180 degrees" in hints["turn_phase_note"]
 
 
 def test_stop_tool_contract_is_model_observed_completion_assertion() -> None:
@@ -435,6 +480,13 @@ def test_action_history_summary_surfaces_audit_conflict_and_arrival_stop_cue() -
             "executed_action": {"tool": "visual_servo_object", "args": {"prompt": "goal object"}},
             "actor_memory_update": {"observation_note": "goal object is very close in the foreground"},
             "saved_frames": [{"note": "close foreground evidence"}],
+            "actor_completion_check": {
+                "current_phase": "approach chair",
+                "done_condition": "chair is close and foreground",
+                "latest_evidence": "chair is very close in the foreground",
+                "phase_done": True,
+                "next_phase_or_action": "turn around 180 degrees",
+            },
             "tool_result": {
                 "moved": True,
                 "servo_status": "moved",
@@ -468,6 +520,8 @@ def test_action_history_summary_surfaces_audit_conflict_and_arrival_stop_cue() -
     assert summary["same_prompt_repeat_is_contradicted_by_prior_audit"]["prompt"] == "goal object"
     assert summary["close_no_detection_requires_latest_visual_confirmation"]["prompt"] == "goal object"
     assert summary["latest_grounding_audit"]["next_prompt_should_change"] is True
+    assert summary["recent_completion_checks"][0]["phase_done"] is True
+    assert summary["recent_completion_checks"][0]["next_phase_or_action"] == "turn around 180 degrees"
 
 
 def test_action_history_summary_allows_sparse_moved_servo_without_hard_repeat_block() -> None:
@@ -516,6 +570,153 @@ def test_actor_action_parser_accepts_tool_schema_and_clamps() -> None:
 
     assert action.tool == "drive_straight"
     assert action.args == {"power_percent": 24.0, "duration_s": 0.9}
+
+
+def test_actor_action_parser_accepts_reverse_tool() -> None:
+    action = parse_actor_action(
+        json.dumps(
+            {
+                "thought": "back up before turning",
+                "action": {"tool": "reverse", "args": {"power_percent": -99, "duration_s": 12}},
+            }
+        )
+    )
+
+    assert action.tool == "reverse"
+    assert action.args == {"power_percent": 24.0, "duration_s": 1.0}
+
+
+def test_actor_action_parser_recovers_visual_servo_string_args() -> None:
+    action = parse_actor_action(
+        json.dumps(
+            {
+                "thought": "servo toward visible chair",
+                "action": {"tool": "visual_servo_object", "args": "the chair"},
+            }
+        )
+    )
+
+    assert action.tool == "visual_servo_object"
+    assert action.args == {"prompt": "the chair", "duration_s": 2.0, "forward_power": 18.0}
+
+
+def test_turn_by_angle_allows_normalized_half_turn() -> None:
+    action = validate_harness_action(HarnessAction("turn_by_angle", {"degrees": 180, "power_percent": 99}, "turn around"))
+
+    assert action.tool == "turn_by_angle"
+    assert action.args == {"degrees": 180.0, "power_percent": 14.0}
+
+
+def test_session_executes_reverse_as_negative_drive(tmp_path) -> None:
+    actor = _SequenceActor([HarnessAction("reverse", {"power_percent": 12.0, "duration_s": 0.5}, "back up")])
+    tools = _RecordingDriveTools(run_dir=tmp_path, environment="living_room")
+    session = HarnessSession(
+        config=HarnessConfig(run_dir=tmp_path, max_steps=1),
+        tools=tools,
+        actor=actor,
+        critic=_AlwaysApproveCritic(),
+    )
+
+    session.start_goal("Reverse for one second.")
+    record = session.run_auto_step()
+    session.close()
+
+    assert record is not None
+    assert tools.drive_calls == [(-12.0, 0.5)]
+    assert record["executed_action"]["tool"] == "reverse"
+    assert record["tool_result"]["action"] == "reverse"
+    assert record["tool_result"]["power_percent"] == -12.0
+
+
+def test_session_records_max_steps_completion_reason(tmp_path) -> None:
+    actor = _SequenceActor([HarnessAction("wait", {"duration_s": 0.1}, "bounded wait")])
+    session = HarnessSession(
+        config=HarnessConfig(run_dir=tmp_path, max_steps=1),
+        tools=FakeHarnessTools(run_dir=tmp_path, environment="living_room"),
+        actor=actor,
+        critic=_AlwaysApproveCritic(),
+    )
+
+    session.start_goal("Wait once.")
+    record = session.run_auto_step()
+    status = session.status()
+    events = session.read_events_tail(20)
+    session.close()
+
+    assert record is not None
+    assert status["mode"] == "complete"
+    assert status["completion_reason"] == "max_steps"
+    assert any(event["event"] == "run_complete" and event["reason"] == "max_steps" for event in events)
+
+
+def test_start_goal_resets_model_memory_by_default(tmp_path) -> None:
+    session = HarnessSession(
+        config=HarnessConfig(run_dir=tmp_path, max_steps=1),
+        tools=FakeHarnessTools(run_dir=tmp_path, environment="living_room"),
+        actor=_SequenceActor([HarnessAction("wait", {"duration_s": 0.1}, "bounded wait")]),
+        critic=_AlwaysApproveCritic(),
+    )
+
+    session.append_memory({"step": 99, "tool_result": {"prompt": "stale chair context"}})
+    session.start_goal("New goal.")
+    status = session.status()
+    events = session.read_events_tail(10)
+    session.close()
+
+    assert session.read_memory_tail() == []
+    assert status["memory_record_count"] == 0
+    assert status["context_generation"] == 1
+    assert any(event["event"] == "context_reset" and event["reason"] == "new_goal" for event in events)
+
+
+def test_reset_context_clears_goal_memory_and_runner_state(tmp_path) -> None:
+    runner = DeterministicHarnessRunner()
+    session = HarnessSession(
+        config=HarnessConfig(run_dir=tmp_path, max_steps=1),
+        tools=FakeHarnessTools(run_dir=tmp_path, environment="living_room"),
+        actor=runner,
+        critic=_AlwaysApproveCritic(),
+    )
+
+    session.start_goal("Drive to the sofa.")
+    session.append_memory({"step": 0, "tool_result": {"prompt": "stale sofa context"}})
+    session.reset_context()
+    status = session.status()
+    events = session.read_events_tail(10)
+    session.close()
+
+    assert status["mode"] == "idle"
+    assert status["goal"] == ""
+    assert status["step"] == 0
+    assert status["completion_reason"] == "context_reset"
+    assert status["memory_record_count"] == 0
+    assert status["context_generation"] == 2
+    assert session.read_memory_tail() == []
+    assert any(event["event"] == "context_reset" and event["reason"] == "user_reset" for event in events)
+
+
+def test_tool_execution_diagnostics_record_frame_alignment() -> None:
+    result = {
+        "action": "visual_servo_object",
+        "motion_frame_paths": ["motion_frames/0001_visual_servo_raw/0001_seq140.jpg", "motion_frames/0001_visual_servo_raw/0002_seq145.jpg"],
+        "status_frame_seq": 145,
+    }
+    context = {
+        "actor_frame_seq": 100,
+        "actor_frame_path": "frames/0001_llm_000_seq100.jpg",
+        "tool_preflight_frame_seq": 120,
+        "tool_preflight_frame_age_s": 0.02,
+        "actor_obs_age_s_at_tool_start": 2.4,
+    }
+
+    annotated = annotate_tool_execution_result(result, context)
+
+    assert annotated["actor_frame_seq"] == 100
+    assert annotated["first_motion_frame_seq"] == 140
+    assert annotated["last_motion_frame_seq"] == 145
+    assert annotated["motion_frame_seq_delta_from_actor"] == 40
+    assert annotated["motion_frame_seq_delta_from_preflight"] == 20
+    assert annotated["status_frame_seq_delta_from_actor"] == 45
 
 
 def test_actor_action_parser_accepts_flat_action_schema() -> None:
@@ -593,6 +794,15 @@ def test_actor_side_effect_parser_sanitizes_memory_and_frame_requests() -> None:
                     "next_prompt_should_change": True,
                     "evidence": "box was on cabinet",
                 },
+                "decision_summary": "checking visible phase completion",
+                "completion_check": {
+                    "current_phase": "approach sofa",
+                    "done_condition": "sofa is close",
+                    "latest_evidence": "sofa foreground",
+                    "phase_done": False,
+                    "next_phase_or_action": "repeat with better prompt",
+                    "pose": {"x": 1},
+                },
                 "memory_update": {"belief": "sofa left", "pose": {"x": 1}},
                 "save_frames": [{"id": "sofa left", "source": "previous_motion", "frame_index": 3, "note": "best view"}],
             }
@@ -600,6 +810,9 @@ def test_actor_side_effect_parser_sanitizes_memory_and_frame_requests() -> None:
     )
 
     assert side_effects["memory_update"] == {"belief": "sofa left"}
+    assert side_effects["decision_summary"] == "checking visible phase completion"
+    assert side_effects["completion_check"]["current_phase"] == "approach sofa"
+    assert "pose" not in side_effects["completion_check"]
     assert side_effects["grounding_audit"]["next_prompt_should_change"] is True
     assert side_effects["save_frames"][0]["source"] == "previous_motion"
 
@@ -616,6 +829,64 @@ def test_actor_requested_observe_falls_back_to_wait() -> None:
 
     assert action.tool == "wait"
     assert action.args["duration_s"] == 0.2
+
+
+def test_stopped_session_skips_inflight_actor_result(tmp_path) -> None:
+    actor = _BlockingActor(HarnessAction("drive_straight", {"power_percent": 20.0, "duration_s": 0.5}, "stale drive"))
+    tools = FakeHarnessTools(run_dir=tmp_path, environment="living_room")
+    session = HarnessSession(
+        config=HarnessConfig(run_dir=tmp_path, max_steps=2),
+        tools=tools,
+        actor=actor,
+        critic=_AlwaysApproveCritic(),
+    )
+    result: dict[str, object] = {}
+
+    session.start_goal("Drive to the chair.")
+    thread = threading.Thread(target=lambda: result.setdefault("record", session.run_auto_step()))
+    thread.start()
+    assert actor.started.wait(timeout=3.0)
+    session.request_stop()
+    actor.release.set()
+    thread.join(timeout=3.0)
+    session.close()
+
+    assert not thread.is_alive()
+    assert result["record"] is None
+    assert tools.motion_seq == 0
+    assert session.read_memory_tail() == []
+    events = session.read_events_tail(20)
+    assert any(event["event"] == "actor_stale" and event["reason"] == "generation_changed" for event in events)
+    assert not any(event["event"] == "tool_start" and event.get("source") == "actor" for event in events)
+
+
+def test_replaced_goal_skips_inflight_actor_result(tmp_path) -> None:
+    actor = _BlockingActor(HarnessAction("drive_straight", {"power_percent": 20.0, "duration_s": 0.5}, "old drive"))
+    tools = FakeHarnessTools(run_dir=tmp_path, environment="living_room")
+    session = HarnessSession(
+        config=HarnessConfig(run_dir=tmp_path, max_steps=2),
+        tools=tools,
+        actor=actor,
+        critic=_AlwaysApproveCritic(),
+    )
+    result: dict[str, object] = {}
+
+    session.start_goal("Drive to the chair.")
+    thread = threading.Thread(target=lambda: result.setdefault("record", session.run_auto_step()))
+    thread.start()
+    assert actor.started.wait(timeout=3.0)
+    session.start_goal("Reverse for one second.")
+    actor.release.set()
+    thread.join(timeout=3.0)
+    session.close()
+
+    assert not thread.is_alive()
+    assert result["record"] is None
+    assert tools.motion_seq == 0
+    assert session.status()["goal"] == "Reverse for one second."
+    events = session.read_events_tail(20)
+    assert any(event["event"] == "actor_stale" and event["current_goal"] == "Reverse for one second." for event in events)
+    assert not any(event["event"] == "tool_start" and event.get("source") == "actor" for event in events)
 
 
 def test_scripted_smoke_runner_does_not_branch_on_static_object_names() -> None:
@@ -882,6 +1153,7 @@ def test_session_logs_llm_outputs_to_rerun_sink(tmp_path) -> None:
     assert actor_payload["parsed_action"]["tool"] in {
         "turn_by_angle",
         "drive_straight",
+        "reverse",
         "visual_servo_object",
         "check_object_grounding",
         "query_topomap_memory",

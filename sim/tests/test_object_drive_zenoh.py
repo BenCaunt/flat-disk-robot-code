@@ -118,6 +118,52 @@ def test_closest_prompt_prefers_lower_larger_non_oversized_box() -> None:
     assert selected.bbox_xyxy == detections[1].bbox_xyxy
 
 
+def test_target_locked_detection_prefers_original_bearing_over_higher_score() -> None:
+    original = Detection((132.0, 70.0, 188.0, 170.0), "chair", 0.65, "test")
+    wrong_same_class = Detection((36.0, 70.0, 92.0, 170.0), "chair", 0.98, "test")
+    target_yaw = target_yaw_from_bbox(
+        original.bbox_xyxy,
+        image_width=320,
+        current_yaw_rad=0.0,
+        hfov_deg=68.0,
+    )
+
+    selected = select_detection(
+        (wrong_same_class, original),
+        prompt="chair",
+        image_size=(320, 240),
+        max_area_fraction=0.75,
+        target_yaw_rad=target_yaw,
+        current_yaw_rad=0.0,
+        hfov_deg=68.0,
+        max_target_bearing_error_deg=5.0,
+    )
+
+    assert selected == original
+
+
+def test_target_locked_detection_rejects_all_off_bearing_candidates() -> None:
+    target_yaw = target_yaw_from_bbox(
+        (132.0, 70.0, 188.0, 170.0),
+        image_width=320,
+        current_yaw_rad=0.0,
+        hfov_deg=68.0,
+    )
+
+    selected = select_detection(
+        (Detection((12.0, 70.0, 62.0, 170.0), "chair", 0.98, "test"),),
+        prompt="chair",
+        image_size=(320, 240),
+        max_area_fraction=0.75,
+        target_yaw_rad=target_yaw,
+        current_yaw_rad=0.0,
+        hfov_deg=68.0,
+        max_target_bearing_error_deg=5.0,
+    )
+
+    assert selected is None
+
+
 def test_grounding_dino_prompt_removes_closest_and_negative_qualifiers() -> None:
     assert grounding_dino_prompt("closest individual chair, not the table") == "chair."
 

@@ -29,11 +29,12 @@ DEFAULT_REVERSE_YAW = True
 DEFAULT_REVERSE_CORRECTION = False
 DEFAULT_HEADING_KP = 8.0
 DEFAULT_MAX_TURN_PERCENT = 10.0
-DEFAULT_MIN_TURN_PERCENT = 2.0
-DEFAULT_HEADING_DEADBAND_DEG = 1.0
+DEFAULT_MIN_TURN_PERCENT = 1.5
+DEFAULT_HEADING_DEADBAND_DEG = 0.0
 DEFAULT_ANGLE_TOLERANCE_DEG = 3.0
 DEFAULT_SETTLE_TIME_S = 0.2
 DEFAULT_IMU_TIMEOUT_S = 0.5
+DEFAULT_FRAME_TIMEOUT_S = 0.5
 DEFAULT_SAMPLE_TIMEOUT_S = 2.0
 DEFAULT_MAX_DRIVE_S = 10.0
 DEFAULT_FRAME_COUNT = 5
@@ -196,6 +197,7 @@ class FlatDiskRobotClient:
         min_turn_percent: float = DEFAULT_MIN_TURN_PERCENT,
         heading_deadband_deg: float = DEFAULT_HEADING_DEADBAND_DEG,
         imu_timeout_s: float = DEFAULT_IMU_TIMEOUT_S,
+        frame_timeout_s: float = DEFAULT_FRAME_TIMEOUT_S,
         control_hz: float = DEFAULT_CONTROL_HZ,
         rotate_frames_180: bool = True,
     ) -> None:
@@ -210,6 +212,7 @@ class FlatDiskRobotClient:
         self.min_turn_percent = min_turn_percent
         self.heading_deadband_deg = heading_deadband_deg
         self.imu_timeout_s = imu_timeout_s
+        self.frame_timeout_s = frame_timeout_s
         self.control_hz = control_hz
         self.rotate_frames_180 = rotate_frames_180
 
@@ -258,14 +261,22 @@ class FlatDiskRobotClient:
     def get_angle(self, *, timeout_s: float = DEFAULT_SAMPLE_TIMEOUT_S) -> float:
         return self.wait_for_imu(timeout_s=timeout_s).yaw_deg
 
-    def latest_frame(self, *, timeout_s: float = DEFAULT_SAMPLE_TIMEOUT_S) -> VideoFrame:
+    def latest_frame(self, *, timeout_s: float = DEFAULT_SAMPLE_TIMEOUT_S, require_new: bool = False) -> VideoFrame:
         deadline = time.monotonic() + timeout_s
+        initial_seq: int | None = None
+        initialized = False
         while time.monotonic() <= deadline:
             self.poll()
-            if self.last_frame is not None:
-                return self.last_frame
+            if self.last_frame is not None and self._frame_age_s(self.last_frame) <= self.frame_timeout_s:
+                if not require_new:
+                    return self.last_frame
+                if not initialized:
+                    initial_seq = self.last_frame.seq
+                    initialized = True
+                elif self.last_frame.seq != initial_seq:
+                    return self.last_frame
             time.sleep(0.02)
-        raise TimeoutError(f"no camera frame within {timeout_s:.2f}s")
+        raise TimeoutError(f"no fresh camera frame within {timeout_s:.2f}s")
 
     def turn_by_angle(
         self,
@@ -302,7 +313,7 @@ class FlatDiskRobotClient:
     ) -> MotionResult:
         start = self.wait_for_imu(timeout_s=DEFAULT_SAMPLE_TIMEOUT_S)
         if frame_count > 0:
-            self.latest_frame(timeout_s=DEFAULT_SAMPLE_TIMEOUT_S)
+            self.latest_frame(timeout_s=DEFAULT_SAMPLE_TIMEOUT_S, require_new=True)
         target_rad = wrap_pi(math.radians(target_deg))
         max_turn = abs(power)
         timeout_s = timeout_s if timeout_s is not None else self._angle_timeout_s(wrap_degrees(target_deg - start.yaw_deg))
@@ -364,7 +375,7 @@ class FlatDiskRobotClient:
 
         start = self.wait_for_imu(timeout_s=DEFAULT_SAMPLE_TIMEOUT_S)
         if frame_count > 0:
-            self.latest_frame(timeout_s=DEFAULT_SAMPLE_TIMEOUT_S)
+            self.latest_frame(timeout_s=DEFAULT_SAMPLE_TIMEOUT_S, require_new=True)
         target_rad = start.yaw_rad
         timeout_s = timeout_s if timeout_s is not None else duration_s + 1.0
         recorder = MotionFrameRecorder()
@@ -528,6 +539,9 @@ class FlatDiskRobotClient:
     def _imu_age_s(self, sample: ImuSample) -> float:
         return (time.monotonic_ns() - sample.received_ns) / 1_000_000_000.0
 
+    def _frame_age_s(self, frame: VideoFrame) -> float:
+        return (time.monotonic_ns() - frame.received_ns) / 1_000_000_000.0
+
     def _control_period_s(self) -> float:
         return 1.0 / max(self.control_hz, 1.0)
 
@@ -575,9 +589,14 @@ def get_angle(*, timeout_s: float = DEFAULT_SAMPLE_TIMEOUT_S, **client_kwargs: A
         return robot.get_angle(timeout_s=timeout_s)
 
 
-def latest_frame(*, timeout_s: float = DEFAULT_SAMPLE_TIMEOUT_S, **client_kwargs: Any) -> VideoFrame:
+def latest_frame(
+    *,
+    timeout_s: float = DEFAULT_SAMPLE_TIMEOUT_S,
+    require_new: bool = False,
+    **client_kwargs: Any,
+) -> VideoFrame:
     with FlatDiskRobotClient(**client_kwargs) as robot:
-        return robot.latest_frame(timeout_s=timeout_s)
+        return robot.latest_frame(timeout_s=timeout_s, require_new=require_new)
 
 
 def turn_to_angle(

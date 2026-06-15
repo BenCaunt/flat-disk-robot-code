@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from io import BytesIO
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,7 @@ import re
 import shlex
 import subprocess
 import sys
+import threading
 import time
 from typing import Any
 
@@ -76,6 +78,11 @@ class AgentTools:
         namespace: str = DEFAULT_NAMESPACE,
         connect: str = DEFAULT_CONNECT,
         reverse_yaw: bool = True,
+        reverse_correction: bool = False,
+        heading_kp: float = 8.0,
+        max_turn_percent: float = 10.0,
+        min_turn_percent: float = 1.5,
+        control_hz: float = 20.0,
         object_drive_detector: str = "florence-mlx",
         topomap_memory_map_dir: Path | None = None,
         topomap_memory_use_clip: bool = False,
@@ -94,9 +101,32 @@ class AgentTools:
         self.grounding_checks_dir.mkdir(parents=True, exist_ok=True)
         self.topomap_memory_dir = run_dir / "topomap_memory"
         self.events_path = run_dir / "events.jsonl"
-        self.client = FlatDiskRobotClient(namespace=namespace, connect=connect, reverse_yaw=reverse_yaw)
+        self.client = FlatDiskRobotClient(
+            namespace=namespace,
+            connect=connect,
+            reverse_yaw=reverse_yaw,
+            reverse_correction=reverse_correction,
+            heading_kp=heading_kp,
+            max_turn_percent=max_turn_percent,
+            min_turn_percent=min_turn_percent,
+            control_hz=control_hz,
+        )
         self.client.open()
+        self.preview_client = FlatDiskRobotClient(
+            namespace=namespace,
+            connect=connect,
+            reverse_yaw=reverse_yaw,
+            reverse_correction=reverse_correction,
+            heading_kp=heading_kp,
+            max_turn_percent=max_turn_percent,
+            min_turn_percent=min_turn_percent,
+            control_hz=control_hz,
+        )
         self._observation_count = 0
+        self._preview_count = 0
+        self._last_preview_seq: int | None = None
+        self._last_preview_summary: dict[str, Any] | None = None
+        self._preview_lock = threading.Lock()
         self._motion_count = 0
         self._grounding_check_count = 0
         if topomap_memory_map_dir is not None:
@@ -110,6 +140,7 @@ class AgentTools:
             )
 
     def close(self) -> None:
+        self.preview_client.close()
         self.client.close()
 
     def log(self, event: str, payload: dict[str, Any]) -> None:
@@ -122,7 +153,7 @@ class AgentTools:
             handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
 
     def observe(self, *, label: str = "observe", timeout_s: float = 2.0) -> Observation:
-        frame = self.client.latest_frame(timeout_s=timeout_s)
+        frame = self.client.latest_frame(timeout_s=timeout_s, require_new=True)
         imu = self.client.wait_for_imu(timeout_s=timeout_s)
         image = frame.image(rotate_180=self.client.rotate_frames_180)
         self._observation_count += 1
@@ -132,6 +163,92 @@ class AgentTools:
         obs = Observation(path=path, yaw_deg=imu.yaw_deg, frame_seq=frame.seq, analysis=analysis)
         self.log("observe", obs.summary())
         return obs
+
+    def preview_frame(self, *, label: str = "dashboard_preview", timeout_s: float = 0.25) -> dict[str, Any]:
+        """Save the latest camera frame for dashboard display without recording a harness observation."""
+
+        with self._preview_lock:
+            frame = self._latest_preview_frame(timeout_s=timeout_s)
+            image = frame.image(rotate_180=self.preview_client.rotate_frames_180)
+            self._preview_count += 1
+            safe_label = re.sub(r"[^a-zA-Z0-9_.-]+", "_", label).strip("._") or "preview"
+            path = self.frames_dir / f"{self._preview_count:04d}_{safe_label}_seq{frame.seq}.jpg"
+            image.save(path, format="JPEG", quality=88)
+            summary = {
+                "path": str(path),
+                "frame_seq": frame.seq,
+                "width": frame.width,
+                "height": frame.height,
+                "received_age_s": round((time.monotonic_ns() - frame.received_ns) / 1_000_000_000.0, 3),
+            }
+            self._last_preview_seq = frame.seq
+            self._last_preview_summary = summary
+            return summary
+
+    def preview_frame_bytes(self, *, timeout_s: float = 0.1) -> dict[str, Any]:
+        """Return the latest dashboard camera JPEG without touching the observation/event log."""
+
+        with self._preview_lock:
+            frame = self._latest_preview_frame(timeout_s=timeout_s)
+            image = frame.image(rotate_180=self.preview_client.rotate_frames_180)
+            buffer = BytesIO()
+            image.save(buffer, format="JPEG", quality=85)
+            summary = self._preview_frame_summary(frame)
+            if self.preview_client.last_imu is not None:
+                summary.update(self._preview_imu_summary(self.preview_client.last_imu))
+            self._last_preview_seq = frame.seq
+            self._last_preview_summary = summary
+            return {"jpeg": buffer.getvalue(), **summary}
+
+    def preview_telemetry(self, *, timeout_s: float = 0.05) -> dict[str, Any]:
+        """Return latest camera/IMU metadata for the dashboard without saving a frame."""
+
+        with self._preview_lock:
+            deadline = time.monotonic() + max(timeout_s, 0.0)
+            while True:
+                self.preview_client.poll()
+                if self.preview_client.last_frame is not None or self.preview_client.last_imu is not None:
+                    break
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.005)
+            summary: dict[str, Any] = {}
+            if self.preview_client.last_frame is not None:
+                summary.update(self._preview_frame_summary(self.preview_client.last_frame))
+            if self.preview_client.last_imu is not None:
+                summary.update(self._preview_imu_summary(self.preview_client.last_imu))
+            return summary
+
+    def _latest_preview_frame(self, *, timeout_s: float) -> Any:
+        deadline = time.monotonic() + max(timeout_s, 0.0)
+        fallback = self.preview_client.last_frame
+        while True:
+            self.preview_client.poll()
+            frame = self.preview_client.last_frame
+            if frame is not None and self.preview_client._frame_age_s(frame) <= self.preview_client.frame_timeout_s:
+                fallback = frame
+                if self._last_preview_seq is None or frame.seq != self._last_preview_seq:
+                    return frame
+            if time.monotonic() >= deadline:
+                if fallback is not None and self.preview_client._frame_age_s(fallback) <= self.preview_client.frame_timeout_s:
+                    return fallback
+                raise TimeoutError(f"no camera frame within {timeout_s:.2f}s")
+            time.sleep(0.02)
+
+    def _preview_frame_summary(self, frame: Any) -> dict[str, Any]:
+        return {
+            "frame_seq": frame.seq,
+            "width": frame.width,
+            "height": frame.height,
+            "frame_received_age_s": round((time.monotonic_ns() - frame.received_ns) / 1_000_000_000.0, 3),
+        }
+
+    def _preview_imu_summary(self, imu: Any) -> dict[str, Any]:
+        return {
+            "imu_seq": imu.seq,
+            "yaw_deg": imu.yaw_deg,
+            "imu_received_age_s": round((time.monotonic_ns() - imu.received_ns) / 1_000_000_000.0, 3),
+        }
 
     def observe_sequence(self, *, label: str, count: int = 4, interval_s: float = 0.12) -> list[Observation]:
         observations: list[Observation] = []
@@ -179,8 +296,8 @@ class AgentTools:
 
         detector_name = detector or self.object_drive_detector
         self._motion_count += 1
-        overlay_dir = self.motion_frames_dir / f"{self._motion_count:04d}_visual_servo_overlays"
-        raw_dir = self.motion_frames_dir / f"{self._motion_count:04d}_visual_servo_raw"
+        overlay_dir = (self.motion_frames_dir / f"{self._motion_count:04d}_visual_servo_overlays").resolve()
+        raw_dir = (self.motion_frames_dir / f"{self._motion_count:04d}_visual_servo_raw").resolve()
         cmd = _object_drive_command(detector=detector_name) + [
             "--prompt",
             prompt,
@@ -194,6 +311,12 @@ class AgentTools:
             self.connect,
             "--detector",
             detector_name,
+            "--heading-kp",
+            f"{self.client.heading_kp:.3f}",
+            "--max-turn-percent",
+            f"{self.client.max_turn_percent:.3f}",
+            "--min-turn-percent",
+            f"{self.client.min_turn_percent:.3f}",
             "--arm",
             "--overlay-dir",
             str(overlay_dir),
@@ -481,6 +604,8 @@ def _parse_object_drive_status(stdout: str, *, returncode: int) -> dict[str, Any
         "servo_status": servo_status,
         "target_detected": target_detected,
         "ever_detected": ever_detected,
+        "status_frame_seq": _int_or_none(last.get("frame_seq")),
+        "status_frame_age_s": _float_or_none(last.get("frame_age_s")),
         "status_sample_count": len(status_records),
         "detection_status_count": detection_status_count,
         "detection_coverage_fraction": round(detection_coverage_fraction, 3),
@@ -488,6 +613,14 @@ def _parse_object_drive_status(stdout: str, *, returncode: int) -> dict[str, Any
         "moved": moved,
         "motor_commands_sent": motor_commands_sent,
         "last_command": final_command,
+        "last_heading_error_deg": _float_or_none(last.get("heading_error")),
+        "last_target_yaw_deg": _float_or_none(last.get("target_yaw")),
+        "last_turn_percent": _float_or_none(last.get("turn")),
+        "last_forward_percent": _float_or_none(last.get("forward")),
+        "last_bbox_center_x_fraction": _float_or_none(last.get("bbox_cx_frac")),
+        "last_bbox_center_y_fraction": _float_or_none(last.get("bbox_cy_frac")),
+        "last_bbox_width_fraction": _float_or_none(last.get("bbox_w_frac")),
+        "last_bbox_height_fraction": _float_or_none(last.get("bbox_h_frac")),
         "last_detection": final_detection,
         "last_detection_label": detection_label,
         "last_detection_source": detection_source,
@@ -497,6 +630,10 @@ def _parse_object_drive_status(stdout: str, *, returncode: int) -> dict[str, Any
         "prediction_count": _int_or_zero(last.get("pred")),
         "track_count": _int_or_zero(last.get("track")),
         "imu_prediction_count": _int_or_zero(last.get("imu_pred")),
+        "last_detection_count": _int_or_none(last.get("det_count")),
+        "target_lock_reject_count": _int_or_zero(last.get("lock_rej")),
+        "last_target_lock_gate_deg": _float_or_none(last.get("lock_gate")),
+        "last_target_lock_error_deg": _float_or_none(last.get("lock_err")),
         "lost_count": _int_or_zero(last.get("lost")),
         "detector_pending": _bool_or_false(last.get("pending")),
         "failure_reason": failure_reason,
@@ -580,6 +717,12 @@ def _grounding_geometry_warning(selected: dict[str, Any] | None) -> str | None:
 
 def _float_or_none(value: Any) -> float | None:
     try:
+        if isinstance(value, str):
+            value = value.strip()
+            for suffix in ("deg", "px", "s", "%"):
+                if value.endswith(suffix):
+                    value = value[: -len(suffix)].strip()
+                    break
         return float(value)
     except (TypeError, ValueError):
         return None
@@ -643,6 +786,13 @@ def _int_or_zero(value: str | None) -> int:
         return int(str(value))
     except (TypeError, ValueError):
         return 0
+
+
+def _int_or_none(value: str | None) -> int | None:
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _bool_or_false(value: str | None) -> bool:

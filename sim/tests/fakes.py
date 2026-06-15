@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 import time
 from typing import Any
@@ -57,6 +58,46 @@ class FakeHarnessTools:
         self._render_camera(path)
         analysis = analyze_image_path(path)
         return _FakeObservation(path=path, yaw_deg=self.yaw_deg, frame_seq=self.frame_seq, analysis=analysis)
+
+    def preview_frame(self, *, label: str = "dashboard_preview", timeout_s: float = 0.25) -> dict[str, Any]:
+        observation = self.observe(label=label, timeout_s=timeout_s).summary()
+        return {
+            "path": observation["path"],
+            "frame_seq": observation["frame_seq"],
+            "width": 320,
+            "height": 240,
+            "received_age_s": 0.0,
+        }
+
+    def preview_frame_bytes(self, *, timeout_s: float = 0.1) -> dict[str, Any]:
+        del timeout_s
+        self.frame_seq += 1
+        path = self.frames_dir / f"{self.frame_seq:04d}_dashboard_preview_bytes.jpg"
+        self._render_camera(path)
+        buffer = BytesIO()
+        Image.open(path).save(buffer, format="JPEG", quality=85)
+        return {
+            "jpeg": buffer.getvalue(),
+            "frame_seq": self.frame_seq,
+            "width": 320,
+            "height": 240,
+            "frame_received_age_s": 0.0,
+            "imu_seq": self.frame_seq * 5,
+            "yaw_deg": self.yaw_deg,
+            "imu_received_age_s": 0.0,
+        }
+
+    def preview_telemetry(self, *, timeout_s: float = 0.05) -> dict[str, Any]:
+        del timeout_s
+        return {
+            "frame_seq": self.frame_seq,
+            "width": 320,
+            "height": 240,
+            "frame_received_age_s": 0.0,
+            "imu_seq": self.frame_seq * 5,
+            "yaw_deg": self.yaw_deg,
+            "imu_received_age_s": 0.0,
+        }
 
     def turn_by_angle(self, degrees: float, *, power_percent: float = 10.0) -> FakeMotionResult:
         del power_percent

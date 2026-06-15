@@ -40,7 +40,8 @@ def test_parse_object_drive_status_moved_with_detection() -> None:
         "object-drive armed=True pred=3 track=0 imu_pred=0 filter=off "
         "pub=1 cmd=19.0/17.0% heading_error=4.2deg det=sofa:florence-mlx:0.82 pending=False lost=0\n"
         "object-drive armed=True pred=4 track=1 imu_pred=0 filter=off "
-        "pub=3 cmd=19.0/17.0% heading_error=4.2deg det=sofa:florence-mlx:0.82 pending=False lost=0\n",
+        "pub=3 cmd=19.0/17.0% heading_error=4.2deg det=sofa:florence-mlx:0.82 "
+        "det_count=2 lock_rej=1 lock_gate=12.0deg lock_err=3.0deg pending=False lost=0\n",
         returncode=0,
     )
 
@@ -55,6 +56,10 @@ def test_parse_object_drive_status_moved_with_detection() -> None:
     assert summary["last_detection_source"] == "florence-mlx"
     assert summary["last_detection_score"] == 0.82
     assert summary["status_sample_count"] == 3
+    assert summary["last_detection_count"] == 2
+    assert summary["target_lock_reject_count"] == 1
+    assert summary["last_target_lock_gate_deg"] == 12.0
+    assert summary["last_target_lock_error_deg"] == 3.0
     assert summary["detection_status_count"] == 2
     assert summary["detection_coverage_fraction"] == 0.667
     assert summary["grounding_stability"] == "status_track_present"

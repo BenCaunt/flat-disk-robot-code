@@ -24,6 +24,7 @@ class HarnessRerunLogger:
         self.save_path = save_path
         self.enabled = False
         self.rr: Any | None = rr_module
+        self.recordings: list[Any | None] = []
         self._injected_rr_module = rr_module is not None
         if self.rr is None:
             try:
@@ -32,10 +33,31 @@ class HarnessRerunLogger:
                 self.rr = None
                 return
             self.rr = rr
-        self.rr.init(recording_id, spawn=spawn)
-        if save_path is not None:
-            save_path.parent.mkdir(parents=True, exist_ok=True)
-            self.rr.save(str(save_path))
+        self.rr.init(recording_id, spawn=False)
+        default_recording = (
+            self.rr.get_global_data_recording()
+            if hasattr(self.rr, "get_global_data_recording")
+            else None
+        )
+        if default_recording is not None and hasattr(default_recording, "set_sinks"):
+            self.recordings.append(default_recording)
+            sinks = []
+            if spawn and hasattr(self.rr, "spawn"):
+                self.rr.spawn(recording=default_recording)
+                if hasattr(self.rr, "GrpcSink"):
+                    sinks.append(self.rr.GrpcSink())
+            if save_path is not None and hasattr(self.rr, "FileSink"):
+                save_path.parent.mkdir(parents=True, exist_ok=True)
+                sinks.append(self.rr.FileSink(save_path))
+            if sinks:
+                default_recording.set_sinks(*sinks)
+        else:
+            self.recordings.append(default_recording)
+            if save_path is not None:
+                save_path.parent.mkdir(parents=True, exist_ok=True)
+                self.rr.save(str(save_path), recording=default_recording)
+            if spawn and hasattr(self.rr, "spawn"):
+                self.rr.spawn(recording=default_recording)
         self.enabled = True
         self._send_blueprint()
         self._log_state_configuration()
@@ -45,26 +67,26 @@ class HarnessRerunLogger:
             return
         text = json.dumps(metadata, indent=2, sort_keys=True, default=str)
         if hasattr(self.rr, "TextDocument"):
-            self.rr.log("harness/metadata", self.rr.TextDocument(text), static=True)
+            self._log("harness/metadata", self.rr.TextDocument(text), static=True)
         elif hasattr(self.rr, "TextLog"):
-            self.rr.log("harness/metadata", self.rr.TextLog(text), static=True)
+            self._log("harness/metadata", self.rr.TextLog(text), static=True)
 
     def log_state(self, step: int, mode: str) -> None:
         if not self.enabled or self.rr is None:
             return
-        self.rr.set_time("step", sequence=int(step))
+        self._set_step_time(step)
         if hasattr(self.rr, "StateChange"):
-            self.rr.log("robot/mode", self.rr.StateChange(state=mode))
+            self._log("robot/mode", self.rr.StateChange(state=mode))
         else:
             self.log_event(step, "mode", {"mode": mode})
 
     def log_observation(self, step: int, observation: dict[str, Any]) -> None:
         if not self.enabled or self.rr is None:
             return
-        self.rr.set_time("step", sequence=int(step))
+        self._set_step_time(step)
         yaw = observation.get("yaw_deg")
         if yaw is not None and hasattr(self.rr, "Scalars"):
-            self.rr.log("robot/imu/yaw_deg", self.rr.Scalars(float(yaw)))
+            self._log("robot/imu/yaw_deg", self.rr.Scalars(float(yaw)))
         image_path = observation.get("path")
         if image_path and hasattr(self.rr, "Image"):
             try:
@@ -72,14 +94,14 @@ class HarnessRerunLogger:
                 from PIL import Image
 
                 image = Image.open(image_path).convert("RGB")
-                self.rr.log("robot/camera/rgb", self.rr.Image(np.asarray(image)))
+                self._log("robot/camera/rgb", self.rr.Image(np.asarray(image)))
             except Exception:  # noqa: BLE001 - image logging should not break control.
                 self.log_event(step, "image_log_error", {"path": image_path})
         self.log_event(step, "observation", observation)
 
     def log_command(self, step: int, source: str, action: dict[str, Any]) -> None:
         if self.enabled and self.rr is not None:
-            self.rr.set_time("step", sequence=int(step))
+            self._set_step_time(step)
             text = json.dumps({"source": source, "action": action}, sort_keys=True, default=str)
             self._log_text("robot/commands", text)
         self.log_event(step, "command", {"source": source, "action": action})
@@ -87,14 +109,14 @@ class HarnessRerunLogger:
     def log_llm(self, step: int, role: str, payload: dict[str, Any]) -> None:
         if not self.enabled or self.rr is None:
             return
-        self.rr.set_time("step", sequence=int(step))
+        self._set_step_time(step)
         text = json.dumps({"role": role, **payload}, sort_keys=True, default=str)
         self._log_text(f"harness/llm/{role}", text)
 
     def log_event(self, step: int, event: str, payload: dict[str, Any]) -> None:
         if not self.enabled or self.rr is None:
             return
-        self.rr.set_time("step", sequence=int(step))
+        self._set_step_time(step)
         text = json.dumps({"event": event, **payload}, sort_keys=True, default=str)
         self._log_text("harness/events", text)
 
@@ -102,15 +124,49 @@ class HarnessRerunLogger:
         if not self.enabled or self.rr is None:
             return
         if hasattr(self.rr, "TextLog"):
-            self.rr.log(entity_path, self.rr.TextLog(text), static=static)
+            self._log(entity_path, self.rr.TextLog(text), static=static)
         elif hasattr(self.rr, "TextDocument"):
-            self.rr.log(entity_path, self.rr.TextDocument(text), static=static)
+            self._log(entity_path, self.rr.TextDocument(text), static=static)
 
     def close(self) -> None:
         if not self.enabled or self.rr is None:
             return
+        for recording in self.recordings:
+            if recording is None:
+                continue
+            try:
+                recording.flush(blocking=True)
+            except TypeError:
+                try:
+                    recording.flush()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            try:
+                recording.disconnect()
+            except Exception:
+                pass
         if hasattr(self.rr, "shutdown"):
             self.rr.shutdown()
+
+    def _set_step_time(self, step: int) -> None:
+        if self.rr is None:
+            return
+        for recording in self.recordings:
+            kwargs: dict[str, Any] = {"sequence": int(step)}
+            if recording is not None:
+                kwargs["recording"] = recording
+            self.rr.set_time("step", **kwargs)
+
+    def _log(self, entity_path: str, entity: Any, *extra: Any, static: bool = False) -> None:
+        if self.rr is None:
+            return
+        for recording in self.recordings:
+            kwargs: dict[str, Any] = {"static": static}
+            if recording is not None:
+                kwargs["recording"] = recording
+            self.rr.log(entity_path, entity, *extra, **kwargs)
 
     def _send_blueprint(self) -> None:
         if not self.enabled or self.rr is None or not hasattr(self.rr, "send_blueprint"):
@@ -142,7 +198,7 @@ class HarnessRerunLogger:
     def _log_state_configuration(self) -> None:
         if not self.enabled or self.rr is None or not hasattr(self.rr, "StateConfiguration"):
             return
-        self.rr.log(
+        self._log(
             "robot/mode",
             self.rr.StateConfiguration(values=MODE_VALUES, labels=MODE_LABELS, colors=MODE_COLORS),
             static=True,

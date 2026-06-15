@@ -830,6 +830,8 @@ harness = [
     { name = "flask" },
     { name = "mlx-vlm" },
     { name = "rerun-sdk" },
+    { name = "torch" },
+    { name = "torchvision" },
 ]
 nomad = [
     { name = "diffusers" },
@@ -881,7 +883,9 @@ requires-dist = [
     { name = "pyyaml", marker = "extra == 'nomad'", specifier = ">=6.0.0" },
     { name = "rerun-sdk", marker = "extra == 'harness'", specifier = ">=0.22.0" },
     { name = "shapely", marker = "extra == 'procthor'", specifier = ">=1.8.0" },
+    { name = "torch", marker = "extra == 'harness'", specifier = ">=2.0.0" },
     { name = "torch", marker = "extra == 'nomad'", specifier = ">=2.0.0" },
+    { name = "torchvision", marker = "extra == 'harness'", specifier = ">=0.15.0" },
     { name = "torchvision", marker = "extra == 'nomad'", specifier = ">=0.15.0" },
 ]
 provides-extras = ["dev", "thor", "procthor", "vlm", "harness", "nomad"]

@@ -379,9 +379,14 @@ uv run flatdisk-sim-harness-dashboard --connect tcp/127.0.0.1:7447
 ```
 
 Open <http://127.0.0.1:8765>, enter a slash-goal style prompt, and use
-`Go`, `Pause`, `Resume`, `Stop`, or the teleop buttons. The dashboard shows the
-camera frame, actor/critic/safety-gate chat events, memory tail, and current
-mode.
+`Go`, `Pause`, `Resume`, `Stop`, or the teleop buttons. Motor-capable tools are
+blocked unless the dashboard is launched with `--arm`. The dashboard shows the
+camera frame, current mode, a live `Reasoning Trace` stream, `Tool I/O`, and
+the memory tail. `Reasoning Trace` logs actor request start, prompt/image
+attachments, Qwen/Codex output, parsed `thought`, selected action, critic
+request/decision, safety-gate changes, and model response metadata when the
+endpoint returns it. `Tool I/O` logs each selected tool call before execution
+and the returned tool result as soon as it finishes.
 
 To use live Codex calls:
 
@@ -409,6 +414,7 @@ Then point the dashboard at that endpoint:
 uv run flatdisk-sim-harness-dashboard \
   --connect tcp/127.0.0.1:7447 \
   --runner qwen \
+  --arm \
   --qwen-endpoint http://127.0.0.1:8080/v1/chat/completions
 ```
 
